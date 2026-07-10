@@ -202,10 +202,12 @@ if [ ! -d "$PROTONPATH" ]; then
     exit 1
 fi
 
-GAMEID="${GAMEID:-umu-gtasa}"
-GAME_EXE="${GAME_EXE:-gta_sa.exe}"
-PROTON_USE_WINED3D=$(toml_bool "${PROTON_USE_WINED3D:-true}")
-PROTON_DISABLE_NTSYNC=$(toml_bool "${PROTON_DISABLE_NTSYNC:-true}")
+GAMEID_DEFAULT=0; [ -z "$GAMEID" ] && { GAMEID="umu-gtasa"; GAMEID_DEFAULT=1; }
+GAME_EXE_DEFAULT=0; [ -z "$GAME_EXE" ] && { GAME_EXE="gta_sa.exe"; GAME_EXE_DEFAULT=1; }
+WINE3D_DEFAULT=0; [ -z "$PROTON_USE_WINED3D" ] && { PROTON_USE_WINED3D="true"; WINE3D_DEFAULT=1; }
+NTSYNC_DEFAULT=0; [ -z "$PROTON_DISABLE_NTSYNC" ] && { PROTON_DISABLE_NTSYNC="true"; NTSYNC_DEFAULT=1; }
+PROTON_USE_WINED3D=$(toml_bool "$PROTON_USE_WINED3D")
+PROTON_DISABLE_NTSYNC=$(toml_bool "$PROTON_DISABLE_NTSYNC")
 
 BASE_JUEGO="$GAME_ROOT/base"
 MODS_DIR="$GAME_ROOT/mods"
@@ -444,10 +446,13 @@ if [ $DRY_RUN -eq 1 ]; then
     echo "workdir:  $WORK"
     echo "merged:   $MERGED"
     echo ""
-    echo "WINEPREFIX:     $WINE_PREFIX_DIR"
-    echo "PROTONPATH:     $PROTONPATH"
-    echo "GAMEID:         $GAMEID"
-    echo "Ejecutable:     $MERGED/$GAME_EXE"
+    echo "WINEPREFIX:                $WINE_PREFIX_DIR"
+    echo "PROTONPATH:                $PROTONPATH"
+    echo "GAMEID:                    $GAMEID$([ $GAMEID_DEFAULT -eq 1 ] && echo ' (por defecto)')"
+    echo "GAME_EXE:                  $GAME_EXE$([ $GAME_EXE_DEFAULT -eq 1 ] && echo ' (por defecto)')"
+    echo "PROTON_USE_WINED3D:        $PROTON_USE_WINED3D$([ $WINE3D_DEFAULT -eq 1 ] && echo ' (por defecto)')"
+    echo "PROTON_DISABLE_NTSYNC:     $PROTON_DISABLE_NTSYNC$([ $NTSYNC_DEFAULT -eq 1 ] && echo ' (por defecto)')"
+    echo "Ejecutable:                $MERGED/$GAME_EXE"
     exit 0
 fi
 
