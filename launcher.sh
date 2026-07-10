@@ -9,13 +9,15 @@ GUARD_PID=""
 
 DRY_RUN=0
 DEBUG=0
+DISCOVER=0
 for arg in "$@"; do
     case "$arg" in
-        --dry-run) DRY_RUN=1 ;;
-        --debug)   DEBUG=1 ;;
+        --dry-run)  DRY_RUN=1 ;;
+        --debug)    DEBUG=1 ;;
+        --discover) DISCOVER=1 ;;
         *)
             echo "Error: argumento desconocido: $arg"
-            echo "Uso: $(basename "$0") [--dry-run] [--debug]"
+            echo "Uso: $(basename "$0") [--dry-run] [--debug] [--discover]"
             exit 1
             ;;
     esac
@@ -148,6 +150,53 @@ enable_recursive() {
     done
 }
 
+discover_mods() {
+    local new_count=0
+    local orphan_count=0
+
+    local disk_folders=()
+    for dir in "$MODS_DIR"/*/; do
+        [ -d "$dir" ] || continue
+        local name
+        name=$(basename "$dir")
+        [[ "$name" == .* ]] && continue
+        disk_folders+=("$name")
+    done
+
+    local db_folders
+    db_folders=$(sqlite3 "$DB_PATH" "SELECT folder_name FROM mods;" 2>/dev/null || true)
+
+    for folder in "${disk_folders[@]}"; do
+        if ! echo "$db_folders" | grep -qxF "$folder"; then
+            local display_name="${folder//_/ }"
+            local max_order
+            max_order=$(sqlite3 "$DB_PATH" "SELECT COALESCE(MAX(load_order), 0) + 10 FROM mods;")
+            sqlite3 "$DB_PATH" \
+                "INSERT INTO mods (folder_name, name, enabled, load_order) VALUES ('$folder', '$display_name', 0, $max_order);"
+            echo "    [+] Nuevo: $folder → '$display_name' (load_order=$max_order)"
+            ((new_count++))
+        fi
+    done
+
+    if [ -n "$db_folders" ]; then
+        while IFS= read -r db_folder; do
+            [ -z "$db_folder" ] && continue
+            local found=0
+            for df in "${disk_folders[@]}"; do
+                [ "$df" = "$db_folder" ] && { found=1; break; }
+            done
+            if [ $found -eq 0 ]; then
+                echo "    [!] Huérfano: '$db_folder' (carpeta eliminada del disco)"
+                ((orphan_count++))
+            fi
+        done <<< "$db_folders"
+    fi
+
+    [ $new_count -gt 0 ] && echo "[+] $new_count mod(s) nuevo(s) registrado(s)."
+    [ $orphan_count -gt 0 ] && echo "[!] $orphan_count mod(s) huérfano(s) detectado(s)."
+    return 0
+}
+
 cleanup() {
     fusermount -u "${MERGED:-}" 2>/dev/null || true
     [ -n "${GUARD_PID:-}" ] && kill "$GUARD_PID" 2>/dev/null || true
@@ -184,6 +233,7 @@ GAME_EXE=$(parse_toml "$CONFIG_FILE" "game_exe" || true)
 PROTON_USE_WINED3D=$(parse_toml "$CONFIG_FILE" "proton_use_wined3d" || true)
 PROTON_DISABLE_NTSYNC=$(parse_toml "$CONFIG_FILE" "proton_disable_ntsync" || true)
 DXVK_HUD=$(parse_toml "$CONFIG_FILE" "dxvk_hud" || true)
+AUTO_DISCOVER=$(parse_toml "$CONFIG_FILE" "auto_discover" || true)
 
 if [ -z "$GAME_ROOT" ]; then
     echo "Error: 'game_root' no definido en $CONFIG_FILE"
@@ -217,6 +267,13 @@ if [ -z "$DXVK_HUD" ]; then
     DXVK_HUD="devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls"
     DXVK_HUD_DEFAULT=1
 fi
+
+AUTO_DISCOVER_DEFAULT=0
+if [ -z "$AUTO_DISCOVER" ]; then
+    AUTO_DISCOVER="false"
+    AUTO_DISCOVER_DEFAULT=1
+fi
+AUTO_DISCOVER=$(toml_bool "$AUTO_DISCOVER")
 
 BASE_JUEGO="$GAME_ROOT/base"
 MODS_DIR="$GAME_ROOT/mods"
@@ -283,6 +340,16 @@ mkdir -p "$UPPER" "$WORK" "$MERGED"
 # ──────────────────────────────────────────────
 
 run_migrations "$DB_PATH"
+
+# ──────────────────────────────────────────────
+#  Autodescubrimiento de mods
+# ──────────────────────────────────────────────
+
+if [ $DISCOVER -eq 1 ] || [ $AUTO_DISCOVER -eq 1 ]; then
+    echo "[+] Ejecutando autodescubrimiento de mods..."
+    discover_mods
+    echo ""
+fi
 
 # ──────────────────────────────────────────────
 #  Cargar mods desde SQLite
@@ -472,6 +539,7 @@ if [ $DRY_RUN -eq 1 ]; then
     echo "GAME_EXE:                  $GAME_EXE$([ $GAME_EXE_DEFAULT -eq 1 ] && echo ' (por defecto)')"
     echo "PROTON_USE_WINED3D:        $PROTON_USE_WINED3D$([ $WINE3D_DEFAULT -eq 1 ] && echo ' (por defecto)')"
     echo "PROTON_DISABLE_NTSYNC:     $PROTON_DISABLE_NTSYNC$([ $NTSYNC_DEFAULT -eq 1 ] && echo ' (por defecto)')"
+    echo "AUTO_DISCOVER:             $AUTO_DISCOVER$([ $AUTO_DISCOVER_DEFAULT -eq 1 ] && echo ' (por defecto)')"
     if [ $DEBUG -eq 1 ]; then
         echo ""
         echo "[DEBUG] Modo debug activado:"
