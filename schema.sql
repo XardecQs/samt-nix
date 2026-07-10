@@ -3,8 +3,8 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS mods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     folder_name TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    enabled INTEGER DEFAULT 0,
+    name TEXT NOT NULL CHECK(length(name) > 0),
+    enabled INTEGER DEFAULT 0 CHECK(enabled IN (0, 1)),
     load_order INTEGER DEFAULT 0,
     CHECK(
         length(folder_name) > 0

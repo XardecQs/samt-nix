@@ -5,6 +5,8 @@ pkgs.mkShell {
     fuse-overlayfs
     sqlite
     umu-launcher
+    yj
+    jq
     gcc
     gnumake
     pkg-config

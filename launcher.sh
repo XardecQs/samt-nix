@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$ROOT_DIR/config.toml"
 DB_PATH="$ROOT_DIR/organizer.db"
 LOCKFILE="$ROOT_DIR/launcher.lock"
+GUARD_PID=""
 
 DRY_RUN=0
 for arg in "$@"; do
@@ -25,17 +26,7 @@ done
 parse_toml() {
     local file="$1"
     local key="$2"
-    local value
-    value=$(grep -m1 "^[[:space:]]*${key}[[:space:]]*=" "$file" 2>/dev/null || true)
-    [ -z "$value" ] && return 1
-    value="${value#*=}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    value="${value%"${value##*[![:space:]]}"}"
-    if [[ "$value" == \"*\" ]]; then
-        value="${value#\"}"
-        value="${value%\"}"
-    fi
-    echo "$value"
+    yj -t < "$file" 2>/dev/null | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null
 }
 
 toml_bool() {
@@ -56,12 +47,12 @@ run_migrations() {
 
     sqlite3 "$db" "PRAGMA journal_mode=WAL;" > /dev/null || true
 
-    local create_sql
-    create_sql=$(sqlite3 "$db" \
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='mod_dependencies';" \
-        2>/dev/null || true)
+    local cascade_count
+    cascade_count=$(sqlite3 "$db" \
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('mod_dependencies') WHERE \"from\" = 'mod_id' AND \"on_delete\" = 'CASCADE';" \
+        2>/dev/null || echo "0")
 
-    if [ -n "$create_sql" ] && [[ "$create_sql" != *"ON DELETE CASCADE"* ]]; then
+    if [ "$cascade_count" = "0" ]; then
         echo "[+] Migrando schema: añadiendo ON DELETE CASCADE en mod_dependencies..."
         sqlite3 "$db" <<'SQL'
             BEGIN;
@@ -108,8 +99,9 @@ detect_cycle() {
 resolve() {
     local mid="$1"
     [[ -n "${VISITED[$mid]:-}" ]] && return
-    VISITED[$mid]=1
+    [[ "${SKIP_DEP[$mid]:-0}" == "1" ]] && return
 
+    VISITED[$mid]=1
     RESOLVED+=("${MOD_FOLDER[$mid]}")
 
     local dep_ids="${DEPS[$mid]:-}"
@@ -121,17 +113,42 @@ resolve() {
             dep_list+="${MOD_ORDER[$did]:-0}|$did"$'\n'
         done
         local sorted
-        sorted=$(echo "$dep_list" | sort -t'|' -k1,1rn | cut -d'|' -f2 || true)
+        sorted=$(echo "$dep_list" | LC_ALL=C sort -t'|' -k1,1rn | cut -d'|' -f2 || true)
         for did in $sorted; do
             resolve "$did"
         done
     fi
 }
 
+start_guard() {
+    local merged="$1"
+    local ppid="$2"
+    (
+        while kill -0 "$ppid" 2>/dev/null; do
+            sleep 1
+        done
+        fusermount -u "$merged" 2>/dev/null || true
+    ) &
+    GUARD_PID=$!
+}
+
+enable_recursive() {
+    local did="$1"
+    if [ "${MOD_ENABLED[$did]:-0}" = "1" ]; then
+        return
+    fi
+    MOD_ENABLED[$did]=1
+    sqlite3 "$DB_PATH" "UPDATE mods SET enabled = 1 WHERE id = $did;"
+    echo "    [+] Activado: ${MOD_FOLDER[$did]}"
+    for sub_did in ${DEPS[$did]:-}; do
+        [ -z "$sub_did" ] && continue
+        enable_recursive "$sub_did"
+    done
+}
+
 cleanup() {
-    echo "[+] Ejecutando limpieza automática de seguridad..."
-    cd "$ROOT_DIR" 2>/dev/null || true
     fusermount -u "${MERGED:-}" 2>/dev/null || true
+    [ -n "${GUARD_PID:-}" ] && kill "$GUARD_PID" 2>/dev/null || true
     rm -f "$LOCKFILE"
 }
 
@@ -147,6 +164,7 @@ if ! flock -n "$lock_fd"; then
     echo "Error: Ya hay una instancia en ejecución (lockfile: $LOCKFILE)"
     exit 1
 fi
+echo $$ > "$LOCKFILE"
 
 # ──────────────────────────────────────────────
 #  Configuración
@@ -160,6 +178,7 @@ fi
 GAME_ROOT=$(parse_toml "$CONFIG_FILE" "game_root" || true)
 PROTONPATH=$(parse_toml "$CONFIG_FILE" "proton_path" || true)
 GAMEID=$(parse_toml "$CONFIG_FILE" "game_id" || true)
+GAME_EXE=$(parse_toml "$CONFIG_FILE" "game_exe" || true)
 PROTON_USE_WINED3D=$(parse_toml "$CONFIG_FILE" "proton_use_wined3d" || true)
 PROTON_DISABLE_NTSYNC=$(parse_toml "$CONFIG_FILE" "proton_disable_ntsync" || true)
 
@@ -184,6 +203,7 @@ if [ ! -d "$PROTONPATH" ]; then
 fi
 
 GAMEID="${GAMEID:-umu-gtasa}"
+GAME_EXE="${GAME_EXE:-gta_sa.exe}"
 PROTON_USE_WINED3D=$(toml_bool "${PROTON_USE_WINED3D:-true}")
 PROTON_DISABLE_NTSYNC=$(toml_bool "${PROTON_DISABLE_NTSYNC:-true}")
 
@@ -218,8 +238,14 @@ trap cleanup EXIT
 
 echo "=== GTA SA Mod Organizer (SQLite Mode) ==="
 
-if ! command -v fuse-overlayfs >/dev/null 2>&1 || ! command -v sqlite3 >/dev/null 2>&1; then
-    echo "Error: Asegúrate de estar dentro de 'nix-shell' con fuse-overlayfs y sqlite3 instalados."
+missing=""
+for cmd in fuse-overlayfs sqlite3 yj jq; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        missing="$missing $cmd"
+    fi
+done
+if [ -n "$missing" ]; then
+    echo "Error: Faltan dependencias:$missing. Asegúrate de estar dentro de 'nix-shell'."
     exit 1
 fi
 
@@ -242,7 +268,7 @@ run_migrations "$DB_PATH"
 
 echo "[+] Leyendo configuración de mods desde SQLite..."
 
-declare -A MOD_FOLDER MOD_ENABLED MOD_ORDER DEPS VISITED DEPENDENCY_OF CYCLE_STATE
+declare -A MOD_FOLDER MOD_ENABLED MOD_ORDER DEPS VISITED DEPENDENCY_OF CYCLE_STATE SKIP_DEP
 declare -a ENABLED_MODS
 RESOLVED=()
 HAS_ERRORS=0
@@ -281,7 +307,6 @@ done <<< "$enabled_data"
 #  Resolución de dependencias
 # ──────────────────────────────────────────────
 
-# Marcar mods que son dependencia de otro habilitado
 for mid in "${ENABLED_MODS[@]}"; do
     dep_ids="${DEPS[$mid]:-}"
     for did in $dep_ids; do
@@ -290,7 +315,6 @@ for mid in "${ENABLED_MODS[@]}"; do
     done
 done
 
-# Verificar dependencias huérfanas
 for mid in "${!DEPS[@]}"; do
     for did in ${DEPS[$mid]}; do
         [ -z "$did" ] && continue
@@ -301,7 +325,6 @@ for mid in "${!DEPS[@]}"; do
     done
 done
 
-# Detectar ciclos (DFS 3-colores)
 for mid in "${!DEPS[@]}"; do
     [[ -n "${CYCLE_STATE[$mid]:-}" ]] && continue
     detect_cycle "$mid" ""
@@ -311,7 +334,64 @@ if [ $HAS_ERRORS -ne 0 ]; then
     exit 1
 fi
 
-# Resolver orden de carga (DFS pre-order)
+# ──────────────────────────────────────────────
+#  Dependencias deshabilitadas (interactivo)
+# ──────────────────────────────────────────────
+
+declare -a DISABLED_DEPS_INFO=()
+for mid in "${ENABLED_MODS[@]}"; do
+    for did in ${DEPS[$mid]:-}; do
+        [ -z "$did" ] && continue
+        if [ "${MOD_ENABLED[$did]:-0}" = "0" ]; then
+            DISABLED_DEPS_INFO+=("$mid|$did|${MOD_FOLDER[$mid]}|${MOD_FOLDER[$did]}")
+        fi
+    done
+done
+
+if [ ${#DISABLED_DEPS_INFO[@]} -gt 0 ]; then
+    echo ""
+    echo "[!] Se detectaron dependencias deshabilitadas:"
+    for entry in "${DISABLED_DEPS_INFO[@]}"; do
+        IFS='|' read -r _ _ mod_name dep_name <<< "$entry"
+        echo "    - '$mod_name' requiere '$dep_name' (deshabilitado)"
+    done
+    echo ""
+    echo "Opciones:"
+    echo "  1) Activar dependencias (incluyendo transitivas) y continuar"
+    echo "  2) Continuar sin las dependencias (ignorar)"
+    echo "  3) Cancelar"
+    read -rp "Elige una opción [1-3]: " choice
+    case "$choice" in
+        1)
+            for entry in "${DISABLED_DEPS_INFO[@]}"; do
+                IFS='|' read -r _ did _ _ <<< "$entry"
+                enable_recursive "$did"
+            done
+            echo ""
+            ;;
+        2)
+            echo "[!] Continuando sin las dependencias. Puede que el juego falle."
+            for entry in "${DISABLED_DEPS_INFO[@]}"; do
+                IFS='|' read -r _ did _ _ <<< "$entry"
+                SKIP_DEP[$did]=1
+            done
+            echo ""
+            ;;
+        3)
+            echo "Cancelado."
+            exit 1
+            ;;
+        *)
+            echo "Opción inválida. Cancelando."
+            exit 1
+            ;;
+    esac
+fi
+
+# ──────────────────────────────────────────────
+#  Resolver orden de carga (DFS pre-order)
+# ──────────────────────────────────────────────
+
 if [ ${#ENABLED_MODS[@]} -eq 0 ]; then
     echo "[!] No hay mods activos en la base de datos. Se lanzará el juego limpio."
     LOWERDIR="$BASE_JUEGO"
@@ -321,7 +401,6 @@ else
         resolve "$mid"
     done
 
-    # Verificar carpetas de mods
     for folder in "${RESOLVED[@]}"; do
         [ -z "$folder" ] && continue
         mod_path="$MODS_DIR/$folder"
@@ -368,7 +447,7 @@ if [ $DRY_RUN -eq 1 ]; then
     echo "WINEPREFIX:     $WINE_PREFIX_DIR"
     echo "PROTONPATH:     $PROTONPATH"
     echo "GAMEID:         $GAMEID"
-    echo "Ejecutable:     $MERGED/gta_sa.exe"
+    echo "Ejecutable:     $MERGED/$GAME_EXE"
     exit 0
 fi
 
@@ -378,8 +457,15 @@ fuse-overlayfs -o lowerdir="$LOWERDIR",upperdir="$UPPER",workdir="$WORK" "$MERGE
     exit 1
 }
 
+start_guard "$MERGED" "$$"
+
+if [ ! -f "$MERGED/$GAME_EXE" ]; then
+    echo "[X] Error: $MERGED/$GAME_EXE no encontrado tras el montaje"
+    exit 1
+fi
+
 cd "$MERGED" || exit 1
 echo "[+] Lanzando juego desde merged..."
-umu-run "$MERGED/gta_sa.exe"
+umu-run "$MERGED/$GAME_EXE"
 
 echo "[+] Sesión terminada."
