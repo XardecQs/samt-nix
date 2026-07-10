@@ -8,12 +8,14 @@ LOCKFILE="$ROOT_DIR/launcher.lock"
 GUARD_PID=""
 
 DRY_RUN=0
+DEBUG=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
+        --debug)   DEBUG=1 ;;
         *)
             echo "Error: argumento desconocido: $arg"
-            echo "Uso: $(basename "$0") [--dry-run]"
+            echo "Uso: $(basename "$0") [--dry-run] [--debug]"
             exit 1
             ;;
     esac
@@ -181,6 +183,7 @@ GAMEID=$(parse_toml "$CONFIG_FILE" "game_id" || true)
 GAME_EXE=$(parse_toml "$CONFIG_FILE" "game_exe" || true)
 PROTON_USE_WINED3D=$(parse_toml "$CONFIG_FILE" "proton_use_wined3d" || true)
 PROTON_DISABLE_NTSYNC=$(parse_toml "$CONFIG_FILE" "proton_disable_ntsync" || true)
+DXVK_HUD=$(parse_toml "$CONFIG_FILE" "dxvk_hud" || true)
 
 if [ -z "$GAME_ROOT" ]; then
     echo "Error: 'game_root' no definido en $CONFIG_FILE"
@@ -209,6 +212,12 @@ NTSYNC_DEFAULT=0; [ -z "$PROTON_DISABLE_NTSYNC" ] && { PROTON_DISABLE_NTSYNC="tr
 PROTON_USE_WINED3D=$(toml_bool "$PROTON_USE_WINED3D")
 PROTON_DISABLE_NTSYNC=$(toml_bool "$PROTON_DISABLE_NTSYNC")
 
+DXVK_HUD_DEFAULT=0
+if [ -z "$DXVK_HUD" ]; then
+    DXVK_HUD="devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls"
+    DXVK_HUD_DEFAULT=1
+fi
+
 BASE_JUEGO="$GAME_ROOT/base"
 MODS_DIR="$GAME_ROOT/mods"
 WINE_PREFIX_DIR="$GAME_ROOT/pfx"
@@ -227,6 +236,17 @@ export PROTONPATH
 export GAMEID
 export PROTON_USE_WINED3D
 export PROTON_DISABLE_NTSYNC
+
+if [ $DEBUG -eq 1 ]; then
+    LOG_DIR="$GAME_ROOT/run/logs"
+    mkdir -p "$LOG_DIR"
+    export PROTON_LOG=1
+    export DXVK_LOG_LEVEL=debug
+    export DXVK_LOG_PATH="$LOG_DIR"
+    export DXVK_HUD
+    export WINEDEBUG="+loaddll"
+    echo "[D] Modo debug activado: PROTON_LOG + DXVK debug + WINEDEBUG"
+fi
 
 # ──────────────────────────────────────────────
 #  Limpieza
@@ -452,6 +472,15 @@ if [ $DRY_RUN -eq 1 ]; then
     echo "GAME_EXE:                  $GAME_EXE$([ $GAME_EXE_DEFAULT -eq 1 ] && echo ' (por defecto)')"
     echo "PROTON_USE_WINED3D:        $PROTON_USE_WINED3D$([ $WINE3D_DEFAULT -eq 1 ] && echo ' (por defecto)')"
     echo "PROTON_DISABLE_NTSYNC:     $PROTON_DISABLE_NTSYNC$([ $NTSYNC_DEFAULT -eq 1 ] && echo ' (por defecto)')"
+    if [ $DEBUG -eq 1 ]; then
+        echo ""
+        echo "[DEBUG] Modo debug activado:"
+        echo "  PROTON_LOG:              1"
+        echo "  DXVK_LOG_LEVEL:          debug"
+        echo "  DXVK_LOG_PATH:           $LOG_DIR"
+        echo "  DXVK_HUD:                $DXVK_HUD$([ $DXVK_HUD_DEFAULT -eq 1 ] && echo ' (por defecto)')"
+        echo "  WINEDEBUG:               +loaddll"
+    fi
     echo "Ejecutable:                $MERGED/$GAME_EXE"
     exit 0
 fi
