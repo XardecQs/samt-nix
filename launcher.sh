@@ -155,7 +155,10 @@ discover_mods() {
     local orphan_count=0
 
     local disk_folders=()
-    for dir in "$MODS_DIR"/*/; do
+    shopt -s nullglob
+    local dirs=("$MODS_DIR"/*/)
+    shopt -u nullglob
+    for dir in "${dirs[@]}"; do
         [ -d "$dir" ] || continue
         local name
         name=$(basename "$dir")
