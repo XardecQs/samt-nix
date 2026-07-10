@@ -26,7 +26,7 @@ done
 parse_toml() {
     local file="$1"
     local key="$2"
-    yj -t < "$file" 2>/dev/null | jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null
+    yj -t < "$file" 2>/dev/null | jq -r --arg k "$key" 'if has($k) then .[$k] else empty end' 2>/dev/null
 }
 
 toml_bool() {
