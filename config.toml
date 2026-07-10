@@ -1,0 +1,5 @@
+game_root = "/home/xardec/Juegos/Windows/GTA_SA_Limpio"
+proton_path = "/home/xardec/.steam/root/compatibilitytools.d/GE-Proton11-1"
+game_id = "umu-gtasa"
+proton_use_wined3d = true
+proton_disable_ntsync = true
