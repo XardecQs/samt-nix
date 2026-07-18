@@ -1,0 +1,5 @@
+organizer.db
+organizer.db-*
+launcher.lock
+run/
+*.log

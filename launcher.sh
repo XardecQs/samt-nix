@@ -10,14 +10,16 @@ GUARD_PID=""
 DRY_RUN=0
 DEBUG=0
 DISCOVER=0
+CLEAN=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run)  DRY_RUN=1 ;;
         --debug)    DEBUG=1 ;;
         --discover) DISCOVER=1 ;;
+        --clean)    CLEAN=1 ;;
         *)
             echo "Error: argumento desconocido: $arg"
-            echo "Uso: $(basename "$0") [--dry-run] [--debug] [--discover]"
+            echo "Uso: $(basename "$0") [--dry-run] [--debug] [--discover] [--clean]"
             exit 1
             ;;
     esac
@@ -37,7 +39,7 @@ toml_bool() {
     case "$1" in
         true)  echo 1 ;;
         false) echo 0 ;;
-        *)     echo "$1" ;;
+        *)     echo "Error: valor booleano inválido: '$1'" >&2; exit 1 ;;
     esac
 }
 
@@ -59,6 +61,7 @@ run_migrations() {
     if [ "$cascade_count" = "0" ]; then
         echo "[+] Migrando schema: añadiendo ON DELETE CASCADE en mod_dependencies..."
         sqlite3 "$db" <<'SQL'
+            PRAGMA foreign_keys = ON;
             BEGIN;
             CREATE TABLE mod_dependencies_new (
                 mod_id INTEGER NOT NULL,
@@ -75,9 +78,6 @@ run_migrations() {
 SQL
         echo "[+] Migración completada."
     fi
-
-    sqlite3 "$db" "CREATE INDEX IF NOT EXISTS idx_mod_deps_mod_id ON mod_dependencies(mod_id);" 2>/dev/null || true
-    sqlite3 "$db" "CREATE INDEX IF NOT EXISTS idx_mod_deps_dep_id ON mod_dependencies(dependency_id);" 2>/dev/null || true
 }
 
 detect_cycle() {
@@ -142,6 +142,7 @@ enable_recursive() {
         return
     fi
     MOD_ENABLED[$did]=1
+    [[ "$did" =~ ^[0-9]+$ ]] || return 1
     sqlite3 "$DB_PATH" "UPDATE mods SET enabled = 1 WHERE id = $did;"
     echo "    [+] Activado: ${MOD_FOLDER[$did]}"
     for sub_did in ${DEPS[$did]:-}; do
@@ -155,16 +156,12 @@ discover_mods() {
     local orphan_count=0
 
     local disk_folders=()
-    shopt -s nullglob
-    local dirs=("$MODS_DIR"/*/)
-    shopt -u nullglob
-    for dir in "${dirs[@]}"; do
-        [ -d "$dir" ] || continue
+    while IFS= read -r -d '' dir; do
         local name
         name=$(basename "$dir")
         [[ "$name" == .* ]] && continue
         disk_folders+=("$name")
-    done
+    done < <(find "$MODS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
 
     local db_folders
     db_folders=$(sqlite3 "$DB_PATH" "SELECT folder_name FROM mods;" 2>/dev/null || true)
@@ -172,12 +169,19 @@ discover_mods() {
     for folder in "${disk_folders[@]}"; do
         if ! echo "$db_folders" | grep -qxF "$folder"; then
             local display_name="${folder//_/ }"
+            local safe_folder
+            safe_folder=$(printf '%s' "$folder" | sed "s/'/''/g")
+            local safe_name
+            safe_name=$(printf '%s' "$display_name" | sed "s/'/''/g")
             local max_order
             max_order=$(sqlite3 "$DB_PATH" "SELECT COALESCE(MAX(load_order), 0) + 10 FROM mods;")
-            sqlite3 "$DB_PATH" \
-                "INSERT INTO mods (folder_name, name, enabled, load_order) VALUES ('$folder', '$display_name', 0, $max_order);"
-            echo "    [+] Nuevo: $folder → '$display_name' (load_order=$max_order)"
-            ((new_count++))
+            if sqlite3 "$DB_PATH" \
+                "INSERT INTO mods (folder_name, name, enabled, load_order) VALUES ('$safe_folder', '$safe_name', 0, $max_order);"; then
+                echo "    [+] Nuevo: $folder → '$display_name' (load_order=$max_order)"
+                (( ++new_count ))
+            else
+                echo "    [!] Error al insertar: $folder"
+            fi
         fi
     done
 
@@ -189,8 +193,18 @@ discover_mods() {
                 [ "$df" = "$db_folder" ] && { found=1; break; }
             done
             if [ $found -eq 0 ]; then
-                echo "    [!] Huérfano: '$db_folder' (carpeta eliminada del disco)"
-                ((orphan_count++))
+                local was_enabled
+                was_enabled=$(sqlite3 "$DB_PATH" \
+                    "SELECT enabled FROM mods WHERE folder_name = '$(printf '%s' "$db_folder" | sed "s/'/''/g")';" \
+                    2>/dev/null || echo "0")
+                if [ "$was_enabled" = "1" ]; then
+                    sqlite3 "$DB_PATH" \
+                        "UPDATE mods SET enabled = 0 WHERE folder_name = '$(printf '%s' "$db_folder" | sed "s/'/''/g")';"
+                    echo "    [!] Huérfano desactivado: '$db_folder' (carpeta eliminada del disco)"
+                else
+                    echo "    [!] Huérfano: '$db_folder' (carpeta eliminada del disco)"
+                fi
+                (( ++orphan_count ))
             fi
         done <<< "$db_folders"
     fi
@@ -200,7 +214,32 @@ discover_mods() {
     return 0
 }
 
+clean_orphans() {
+    local deleted=0
+
+    local db_folders
+    db_folders=$(sqlite3 "$DB_PATH" "SELECT folder_name FROM mods;" 2>/dev/null || true)
+    [ -z "$db_folders" ] && { echo "[+] No hay mods en la base de datos."; return 0; }
+
+    while IFS= read -r db_folder; do
+        [ -z "$db_folder" ] && continue
+        if [ ! -d "$MODS_DIR/$db_folder" ]; then
+            local safe_folder
+            safe_folder=$(printf '%s' "$db_folder" | sed "s/'/''/g")
+            sqlite3 "$DB_PATH" \
+                "DELETE FROM mods WHERE folder_name = '$safe_folder';" 2>/dev/null
+            echo "    [-] Eliminado: '$db_folder'"
+            (( ++deleted ))
+        fi
+    done <<< "$db_folders"
+
+    [ $deleted -gt 0 ] && echo "[+] $deleted mod(s) huérfano(s) eliminado(s)."
+    [ $deleted -eq 0 ] && echo "[+] No hay mods huérfanos que eliminar."
+    return 0
+}
+
 cleanup() {
+    cd "$ROOT_DIR" 2>/dev/null || cd / 2>/dev/null || true
     fusermount -u "${MERGED:-}" 2>/dev/null || true
     [ -n "${GUARD_PID:-}" ] && kill "$GUARD_PID" 2>/dev/null || true
     rm -f "$LOCKFILE"
@@ -261,7 +300,7 @@ fi
 GAMEID_DEFAULT=0; [ -z "$GAMEID" ] && { GAMEID="umu-gtasa"; GAMEID_DEFAULT=1; }
 GAME_EXE_DEFAULT=0; [ -z "$GAME_EXE" ] && { GAME_EXE="gta_sa.exe"; GAME_EXE_DEFAULT=1; }
 WINE3D_DEFAULT=0; [ -z "$PROTON_USE_WINED3D" ] && { PROTON_USE_WINED3D="true"; WINE3D_DEFAULT=1; }
-NTSYNC_DEFAULT=0; [ -z "$PROTON_DISABLE_NTSYNC" ] && { PROTON_DISABLE_NTSYNC="true"; NTSYNC_DEFAULT=1; }
+NTSYNC_DEFAULT=0; [ -z "$PROTON_DISABLE_NTSYNC" ] && { PROTON_DISABLE_NTSYNC="false"; NTSYNC_DEFAULT=1; }
 PROTON_USE_WINED3D=$(toml_bool "$PROTON_USE_WINED3D")
 PROTON_DISABLE_NTSYNC=$(toml_bool "$PROTON_DISABLE_NTSYNC")
 
@@ -348,10 +387,25 @@ run_migrations "$DB_PATH"
 #  Autodescubrimiento de mods
 # ──────────────────────────────────────────────
 
-if [ $DISCOVER -eq 1 ] || [ $AUTO_DISCOVER -eq 1 ]; then
+if [ "$DISCOVER" -eq 1 ] || [ "$AUTO_DISCOVER" -eq 1 ]; then
     echo "[+] Ejecutando autodescubrimiento de mods..."
     discover_mods
     echo ""
+fi
+
+if [ "$DISCOVER" -eq 1 ]; then
+    exit 0
+fi
+
+# ──────────────────────────────────────────────
+#  Limpieza de huérfanos
+# ──────────────────────────────────────────────
+
+if [ "$CLEAN" -eq 1 ]; then
+    echo "[+] Eliminando mods huérfanos..."
+    clean_orphans
+    echo ""
+    exit 0
 fi
 
 # ──────────────────────────────────────────────
@@ -361,7 +415,7 @@ fi
 echo "[+] Leyendo configuración de mods desde SQLite..."
 
 declare -A MOD_FOLDER MOD_ENABLED MOD_ORDER DEPS VISITED DEPENDENCY_OF CYCLE_STATE SKIP_DEP
-declare -a ENABLED_MODS
+ENABLED_MODS=()
 RESOLVED=()
 HAS_ERRORS=0
 
@@ -529,7 +583,7 @@ if [ $DRY_RUN -eq 1 ]; then
     i=1
     for capa in "${CAPAS[@]}"; do
         echo "  $i. $capa"
-        ((i++))
+        (( ++i ))
     done
     echo ""
     echo "upperdir: $UPPER"
@@ -556,13 +610,13 @@ if [ $DRY_RUN -eq 1 ]; then
     exit 0
 fi
 
+start_guard "$MERGED" "$$"
+
 echo "[+] Montando capas..."
 fuse-overlayfs -o lowerdir="$LOWERDIR",upperdir="$UPPER",workdir="$WORK" "$MERGED" || {
     echo "[X] Error al montar overlay"
     exit 1
 }
-
-start_guard "$MERGED" "$$"
 
 if [ ! -f "$MERGED/$GAME_EXE" ]; then
     echo "[X] Error: $MERGED/$GAME_EXE no encontrado tras el montaje"

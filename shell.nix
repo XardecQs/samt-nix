@@ -7,13 +7,15 @@ pkgs.mkShell {
     umu-launcher
     yj
     jq
-    gcc
-    gnumake
-    pkg-config
-    gtk3
+    sqlite-utils
+    #visidata
+    #gcc
+    #gnumake
+    #pkg-config
+    #gtk3
   ];
 
   shellHook = ''
-    echo "Listo — GTA Mod Organizer (bash + C)"
+    echo "Listo — GTA Mod Organizer"
   '';
 }

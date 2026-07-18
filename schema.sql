@@ -31,6 +31,3 @@ CREATE TABLE IF NOT EXISTS mod_dependencies (
 
 CREATE INDEX IF NOT EXISTS idx_mod_deps_mod_id ON mod_dependencies(mod_id);
 CREATE INDEX IF NOT EXISTS idx_mod_deps_dep_id ON mod_dependencies(dependency_id);
-
-INSERT OR IGNORE INTO mods (folder_name, name, enabled, load_order) 
-VALUES ('Essentials_Pack', 'GTA SA Essentials Pack', 1, 10);
