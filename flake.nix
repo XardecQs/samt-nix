@@ -51,13 +51,10 @@
             --prefix PATH : "${pkgs.yj}/bin" \
             --prefix PATH : "${pkgs.jq}/bin" \
             --prefix PATH : "${pkgs.umu-launcher}/bin" \
-            --prefix PATH : "${pkgs.util-linux}/bin" \
-            --set-default GTA_MO_CONFIG "\''${XDG_CONFIG_HOME:-$HOME/.config}/gta-mo/config.toml" \
-            --set-default GTA_MO_DB "\''${XDG_DATA_HOME:-$HOME/.local/share}/gta-mo/organizer.db"
+            --prefix PATH : "${pkgs.util-linux}/bin"
 
           makeWrapper "$out/share/gta-mod-organizer/modctl.sh" "$out/bin/gta-mo-ctl" \
-            --prefix PATH : "${pkgs.sqlite}/bin" \
-            --set-default GTA_MO_DB "\''${XDG_DATA_HOME:-$HOME/.local/share}/gta-mo/organizer.db"
+            --prefix PATH : "${pkgs.sqlite}/bin"
         '';
       };
     });
