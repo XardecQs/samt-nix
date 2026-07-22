@@ -33,6 +33,14 @@
           lockFile = ./Cargo.lock;
         };
 
+        nativeBuildInputs = with pkgs; [ makeWrapper ];
+
+        postInstall = ''
+          wrapProgram "$out/bin/gta-mo" \
+            --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
+            --prefix PATH : ${pkgs.umu-launcher}/bin
+        '';
+
         meta = {
           description = "GTA San Andreas mod organizer with fuse-overlayfs";
           mainProgram = "gta-mo";
