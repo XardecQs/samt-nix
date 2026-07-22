@@ -10,6 +10,11 @@ pub struct OverlayMount {
 
 impl OverlayMount {
     pub fn mount(lowerdir: &str, upper: &Path, work: &Path, merged: &Path) -> anyhow::Result<Self> {
+        let _ = Command::new("fusermount")
+            .arg("-u")
+            .arg(merged)
+            .status();
+
         std::fs::create_dir_all(upper)?;
         std::fs::create_dir_all(work)?;
         std::fs::create_dir_all(merged)?;
