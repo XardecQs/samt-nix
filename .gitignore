@@ -1,3 +1,7 @@
+# Rust
+/target/
+
+# Bash legacy artifacts
 organizer.db
 organizer.db-*
 launcher.lock
