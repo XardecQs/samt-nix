@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${GTA_MO_CONFIG:-$ROOT_DIR/config.toml}"
 DB_PATH="${GTA_MO_DB:-$ROOT_DIR/organizer.db}"
-LOCKFILE="$ROOT_DIR/launcher.lock"
+LOCKFILE="${XDG_RUNTIME_DIR:-/tmp}/gta-mo-launcher.lock"
 GUARD_PID=""
 
 source "$ROOT_DIR/lib/common.sh"
