@@ -2,10 +2,20 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$ROOT_DIR/config.toml"
-DB_PATH="$ROOT_DIR/organizer.db"
+CONFIG_FILE="${GTA_MO_CONFIG:-$ROOT_DIR/config.toml}"
+DB_PATH="${GTA_MO_DB:-$ROOT_DIR/organizer.db}"
 LOCKFILE="$ROOT_DIR/launcher.lock"
 GUARD_PID=""
+
+source "$ROOT_DIR/lib/common.sh"
+source "$ROOT_DIR/lib/config.sh"
+source "$ROOT_DIR/lib/db.sh"
+source "$ROOT_DIR/lib/resolver.sh"
+source "$ROOT_DIR/lib/overlay.sh"
+
+# ──────────────────────────────────────────────
+#  Argumentos
+# ──────────────────────────────────────────────
 
 DRY_RUN=0
 DEBUG=0
@@ -26,226 +36,6 @@ for arg in "$@"; do
 done
 
 # ──────────────────────────────────────────────
-#  Funciones
-# ──────────────────────────────────────────────
-
-parse_toml() {
-    local file="$1"
-    local key="$2"
-    yj -t < "$file" 2>/dev/null | jq -r --arg k "$key" 'if has($k) then .[$k] else empty end' 2>/dev/null
-}
-
-toml_bool() {
-    case "$1" in
-        true)  echo 1 ;;
-        false) echo 0 ;;
-        *)     echo "Error: valor booleano inválido: '$1'" >&2; exit 1 ;;
-    esac
-}
-
-run_migrations() {
-    local db="$1"
-
-    sqlite3 "$db" "PRAGMA foreign_keys = ON;" || {
-        echo "[X] Error: no se pudo acceder a la base de datos"
-        exit 1
-    }
-
-    sqlite3 "$db" "PRAGMA journal_mode=WAL;" > /dev/null || true
-
-    local cascade_count
-    cascade_count=$(sqlite3 "$db" \
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('mod_dependencies') WHERE \"from\" = 'mod_id' AND \"on_delete\" = 'CASCADE';" \
-        2>/dev/null || echo "0")
-
-    if [ "$cascade_count" = "0" ]; then
-        echo "[+] Migrando schema: añadiendo ON DELETE CASCADE en mod_dependencies..."
-        sqlite3 "$db" <<'SQL'
-            PRAGMA foreign_keys = ON;
-            BEGIN;
-            CREATE TABLE mod_dependencies_new (
-                mod_id INTEGER NOT NULL,
-                dependency_id INTEGER NOT NULL,
-                PRIMARY KEY (mod_id, dependency_id),
-                FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
-                FOREIGN KEY (dependency_id) REFERENCES mods(id) ON DELETE CASCADE,
-                CHECK(mod_id != dependency_id)
-            );
-            INSERT INTO mod_dependencies_new SELECT * FROM mod_dependencies;
-            DROP TABLE mod_dependencies;
-            ALTER TABLE mod_dependencies_new RENAME TO mod_dependencies;
-            COMMIT;
-SQL
-        echo "[+] Migración completada."
-    fi
-}
-
-detect_cycle() {
-    local mid="$1"
-    local path="$2"
-    local did
-
-    CYCLE_STATE[$mid]=1
-    for did in ${DEPS[$mid]:-}; do
-        [ -z "$did" ] && continue
-        if [[ "${CYCLE_STATE[$did]:-}" == "1" ]]; then
-            echo "[X] Error: ciclo de dependencias detectado: ${path}${MOD_FOLDER[$did]} -> ${MOD_FOLDER[$did]}"
-            HAS_ERRORS=1
-            return 1
-        fi
-        if [[ -z "${CYCLE_STATE[$did]:-}" ]]; then
-            detect_cycle "$did" "${path}${MOD_FOLDER[$did]} -> " || return 1
-        fi
-    done
-    CYCLE_STATE[$mid]=2
-}
-
-resolve() {
-    local mid="$1"
-    [[ -n "${VISITED[$mid]:-}" ]] && return
-    [[ "${SKIP_DEP[$mid]:-0}" == "1" ]] && return
-
-    VISITED[$mid]=1
-    RESOLVED+=("${MOD_FOLDER[$mid]}")
-
-    local dep_ids="${DEPS[$mid]:-}"
-    if [ -n "$dep_ids" ]; then
-        local dep_list=""
-        local did
-        for did in $dep_ids; do
-            [ -z "$did" ] && continue
-            dep_list+="${MOD_ORDER[$did]:-0}|$did"$'\n'
-        done
-        local sorted
-        sorted=$(echo "$dep_list" | LC_ALL=C sort -t'|' -k1,1rn | cut -d'|' -f2 || true)
-        for did in $sorted; do
-            resolve "$did"
-        done
-    fi
-}
-
-start_guard() {
-    local merged="$1"
-    local ppid="$2"
-    (
-        while kill -0 "$ppid" 2>/dev/null; do
-            sleep 1
-        done
-        fusermount -u "$merged" 2>/dev/null || true
-    ) &
-    GUARD_PID=$!
-}
-
-enable_recursive() {
-    local did="$1"
-    if [ "${MOD_ENABLED[$did]:-0}" = "1" ]; then
-        return
-    fi
-    MOD_ENABLED[$did]=1
-    [[ "$did" =~ ^[0-9]+$ ]] || return 1
-    sqlite3 "$DB_PATH" "UPDATE mods SET enabled = 1 WHERE id = $did;"
-    echo "    [+] Activado: ${MOD_FOLDER[$did]}"
-    for sub_did in ${DEPS[$did]:-}; do
-        [ -z "$sub_did" ] && continue
-        enable_recursive "$sub_did"
-    done
-}
-
-discover_mods() {
-    local new_count=0
-    local orphan_count=0
-
-    local disk_folders=()
-    while IFS= read -r -d '' dir; do
-        local name
-        name=$(basename "$dir")
-        [[ "$name" == .* ]] && continue
-        disk_folders+=("$name")
-    done < <(find "$MODS_DIR" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null || true)
-
-    local db_folders
-    db_folders=$(sqlite3 "$DB_PATH" "SELECT folder_name FROM mods;" 2>/dev/null || true)
-
-    for folder in "${disk_folders[@]}"; do
-        if ! echo "$db_folders" | grep -qxF "$folder"; then
-            local display_name="${folder//_/ }"
-            local safe_folder
-            safe_folder=$(printf '%s' "$folder" | sed "s/'/''/g")
-            local safe_name
-            safe_name=$(printf '%s' "$display_name" | sed "s/'/''/g")
-            local max_order
-            max_order=$(sqlite3 "$DB_PATH" "SELECT COALESCE(MAX(load_order), 0) + 10 FROM mods;")
-            if sqlite3 "$DB_PATH" \
-                "INSERT INTO mods (folder_name, name, enabled, load_order) VALUES ('$safe_folder', '$safe_name', 0, $max_order);"; then
-                echo "    [+] Nuevo: $folder → '$display_name' (load_order=$max_order)"
-                (( ++new_count ))
-            else
-                echo "    [!] Error al insertar: $folder"
-            fi
-        fi
-    done
-
-    if [ -n "$db_folders" ]; then
-        while IFS= read -r db_folder; do
-            [ -z "$db_folder" ] && continue
-            local found=0
-            for df in "${disk_folders[@]}"; do
-                [ "$df" = "$db_folder" ] && { found=1; break; }
-            done
-            if [ $found -eq 0 ]; then
-                local was_enabled
-                was_enabled=$(sqlite3 "$DB_PATH" \
-                    "SELECT enabled FROM mods WHERE folder_name = '$(printf '%s' "$db_folder" | sed "s/'/''/g")';" \
-                    2>/dev/null || echo "0")
-                if [ "$was_enabled" = "1" ]; then
-                    sqlite3 "$DB_PATH" \
-                        "UPDATE mods SET enabled = 0 WHERE folder_name = '$(printf '%s' "$db_folder" | sed "s/'/''/g")';"
-                    echo "    [!] Huérfano desactivado: '$db_folder' (carpeta eliminada del disco)"
-                else
-                    echo "    [!] Huérfano: '$db_folder' (carpeta eliminada del disco)"
-                fi
-                (( ++orphan_count ))
-            fi
-        done <<< "$db_folders"
-    fi
-
-    [ $new_count -gt 0 ] && echo "[+] $new_count mod(s) nuevo(s) registrado(s)."
-    [ $orphan_count -gt 0 ] && echo "[!] $orphan_count mod(s) huérfano(s) detectado(s)."
-    return 0
-}
-
-clean_orphans() {
-    local deleted=0
-
-    local db_folders
-    db_folders=$(sqlite3 "$DB_PATH" "SELECT folder_name FROM mods;" 2>/dev/null || true)
-    [ -z "$db_folders" ] && { echo "[+] No hay mods en la base de datos."; return 0; }
-
-    while IFS= read -r db_folder; do
-        [ -z "$db_folder" ] && continue
-        if [ ! -d "$MODS_DIR/$db_folder" ]; then
-            local safe_folder
-            safe_folder=$(printf '%s' "$db_folder" | sed "s/'/''/g")
-            sqlite3 "$DB_PATH" \
-                "DELETE FROM mods WHERE folder_name = '$safe_folder';" 2>/dev/null
-            echo "    [-] Eliminado: '$db_folder'"
-            (( ++deleted ))
-        fi
-    done <<< "$db_folders"
-
-    [ $deleted -gt 0 ] && echo "[+] $deleted mod(s) huérfano(s) eliminado(s)."
-    [ $deleted -eq 0 ] && echo "[+] No hay mods huérfanos que eliminar."
-    return 0
-}
-
-cleanup() {
-    cd "$ROOT_DIR" 2>/dev/null || cd / 2>/dev/null || true
-    fusermount -u "${MERGED:-}" 2>/dev/null || true
-    [ -n "${GUARD_PID:-}" ] && kill "$GUARD_PID" 2>/dev/null || true
-    rm -f "$LOCKFILE"
-}
-
-# ──────────────────────────────────────────────
 #  Lockfile (evitar ejecuciones simultáneas)
 # ──────────────────────────────────────────────
 
@@ -258,6 +48,23 @@ if ! flock -n "$lock_fd"; then
     exit 1
 fi
 echo $$ > "$LOCKFILE"
+
+# ──────────────────────────────────────────────
+#  Verificación de dependencias del sistema
+# ──────────────────────────────────────────────
+
+echo "=== GTA SA Mod Organizer (SQLite Mode) ==="
+
+missing=""
+for cmd in fuse-overlayfs sqlite3 yj jq; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        missing="$missing $cmd"
+    fi
+done
+if [ -n "$missing" ]; then
+    echo "Error: Faltan dependencias:$missing. Asegúrate de estar dentro de 'nix-shell'."
+    exit 1
+fi
 
 # ──────────────────────────────────────────────
 #  Configuración
@@ -352,23 +159,6 @@ fi
 # ──────────────────────────────────────────────
 
 trap cleanup EXIT
-
-# ──────────────────────────────────────────────
-#  Verificación de dependencias del sistema
-# ──────────────────────────────────────────────
-
-echo "=== GTA SA Mod Organizer (SQLite Mode) ==="
-
-missing=""
-for cmd in fuse-overlayfs sqlite3 yj jq; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        missing="$missing $cmd"
-    fi
-done
-if [ -n "$missing" ]; then
-    echo "Error: Faltan dependencias:$missing. Asegúrate de estar dentro de 'nix-shell'."
-    exit 1
-fi
 
 # ──────────────────────────────────────────────
 #  Preparar mountpoints

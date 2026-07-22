@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS mods (
         AND folder_name NOT LIKE '%|%'
         AND folder_name NOT LIKE '%/%'
         AND folder_name NOT LIKE '%\%'
+        AND folder_name NOT LIKE '%:%'
         AND folder_name != '.'
         AND folder_name != '..'
         AND folder_name NOT LIKE '.. %'
