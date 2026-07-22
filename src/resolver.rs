@@ -209,8 +209,9 @@ impl DepGraph {
         let mut resolved: Vec<String> = Vec::new();
 
         let dependency_of: HashSet<i64> = self
-            .deps
-            .values()
+            .enabled_ids
+            .iter()
+            .filter_map(|mid| self.deps.get(mid))
             .flatten()
             .copied()
             .collect();

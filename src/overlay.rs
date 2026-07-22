@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 pub struct OverlayMount {
     merged: PathBuf,
@@ -47,7 +49,7 @@ impl OverlayMount {
         let child = Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "while kill -0 {pid} 2>/dev/null; do sleep 1; done; fusermount -u \"{merged}\" 2>/dev/null || true"
+                "while kill -0 {pid} 2>/dev/null; do sleep 1; done; sleep 2; fusermount -u \"{merged}\" 2>/dev/null || true"
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -61,6 +63,24 @@ impl OverlayMount {
     pub fn merged_path(&self) -> &Path {
         &self.merged
     }
+
+    fn unmount_retry(merged: &Path, retries: u32, delay_ms: u64) -> bool {
+        for i in 0..retries {
+            let output = Command::new("fusermount")
+                .arg("-u")
+                .arg(merged)
+                .output();
+
+            match output {
+                Ok(o) if o.status.success() => return true,
+                _ if i < retries - 1 => {
+                    thread::sleep(Duration::from_millis(delay_ms));
+                }
+                _ => {}
+            }
+        }
+        false
+    }
 }
 
 impl Drop for OverlayMount {
@@ -68,10 +88,7 @@ impl Drop for OverlayMount {
         if let Some(ref mut child) = self.guard_child {
             let _ = child.kill();
         }
-        let _ = Command::new("fusermount")
-            .arg("-u")
-            .arg(&self.merged)
-            .status();
+        Self::unmount_retry(&self.merged, 5, 1000);
     }
 }
 
