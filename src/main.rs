@@ -269,14 +269,14 @@ fn cmd_launch(args: LaunchArgs) -> anyhow::Result<()> {
 
 fn check_system_deps() -> anyhow::Result<()> {
     let mut missing = Vec::new();
-    for cmd in &["fuse-overlayfs", "umu-run", "sqlite3"] {
+    for cmd in &["fuse-overlayfs", "umu-run"] {
         if which::which(cmd).is_err() {
             missing.push(*cmd);
         }
     }
     if !missing.is_empty() {
         anyhow::bail!(
-            "Faltan dependencias: {}. Asegurate de estar dentro de 'nix develop'.",
+            "Faltan dependencias: {}. Asegurate de tener fuse-overlayfs y umu-launcher instalados.",
             missing.join(", ")
         );
     }
