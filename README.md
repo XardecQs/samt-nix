@@ -18,7 +18,7 @@ Add the flake to your Home Manager configuration:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    gta-mo.url = "github:tusuario/gta-mod-organizer";
+    gta-mo.url = "github:XardecQs/samt-nix";
   };
 
   outputs = { nixpkgs, gta-mo, ... }: {
@@ -48,7 +48,7 @@ This generates `~/.config/gta-mo/config.toml`, installs the `gta-mo` binary, and
 
 ```nix
 {
-  inputs.gta-mo.url = "github:tusuario/gta-mod-organizer";
+  inputs.gta-mo.url = "github:XardecQs/samt-nix";
 
   outputs = { nixpkgs, gta-mo, ... }: {
     nixosConfigurations.tu-host = nixpkgs.lib.nixosSystem {
