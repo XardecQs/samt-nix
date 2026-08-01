@@ -65,6 +65,8 @@
 
         src = source;
 
+        buildAndTestSubdir = "crates/gui";
+
         cargoLock = {
           lockFile = ./Cargo.lock;
         };
