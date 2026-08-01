@@ -145,11 +145,7 @@ impl DepGraph {
             m.enabled = true;
             crate::db::log::info(format!("    [+] Activado: {}", m.folder_name));
 
-            let sub_deps: Vec<i64> = self
-                .deps
-                .get(&did)
-                .cloned()
-                .unwrap_or_default();
+            let sub_deps: Vec<i64> = self.deps.get(&did).cloned().unwrap_or_default();
             for sub in sub_deps {
                 self.enable_recursive(sub);
             }
@@ -243,13 +239,9 @@ impl DepGraph {
         if let Some(dep_ids) = self.deps.get(&mid) {
             let mut sorted_deps: Vec<(i64, i64)> = dep_ids
                 .iter()
-                .filter_map(|did| {
-                    self.mods
-                        .get(did)
-                        .map(|m| (m.load_order, *did))
-                })
+                .filter_map(|did| self.mods.get(did).map(|m| (m.load_order, *did)))
                 .collect();
-            sorted_deps.sort_by(|a, b| b.0.cmp(&a.0));
+            sorted_deps.sort_by_key(|b| std::cmp::Reverse(b.0));
 
             for (_, did) in sorted_deps {
                 self.dfs_resolve(did, visited, resolved);
@@ -264,10 +256,7 @@ impl DepGraph {
             .unwrap_or("?")
     }
 
-    pub fn sync_enabled_to_db(
-        &self,
-        conn: &rusqlite::Connection,
-    ) -> anyhow::Result<()> {
+    pub fn sync_enabled_to_db(&self, conn: &rusqlite::Connection) -> anyhow::Result<()> {
         for m in self.mods.values() {
             crate::db::set_mod_enabled(conn, m.id, m.enabled)?;
         }

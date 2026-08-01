@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -154,9 +154,7 @@ pub fn load_all_mods(conn: &Connection) -> anyhow::Result<HashMap<i64, ModEntry>
 pub fn load_dependencies(conn: &Connection) -> anyhow::Result<HashMap<i64, Vec<i64>>> {
     let mut stmt = conn.prepare("SELECT mod_id, dependency_id FROM mod_dependencies")?;
     let mut deps: HashMap<i64, Vec<i64>> = HashMap::new();
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-    })?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
 
     for row in rows {
         let (mod_id, dep_id) = row?;
@@ -192,13 +190,11 @@ pub fn add_mod(
 ) -> anyhow::Result<i64> {
     let order = match order {
         Some(o) => o,
-        None => {
-            conn.query_row(
-                "SELECT COALESCE(MAX(load_order), 0) + 10 FROM mods",
-                [],
-                |row| row.get(0),
-            )?
-        }
+        None => conn.query_row(
+            "SELECT COALESCE(MAX(load_order), 0) + 10 FROM mods",
+            [],
+            |row| row.get(0),
+        )?,
     };
 
     conn.execute(
@@ -232,10 +228,7 @@ pub fn set_mod_order(conn: &Connection, id: i64, order: i64) -> anyhow::Result<(
 }
 
 pub fn set_mod_name(conn: &Connection, id: i64, name: &str) -> anyhow::Result<()> {
-    conn.execute(
-        "UPDATE mods SET name = ?1 WHERE id = ?2",
-        params![name, id],
-    )?;
+    conn.execute("UPDATE mods SET name = ?1 WHERE id = ?2", params![name, id])?;
     Ok(())
 }
 
@@ -368,13 +361,13 @@ pub fn count_deps_for_mod(conn: &Connection, mod_id: i64) -> anyhow::Result<i64>
     Ok(count)
 }
 
-pub fn discover_mods(
-    conn: &Connection,
-    mods_dir: &Path,
-) -> anyhow::Result<(usize, usize)> {
+pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usize, usize)> {
     if !mods_dir.exists() {
         std::fs::create_dir_all(mods_dir)?;
-        log::info(format!("    [-] Directorio de mods creado: {}", mods_dir.display()));
+        log::info(format!(
+            "    [-] Directorio de mods creado: {}",
+            mods_dir.display()
+        ));
     }
 
     let mut new_count = 0usize;
@@ -445,7 +438,9 @@ pub fn discover_mods(
         log::info(format!("[+] {new_count} mod(s) nuevo(s) registrado(s)."));
     }
     if orphan_count > 0 {
-        log::warn(format!("[!] {orphan_count} mod(s) huérfano(s) detectado(s)."));
+        log::warn(format!(
+            "[!] {orphan_count} mod(s) huérfano(s) detectado(s)."
+        ));
     }
 
     Ok((new_count, orphan_count))

@@ -10,10 +10,7 @@ pub struct OverlayMount {
 
 impl OverlayMount {
     pub fn mount(lowerdir: &str, upper: &Path, work: &Path, merged: &Path) -> anyhow::Result<Self> {
-        let _ = Command::new("fusermount")
-            .arg("-u")
-            .arg(merged)
-            .status();
+        let _ = Command::new("fusermount").arg("-u").arg(merged).status();
 
         std::fs::create_dir_all(upper)?;
         std::fs::create_dir_all(work)?;
@@ -71,10 +68,7 @@ impl OverlayMount {
 
     fn unmount_retry(merged: &Path, retries: u32, delay_ms: u64) -> bool {
         for i in 0..retries {
-            let output = Command::new("fusermount")
-                .arg("-u")
-                .arg(merged)
-                .output();
+            let output = Command::new("fusermount").arg("-u").arg(merged).output();
 
             match output {
                 Ok(o) if o.status.success() => return true,
@@ -99,8 +93,5 @@ impl Drop for OverlayMount {
 
 #[allow(dead_code)]
 pub fn unmount(merged: &Path) {
-    let _ = Command::new("fusermount")
-        .arg("-u")
-        .arg(merged)
-        .status();
+    let _ = Command::new("fusermount").arg("-u").arg(merged).status();
 }

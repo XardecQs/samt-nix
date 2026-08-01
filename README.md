@@ -6,25 +6,78 @@ A Rust-based mod organizer for GTA San Andreas on Linux, using SQLite for mod tr
 
 ## Requirements
 
-- [Nix](https://nixos.org/) (with flakes enabled) or:
-  - `fuse-overlayfs`
-  - `umu-launcher`
-  - Rust toolchain (for building from source)
+- [Nix](https://nixos.org/) (with flakes enabled)
 
-## Quick start
+## Installation
+
+### Via Home Manager (recommended)
+
+Add the flake to your Home Manager configuration:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    gta-mo.url = "github:tusuario/gta-mod-organizer";
+  };
+
+  outputs = { nixpkgs, gta-mo, ... }: {
+    homeConfigurations."tu-usuario" = nixpkgs.lib.homeManagerConfiguration {
+      modules = [
+        gta-mo.homeManagerModules.default
+        {
+          programs.gta-mo = {
+            enable = true;
+            settings = {
+              game_root = "/home/user/Games/GTA_SA";
+              proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1";
+              proton_use_wined3d = false;
+              auto_discover = true;
+            };
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+This generates `~/.config/gta-mo/config.toml`, installs the `gta-mo` binary, and sets up shell completions automatically.
+
+### Via NixOS module
+
+```nix
+{
+  inputs.gta-mo.url = "github:tusuario/gta-mod-organizer";
+
+  outputs = { nixpkgs, gta-mo, ... }: {
+    nixosConfigurations.tu-host = nixpkgs.lib.nixosSystem {
+      modules = [
+        gta-mo.nixosModules.default
+        ({ ... }: {
+          nixpkgs.overlays = [ gta-mo.overlay ];
+          programs.gta-mo.enable = true;
+        })
+      ];
+    };
+  };
+}
+```
+
+This installs `gta-mo` system-wide and places a config template at `/etc/gta-mo/config.toml.example`.
+
+### Development shell
 
 ```bash
-# Enter the development shell
 nix develop
+cargo build
+```
 
-# Build and discover mods
-cargo run -- launch --discover
+### Manual
 
-# Dry-run to preview the layer stack
-cargo run -- launch --dry-run
-
-# Launch the game
-cargo run -- launch
+```bash
+nix build
+./result/bin/gta-mo --help
 ```
 
 ## Directory layout
@@ -80,6 +133,14 @@ gta-mo ctl dep rm <mod> <dependency>
 gta-mo ctl tui
 ```
 
+Shell completions are installed automatically when using the Home Manager module. To generate them manually:
+
+```bash
+gta-mo completions bash > gta-mo.bash
+gta-mo completions zsh  > _gta-mo
+gta-mo completions fish > gta-mo.fish
+```
+
 ## Options
 
 | Flag | Description |
@@ -94,13 +155,6 @@ gta-mo ctl tui
 1. Mods live as subdirectories under `mods/`
 2. `schema.sql` defines the SQLite database that tracks mods, their load order, and dependencies
 3. The binary builds a `fuse-overlayfs` layer stack from enabled mods and runs the game with `umu-launcher` (Proton)
-
-## Building with Nix
-
-```bash
-nix build
-# Binary at: result/bin/gta-mo
-```
 
 ## Legacy version
 

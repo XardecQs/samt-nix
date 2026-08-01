@@ -5,7 +5,10 @@ mod overlay;
 mod resolver;
 
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::generate;
+use clap_complete::shells::{Bash, Fish, Zsh};
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -21,6 +24,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(hide = true, about = "Generate shell completions")]
+    Completions {
+        shell: String,
+    },
     Launch(LaunchArgs),
     Ctl(CtlArgs),
 }
@@ -68,31 +75,17 @@ pub enum CtlCommand {
         order: Option<i64>,
     },
     #[command(about = "Remove a mod")]
-    Remove {
-        ident: String,
-    },
+    Remove { ident: String },
     #[command(about = "Enable a mod")]
-    Enable {
-        ident: String,
-    },
+    Enable { ident: String },
     #[command(about = "Disable a mod")]
-    Disable {
-        ident: String,
-    },
+    Disable { ident: String },
     #[command(about = "Change load order")]
-    Order {
-        ident: String,
-        new_order: i64,
-    },
+    Order { ident: String, new_order: i64 },
     #[command(about = "Rename a mod's display name")]
-    Rename {
-        ident: String,
-        new_name: String,
-    },
+    Rename { ident: String, new_name: String },
     #[command(about = "Show detailed mod info")]
-    Info {
-        ident: String,
-    },
+    Info { ident: String },
     #[command(about = "Manage dependencies")]
     Dep {
         #[command(subcommand)]
@@ -127,6 +120,34 @@ fn main() {
     }));
 
     let result = match command {
+        Command::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            let mut stdout = std::io::stdout().lock();
+            let matched = match shell.as_str() {
+                "bash" => {
+                    generate(Bash, &mut cmd, &name, &mut stdout);
+                    true
+                }
+                "zsh" => {
+                    generate(Zsh, &mut cmd, &name, &mut stdout);
+                    true
+                }
+                "fish" => {
+                    generate(Fish, &mut cmd, &name, &mut stdout);
+                    true
+                }
+                _ => false,
+            };
+            if matched {
+                stdout.flush().ok();
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "Shell no soportado: {shell}. Usa: bash, zsh, fish"
+                ))
+            }
+        }
         Command::Launch(args) => cmd_launch(args),
         Command::Ctl(args) => {
             let db_path = config::db_path();
@@ -159,8 +180,7 @@ fn cmd_launch(args: LaunchArgs) -> anyhow::Result<()> {
     validate_config_paths(&config)?;
 
     let lock_file = config::lockfile_path();
-    let lock = acquire_lock(&lock_file)
-        .context("No se pudo adquirir el lockfile")?;
+    let lock = acquire_lock(&lock_file).context("No se pudo adquirir el lockfile")?;
 
     let db_path = config::db_path();
     let conn = db::open_db(&db_path)?;
@@ -241,21 +261,14 @@ fn cmd_launch(args: LaunchArgs) -> anyhow::Result<()> {
 
     let lowerdir = build_lowerdir(&paths.mods_dir, &resolved, &paths.base_game);
 
-    let mut overlay = overlay::OverlayMount::mount(
-        &lowerdir,
-        &paths.upper,
-        &paths.work,
-        &paths.merged,
-    )?;
+    let mut overlay =
+        overlay::OverlayMount::mount(&lowerdir, &paths.upper, &paths.work, &paths.merged)?;
 
     overlay.start_guard();
 
     let game_exe = paths.merged.join(config.game_exe());
     if !game_exe.exists() {
-        anyhow::bail!(
-            "{} no encontrado tras el montaje",
-            game_exe.display()
-        );
+        anyhow::bail!("{} no encontrado tras el montaje", game_exe.display());
     }
 
     launch_game(&config, &paths, &overlay, &args)?;
@@ -291,7 +304,10 @@ fn validate_config_paths(config: &config::Config) -> anyhow::Result<()> {
 
     let proton_path = PathBuf::from(&config.proton_path);
     if !proton_path.is_dir() {
-        anyhow::bail!("proton_path no es un directorio valido: {}", config.proton_path);
+        anyhow::bail!(
+            "proton_path no es un directorio valido: {}",
+            config.proton_path
+        );
     }
 
     let paths = config::RuntimePaths::from_config(config);
@@ -316,13 +332,16 @@ fn acquire_lock(lock_path: &std::path::Path) -> anyhow::Result<std::fs::File> {
         .read(true)
         .open(lock_path)?;
 
-    fs2::FileExt::try_lock_exclusive(&file)
-        .context("Ya hay una instancia en ejecucion")?;
+    fs2::FileExt::try_lock_exclusive(&file).context("Ya hay una instancia en ejecucion")?;
 
     Ok(file)
 }
 
-fn build_lowerdir(mods_dir: &std::path::Path, resolved: &[String], base_game: &std::path::Path) -> String {
+fn build_lowerdir(
+    mods_dir: &std::path::Path,
+    resolved: &[String],
+    base_game: &std::path::Path,
+) -> String {
     let mut layers: Vec<String> = resolved
         .iter()
         .map(|f| mods_dir.join(f).display().to_string())
@@ -342,8 +361,22 @@ fn launch_game(
     std::env::set_var("WINEPREFIX", &paths.wine_prefix);
     std::env::set_var("PROTONPATH", &config.proton_path);
     std::env::set_var("GAMEID", config.game_id());
-    std::env::set_var("PROTON_USE_WINED3D", if config.proton_use_wined3d() { "1" } else { "0" });
-    std::env::set_var("PROTON_DISABLE_NTSYNC", if config.proton_disable_ntsync() { "1" } else { "0" });
+    std::env::set_var(
+        "PROTON_USE_WINED3D",
+        if config.proton_use_wined3d() {
+            "1"
+        } else {
+            "0"
+        },
+    );
+    std::env::set_var(
+        "PROTON_DISABLE_NTSYNC",
+        if config.proton_disable_ntsync() {
+            "1"
+        } else {
+            "0"
+        },
+    );
 
     if args.debug {
         std::fs::create_dir_all(&paths.log_dir)?;
@@ -381,8 +414,22 @@ fn launch_game_clean(
     std::env::set_var("WINEPREFIX", &paths.wine_prefix);
     std::env::set_var("PROTONPATH", &config.proton_path);
     std::env::set_var("GAMEID", config.game_id());
-    std::env::set_var("PROTON_USE_WINED3D", if config.proton_use_wined3d() { "1" } else { "0" });
-    std::env::set_var("PROTON_DISABLE_NTSYNC", if config.proton_disable_ntsync() { "1" } else { "0" });
+    std::env::set_var(
+        "PROTON_USE_WINED3D",
+        if config.proton_use_wined3d() {
+            "1"
+        } else {
+            "0"
+        },
+    );
+    std::env::set_var(
+        "PROTON_DISABLE_NTSYNC",
+        if config.proton_disable_ntsync() {
+            "1"
+        } else {
+            "0"
+        },
+    );
 
     if args.debug {
         std::fs::create_dir_all(&paths.log_dir)?;
@@ -442,7 +489,10 @@ fn print_dry_run(
     println!("GAMEID:                    {}", config.game_id());
     println!("GAME_EXE:                  {}", config.game_exe());
     println!("PROTON_USE_WINED3D:        {}", config.proton_use_wined3d());
-    println!("PROTON_DISABLE_NTSYNC:     {}", config.proton_disable_ntsync());
+    println!(
+        "PROTON_DISABLE_NTSYNC:     {}",
+        config.proton_disable_ntsync()
+    );
     println!("AUTO_DISCOVER:             {}", config.auto_discover());
 
     if args.debug {
@@ -454,5 +504,8 @@ fn print_dry_run(
         println!("  DXVK_HUD:                {}", config.dxvk_hud());
         println!("  WINEDEBUG:               +loaddll");
     }
-    println!("Ejecutable:                {}", paths.merged.join(config.game_exe()).display());
+    println!(
+        "Ejecutable:                {}",
+        paths.merged.join(config.game_exe()).display()
+    );
 }
