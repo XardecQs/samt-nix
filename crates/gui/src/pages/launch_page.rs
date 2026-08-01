@@ -60,22 +60,31 @@ pub fn create() -> gtk4::Box {
 
     let status_buf = status.buffer();
 
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let buf = status_buf.clone();
+
+    glib::idle_add_local(move || {
+        match rx.try_recv() {
+            Ok(msg) => buf.set_text(&msg),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return glib::ControlFlow::Break;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        glib::ControlFlow::Continue
+    });
+
     launch_btn.connect_clicked(move |_| {
         let dry = container_dry.is_active();
         let debug = container_debug.is_active();
-        let buf = status_buf.clone();
+        let tx = tx.clone();
 
-        std::thread::spawn(move || match do_launch(dry, debug) {
-            Ok(log) => {
-                glib::idle_add_once(move || {
-                    buf.set_text(&format!("{}\n✓ Completado.", log));
-                });
-            }
-            Err(e) => {
-                glib::idle_add_once(move || {
-                    buf.set_text(&format!("✗ Error: {e}"));
-                });
-            }
+        std::thread::spawn(move || {
+            let msg = match do_launch(dry, debug) {
+                Ok(log) => format!("{}\n✓ Completado.", log),
+                Err(e) => format!("✗ Error: {e}"),
+            };
+            let _ = tx.send(msg);
         });
     });
 
