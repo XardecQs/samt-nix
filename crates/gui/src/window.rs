@@ -1,5 +1,6 @@
 use gtk4::prelude::*;
 use libadwaita as adw;
+use libadwaita::prelude::*;
 use gta_mo_core::config;
 use gta_mo_core::db::log;
 
@@ -15,7 +16,7 @@ pub fn build_ui(app: &adw::Application) {
 
     let header = adw::HeaderBar::builder().build();
 
-    let content = adw::ToolbarView::builder()
+    let content_box = adw::ToolbarView::builder()
         .add_top_bar(&header)
         .build();
 
@@ -23,12 +24,11 @@ pub fn build_ui(app: &adw::Application) {
         .transition_type(gtk4::StackTransitionType::SlideLeftRight)
         .build();
 
-    let view_switcher = adw::ViewSwitcher::builder().stack(&stack).build();
-    let view_switcher_title = adw::ViewSwitcherTitle::builder()
+    let stack_switcher = gtk4::StackSwitcher::builder()
         .stack(&stack)
-        .title("SAMT")
+        .halign(gtk4::Align::Center)
         .build();
-    header.set_title_widget(Some(&view_switcher_title));
+    header.set_title_widget(Some(&stack_switcher));
 
     let db_path = config::db_path();
     log::info(format!("DB: {}", db_path.display()));
@@ -41,10 +41,11 @@ pub fn build_ui(app: &adw::Application) {
     stack.add_titled(&config_page, Some("config"), "Configuración");
     stack.add_titled(&launch_page, Some("launch"), "Jugar");
 
-    content.set_content(Some(&stack));
-    window.set_content(Some(&content));
+    content_box.set_content(Some(&stack));
+    window.set_content(Some(&content_box));
 
-    let _gamepad = crate::gamepad::GamepadHandler::start(&window);
+    let gtk_window: &gtk4::ApplicationWindow = window.upcast_ref();
+    let _gamepad = crate::gamepad::GamepadHandler::start(gtk_window);
 
     window.present();
 }

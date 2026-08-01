@@ -213,7 +213,8 @@ fn show_add_dialog(list_box: &gtk4::ListBox, mods_data: &Rc<RefCell<Vec<db::ModE
             if !folder.is_empty() {
                 let name_opt: Option<&str> = if name.is_empty() { None } else { Some(&name) };
                 if let Ok(conn) = db::open_db(&db_path) {
-                    match db::add_mod(&conn, folder.trim(), name_opt, None) {
+                    let display_name = name_opt.unwrap_or(folder.trim());
+                    match db::add_mod(&conn, folder.trim(), display_name, None) {
                         Ok(_) => {
                             log::info(format!("Mod '{}' añadido.", folder.trim()));
                             refresh_list(&list, &data);
