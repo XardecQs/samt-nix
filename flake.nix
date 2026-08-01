@@ -84,6 +84,7 @@
           umu-launcher
           gtk4
           libadwaita
+          udev
         ];
 
         postInstall = ''
