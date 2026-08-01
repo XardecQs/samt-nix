@@ -1,13 +1,13 @@
-mod config;
 mod ctl;
-mod db;
-mod overlay;
-mod resolver;
 
 use anyhow::Context;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::generate;
 use clap_complete::shells::{Bash, Fish, Zsh};
+use gta_mo_core::config;
+use gta_mo_core::db;
+use gta_mo_core::overlay;
+use gta_mo_core::resolver;
 use std::io::Write;
 use std::path::PathBuf;
 

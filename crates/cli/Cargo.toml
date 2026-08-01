@@ -1,0 +1,19 @@
+[package]
+name = "gta-mod-organizer"
+version = "0.2.0"
+edition = "2021"
+default-run = "gta-mo"
+
+[[bin]]
+name = "gta-mo"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+fs2 = "0.4"
+owo-colors = "4"
+rusqlite = { version = "0.31", features = ["bundled"] }
+which = "7"
+gta-mo-core = { path = "../core" }

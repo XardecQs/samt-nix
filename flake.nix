@@ -11,57 +11,98 @@
       let pkgs = nixpkgs.legacyPackages.${system};
       in f pkgs);
 
-    version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+    version = (builtins.fromTOML (builtins.readFile ./crates/cli/Cargo.toml)).package.version;
 
     source = nixpkgs.lib.fileset.toSource {
       root = ./.;
       fileset = nixpkgs.lib.fileset.unions [
-        ./src
-        ./schema.sql
+        ./crates
         ./Cargo.toml
         ./Cargo.lock
       ];
     };
 
-    mkPackage = { pkgs, doCheck ? false }: pkgs.rustPlatform.buildRustPackage {
-      pname = "gta-mod-organizer";
-      inherit version;
+    mkCliPackage = { pkgs, doCheck ? false }:
+      pkgs.rustPlatform.buildRustPackage {
+        pname = "gta-mod-organizer";
+        inherit version;
 
-      src = source;
+        src = source;
 
-      cargoLock = {
-        lockFile = ./Cargo.lock;
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+        };
+
+        inherit doCheck;
+
+        nativeBuildInputs = with pkgs; [ makeWrapper ];
+
+        postInstall = ''
+          wrapProgram "$out/bin/gta-mo" \
+            --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
+            --prefix PATH : ${pkgs.umu-launcher}/bin
+
+          mkdir -p "$out/share/bash-completion/completions" \
+                   "$out/share/zsh/site-functions" \
+                   "$out/share/fish/vendor_completions.d"
+          "$out/bin/gta-mo" completions bash > "$out/share/bash-completion/completions/gta-mo"
+          "$out/bin/gta-mo" completions zsh  > "$out/share/zsh/site-functions/_gta-mo"
+          "$out/bin/gta-mo" completions fish > "$out/share/fish/vendor_completions.d/gta-mo.fish"
+        '';
+
+        meta = {
+          description = "GTA San Andreas mod organizer with fuse-overlayfs";
+          mainProgram = "gta-mo";
+          license = nixpkgs.lib.licenses.mit;
+          platforms = supportedSystems;
+        };
       };
 
-      inherit doCheck;
+    mkGuiPackage = { pkgs, doCheck ? false }:
+      pkgs.rustPlatform.buildRustPackage {
+        pname = "gta-mo-gui";
+        inherit version;
 
-      nativeBuildInputs = with pkgs; [ makeWrapper ];
+        src = source;
 
-      postInstall = ''
-        wrapProgram "$out/bin/gta-mo" \
-          --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
-          --prefix PATH : ${pkgs.umu-launcher}/bin
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+        };
 
-        mkdir -p "$out/share/bash-completion/completions" \
-                 "$out/share/zsh/site-functions" \
-                 "$out/share/fish/vendor_completions.d"
-        "$out/bin/gta-mo" completions bash > "$out/share/bash-completion/completions/gta-mo"
-        "$out/bin/gta-mo" completions zsh  > "$out/share/zsh/site-functions/_gta-mo"
-        "$out/bin/gta-mo" completions fish > "$out/share/fish/vendor_completions.d/gta-mo.fish"
-      '';
+        inherit doCheck;
 
-      meta = {
-        description = "GTA San Andreas mod organizer with fuse-overlayfs";
-        mainProgram = "gta-mo";
-        license = nixpkgs.lib.licenses.mit;
-        platforms = supportedSystems;
+        nativeBuildInputs = with pkgs; [
+          pkg-config
+          makeWrapper
+          wrapGAppsHook4
+        ];
+
+        buildInputs = with pkgs; [
+          fuse-overlayfs
+          umu-launcher
+          gtk4
+          libadwaita
+        ];
+
+        postInstall = ''
+          wrapProgram "$out/bin/gta-mo-gui" \
+            --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
+            --prefix PATH : ${pkgs.umu-launcher}/bin
+        '';
+
+        meta = {
+          description = "GTA Mod Organizer — GTK4 graphical interface";
+          mainProgram = "gta-mo-gui";
+          license = nixpkgs.lib.licenses.mit;
+          platforms = supportedSystems;
+        };
       };
-    };
 
   in {
     packages = forAllSystems (pkgs: rec {
       default = gta-mod-organizer;
-      gta-mod-organizer = mkPackage { inherit pkgs; };
+      gta-mod-organizer = mkCliPackage { inherit pkgs; };
+      gta-mod-organizer-gui = mkGuiPackage { inherit pkgs; };
     });
 
     checks = forAllSystems (pkgs: let
@@ -88,6 +129,7 @@
 
     overlay = final: prev: {
       gta-mod-organizer = self.packages.${final.system}.default;
+      gta-mod-organizer-gui = self.packages.${final.system}.gta-mod-organizer-gui;
     };
 
     nixosModules = {
@@ -111,6 +153,9 @@
           fuse-overlayfs
           umu-launcher
           sqlite
+          gtk4
+          libadwaita
+          pkg-config
         ];
 
         shellHook = ''

@@ -1,4 +1,4 @@
-use crate::db::{self, log};
+use gta_mo_core::db::{self, log};
 use owo_colors::OwoColorize;
 use rusqlite::Connection;
 

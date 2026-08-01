@@ -1,0 +1,16 @@
+[package]
+name = "gta-mo-gui"
+version = "0.1.0"
+edition = "2021"
+default-run = "gta-mo-gui"
+
+[[bin]]
+name = "gta-mo-gui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+gilrs = "0.10"
+gta-mo-core = { path = "../core" }
+gtk4 = { version = "0.9", features = ["v4_10"] }
+libadwaita = "0.7"
