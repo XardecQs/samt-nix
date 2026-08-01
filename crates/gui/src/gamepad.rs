@@ -21,24 +21,24 @@ impl GamepadHandler {
 
             while *active_clone.borrow() {
                 while let Some(event) = gilrs.next_event() {
-                    let window = window_clone.clone();
+                    let w = window_clone.clone();
                     match event.event {
                         gilrs::EventType::ButtonPressed(btn, _) => {
-                            glib::idle_add_once(move || {
-                                handle_button(&window, btn);
+                            gtk4::glib::idle_add_once(move || {
+                                handle_button(&w, btn);
                             });
                         }
                         gilrs::EventType::AxisChanged(gilrs::Axis::DPadX, val, _) => {
                             if val.abs() > 0.5 {
-                                glib::idle_add_once(move || {
-                                    focus_move(&window, val > 0.0);
+                                gtk4::glib::idle_add_once(move || {
+                                    focus_move(&w, val > 0.0);
                                 });
                             }
                         }
                         gilrs::EventType::AxisChanged(gilrs::Axis::DPadY, val, _) => {
                             if val.abs() > 0.5 {
-                                glib::idle_add_once(move || {
-                                    focus_move_vertical(&window, val < 0.0);
+                                gtk4::glib::idle_add_once(move || {
+                                    focus_move_vertical(&w, val < 0.0);
                                 });
                             }
                         }
@@ -49,7 +49,9 @@ impl GamepadHandler {
             }
         });
 
-        GamepadHandler { _active: active }
+        GamepadHandler {
+            _active: active,
+        }
     }
 }
 
@@ -61,42 +63,39 @@ impl Drop for GamepadHandler {
 
 fn handle_button(window: &gtk4::ApplicationWindow, button: gilrs::Button) {
     match button {
-        gilrs::Button::South => activate_focused(window),
-        gilrs::Button::East => {
-            // B button = Escape / back
-            if let Some(focused) = window.focus_widget() {
-                focused.grab_focus();
+        gilrs::Button::South => {
+            if let Some(root) = window.root() {
+                if let Some(focused) = root.focus_widget() {
+                    focused.activate();
+                }
             }
         }
         _ => {}
     }
 }
 
-fn activate_focused(window: &gtk4::ApplicationWindow) {
-    if let Some(focused) = window.focus_widget() {
-        focused.activate();
-    }
-}
-
 fn focus_move(window: &gtk4::ApplicationWindow, forward: bool) {
-    let direction = if forward {
+    let dir = if forward {
         gtk4::DirectionType::TabForward
     } else {
         gtk4::DirectionType::TabBackward
     };
-    // Signal keynav to move focus
-    if let Some(focused) = window.focus_widget() {
-        let _ = focused.child_focus(direction);
+    if let Some(root) = window.root() {
+        if let Some(focused) = root.focus_widget() {
+            let _ = focused.child_focus(dir);
+        }
     }
 }
 
-fn focus_move_vertical(_window: &gtk4::ApplicationWindow, up: bool) {
+fn focus_move_vertical(window: &gtk4::ApplicationWindow, up: bool) {
     let dir = if up {
         gtk4::DirectionType::Up
     } else {
         gtk4::DirectionType::Down
     };
-    if let Some(focused) = _window.focus_widget() {
-        let _ = focused.child_focus(dir);
+    if let Some(root) = window.root() {
+        if let Some(focused) = root.focus_widget() {
+            let _ = focused.child_focus(dir);
+        }
     }
 }

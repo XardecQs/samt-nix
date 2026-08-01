@@ -1,6 +1,7 @@
+use gtk4::glib;
+use gtk4::prelude::*;
 use gta_mo_core::config;
 use gta_mo_core::{db, overlay, resolver};
-use gtk4::prelude::*;
 use std::path::PathBuf;
 
 pub fn create() -> gtk4::Box {
@@ -99,7 +100,10 @@ fn do_launch(dry_run: bool, debug: bool) -> anyhow::Result<String> {
 
     let game_root = PathBuf::from(&cfg.game_root);
     if !game_root.is_dir() {
-        anyhow::bail!("game_root no es un directorio válido: {}", cfg.game_root);
+        anyhow::bail!(
+            "game_root no es un directorio válido: {}",
+            cfg.game_root
+        );
     }
 
     let paths = config::RuntimePaths::from_config(&cfg);
@@ -120,7 +124,8 @@ fn do_launch(dry_run: bool, debug: bool) -> anyhow::Result<String> {
     let deps = db::load_dependencies(&conn)?;
     let enabled_ids = db::load_enabled_mod_ids(&conn)?;
 
-    let mut graph = resolver::DepGraph::new(all_mods, deps, enabled_ids);
+    let resolved_ids: Vec<i64> = enabled_ids.iter().copied().collect();
+    let mut graph = resolver::DepGraph::new(all_mods, deps, resolved_ids);
 
     if !graph.validate_dependencies() || !graph.detect_cycles() {
         anyhow::bail!("Errores en la resolución de dependencias.");
@@ -133,7 +138,10 @@ fn do_launch(dry_run: bool, debug: bool) -> anyhow::Result<String> {
 
         if dry_run {
             output.push_str(&format!("DRY RUN: base = {}\n", paths.base_game.display()));
-            output.push_str(&format!("WINEPREFIX = {}\n", paths.wine_prefix.display()));
+            output.push_str(&format!(
+                "WINEPREFIX = {}\n",
+                paths.wine_prefix.display()
+            ));
             output.push_str(&format!("GAME_EXE = {}\n", cfg.game_exe()));
             return Ok(output);
         }
@@ -151,7 +159,10 @@ fn do_launch(dry_run: bool, debug: bool) -> anyhow::Result<String> {
 
     if dry_run {
         output.push_str(&format!("DRY RUN: {} capas\n", resolved.len()));
-        output.push_str(&format!("WINEPREFIX = {}\n", paths.wine_prefix.display()));
+        output.push_str(&format!(
+            "WINEPREFIX = {}\n",
+            paths.wine_prefix.display()
+        ));
         output.push_str(&format!("GAME_EXE = {}\n", cfg.game_exe()));
         return Ok(output);
     }
@@ -163,7 +174,8 @@ fn do_launch(dry_run: bool, debug: bool) -> anyhow::Result<String> {
         .collect::<Vec<_>>()
         .join(":");
 
-    let mut ov = overlay::OverlayMount::mount(&lowerdir, &paths.upper, &paths.work, &paths.merged)?;
+    let mut ov =
+        overlay::OverlayMount::mount(&lowerdir, &paths.upper, &paths.work, &paths.merged)?;
 
     ov.start_guard();
 

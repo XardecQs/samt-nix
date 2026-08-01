@@ -10,7 +10,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+fs2 = "0.4"
 gilrs = "0.10"
 gta-mo-core = { path = "../core" }
 gtk4 = { version = "0.9", features = ["v4_10"] }
 libadwaita = "0.7"
+rusqlite = "0.31"
+which = "7"

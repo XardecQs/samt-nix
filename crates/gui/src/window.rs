@@ -1,4 +1,5 @@
-use adw::prelude::*;
+use gtk4::prelude::*;
+use libadwaita as adw;
 use gta_mo_core::config;
 use gta_mo_core::db::log;
 
@@ -12,11 +13,11 @@ pub fn build_ui(app: &adw::Application) {
         .default_height(600)
         .build();
 
-    let header = adw::HeaderBar::builder()
-        .title_widget(&gtk4::Label::new(Some("SAMT — GTA Mod Organizer")))
-        .build();
+    let header = adw::HeaderBar::builder().build();
 
-    let content = adw::ToolbarView::builder().add_top_bar(&header).build();
+    let content = adw::ToolbarView::builder()
+        .add_top_bar(&header)
+        .build();
 
     let stack = gtk4::Stack::builder()
         .transition_type(gtk4::StackTransitionType::SlideLeftRight)
@@ -27,7 +28,7 @@ pub fn build_ui(app: &adw::Application) {
         .stack(&stack)
         .title("SAMT")
         .build();
-    header.set_title_widget(Some(&view_switcher));
+    header.set_title_widget(Some(&view_switcher_title));
 
     let db_path = config::db_path();
     log::info(format!("DB: {}", db_path.display()));
@@ -36,27 +37,9 @@ pub fn build_ui(app: &adw::Application) {
     let config_page = config_page::create();
     let launch_page = launch_page::create();
 
-    stack.add_titled_with_icon(
-        &mods_page,
-        Some("mods"),
-        "Mods",
-        Some("applications-games-symbolic"),
-    );
-    stack.add_titled_with_icon(
-        &config_page,
-        Some("config"),
-        "Configuración",
-        Some("preferences-system-symbolic"),
-    );
-    stack.add_titled_with_icon(
-        &launch_page,
-        Some("launch"),
-        "Jugar",
-        Some("media-playback-start-symbolic"),
-    );
-
-    view_switcher_title.set_stack(&stack);
-    view_switcher_title.set_title("SAMT");
+    stack.add_titled(&mods_page, Some("mods"), "Mods");
+    stack.add_titled(&config_page, Some("config"), "Configuración");
+    stack.add_titled(&launch_page, Some("launch"), "Jugar");
 
     content.set_content(Some(&stack));
     window.set_content(Some(&content));

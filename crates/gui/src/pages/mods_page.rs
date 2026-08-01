@@ -1,9 +1,9 @@
-use gta_mo_core::config;
-use gta_mo_core::db;
-use gta_mo_core::db::log;
 use gtk4::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
+use gta_mo_core::config;
+use gta_mo_core::db;
+use gta_mo_core::db::log;
 
 pub fn create() -> gtk4::Box {
     let container = gtk4::Box::builder()
@@ -106,7 +106,9 @@ fn refresh_list(list_box: &gtk4::ListBox, mods_data: &Rc<RefCell<Vec<db::ModEntr
         Err(_) => return,
     };
 
-    let mods = db::load_all_mods(&conn).unwrap_or_default();
+    let mods_map = db::load_all_mods(&conn).unwrap_or_default();
+    let mut mods: Vec<db::ModEntry> = mods_map.into_values().collect();
+    mods.sort_by_key(|m| -m.load_order);
     *mods_data.borrow_mut() = mods.clone();
 
     for m in &mods {
@@ -177,14 +179,13 @@ fn show_add_dialog(list_box: &gtk4::ListBox, mods_data: &Rc<RefCell<Vec<db::ModE
         .modal(true)
         .build();
 
-    let content = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(6)
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
+    let content_area = dialog.content_area();
+    content_area.set_orientation(gtk4::Orientation::Vertical);
+    content_area.set_spacing(6);
+    content_area.set_margin_top(12);
+    content_area.set_margin_bottom(12);
+    content_area.set_margin_start(12);
+    content_area.set_margin_end(12);
 
     let entry = gtk4::Entry::builder()
         .placeholder_text("Nombre de la carpeta del mod")
@@ -193,12 +194,11 @@ fn show_add_dialog(list_box: &gtk4::ListBox, mods_data: &Rc<RefCell<Vec<db::ModE
         .placeholder_text("Nombre visible (opcional)")
         .build();
 
-    content.append(&gtk4::Label::new(Some("Carpeta del mod:")));
-    content.append(&entry);
-    content.append(&gtk4::Label::new(Some("Nombre visible:")));
-    content.append(&name_entry);
+    content_area.append(&gtk4::Label::new(Some("Carpeta del mod:")));
+    content_area.append(&entry);
+    content_area.append(&gtk4::Label::new(Some("Nombre visible:")));
+    content_area.append(&name_entry);
 
-    dialog.content_area().unwrap().append(&content);
     dialog.add_button("Cancelar", gtk4::ResponseType::Cancel);
     dialog.add_button("Añadir", gtk4::ResponseType::Ok);
 
@@ -210,12 +210,8 @@ fn show_add_dialog(list_box: &gtk4::ListBox, mods_data: &Rc<RefCell<Vec<db::ModE
         if response == gtk4::ResponseType::Ok {
             let folder = entry.text().to_string();
             let name = name_entry.text().to_string();
-            let name_opt = if name.is_empty() {
-                None
-            } else {
-                Some(name.as_str())
-            };
             if !folder.is_empty() {
+                let name_opt: Option<&str> = if name.is_empty() { None } else { Some(&name) };
                 if let Ok(conn) = db::open_db(&db_path) {
                     match db::add_mod(&conn, folder.trim(), name_opt, None) {
                         Ok(_) => {
@@ -230,7 +226,7 @@ fn show_add_dialog(list_box: &gtk4::ListBox, mods_data: &Rc<RefCell<Vec<db::ModE
         dialog.close();
     });
 
-    dialog.present(None::<&gtk4::Window>);
+    dialog.present();
 }
 
 fn show_remove_dialog(
@@ -269,7 +265,7 @@ fn show_remove_dialog(
         dialog.close();
     });
 
-    dialog.present(None::<&gtk4::Window>);
+    dialog.present();
 }
 
 fn adjust_order(

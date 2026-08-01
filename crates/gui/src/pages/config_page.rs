@@ -1,6 +1,7 @@
+use gtk4::prelude::*;
 use gta_mo_core::config;
 use gta_mo_core::config::UserOverrides;
-use gtk4::prelude::*;
+use gta_mo_core::db::log;
 
 pub fn create() -> gtk4::Box {
     let container = gtk4::Box::builder()
@@ -133,9 +134,9 @@ pub fn create() -> gtk4::Box {
         save_btn.connect_clicked(move |_| {
             let overrides = collect_overrides(&list_save);
             if let Err(e) = config::save_user_overrides(&overrides) {
-                config::db::log::error(format!("Error guardando overrides: {e}"));
+                log::error(format!("Error guardando overrides: {e}"));
             } else {
-                config::db::log::info("Sobrescrituras guardadas en config.user.toml");
+                log::info("Sobrescrituras guardadas en config.user.toml");
             }
         });
         container.append(&save_btn);
