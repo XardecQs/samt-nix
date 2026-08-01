@@ -64,10 +64,8 @@ impl Drop for GamepadHandler {
 fn handle_button(window: &gtk4::ApplicationWindow, button: gilrs::Button) {
     match button {
         gilrs::Button::South => {
-            if let Some(root) = window.root() {
-                if let Some(focused) = root.focus_widget() {
-                    focused.activate();
-                }
+            if let Some(focused) = window.focus_widget() {
+                focused.activate();
             }
         }
         _ => {}
@@ -80,10 +78,8 @@ fn focus_move(window: &gtk4::ApplicationWindow, forward: bool) {
     } else {
         gtk4::DirectionType::TabBackward
     };
-    if let Some(root) = window.root() {
-        if let Some(focused) = root.focus_widget() {
-            let _ = focused.child_focus(dir);
-        }
+    if let Some(focused) = window.focus_widget() {
+        let _ = focused.child_focus(dir);
     }
 }
 
@@ -93,9 +89,7 @@ fn focus_move_vertical(window: &gtk4::ApplicationWindow, up: bool) {
     } else {
         gtk4::DirectionType::Down
     };
-    if let Some(root) = window.root() {
-        if let Some(focused) = root.focus_widget() {
-            let _ = focused.child_focus(dir);
-        }
+    if let Some(focused) = window.focus_widget() {
+        let _ = focused.child_focus(dir);
     }
 }
