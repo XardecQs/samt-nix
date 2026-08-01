@@ -1,6 +1,5 @@
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::RootExt;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -71,7 +70,7 @@ impl Drop for GamepadHandler {
 }
 
 fn get_focus(widget: &gtk4::ApplicationWindow) -> Option<gtk4::Widget> {
-    widget.root().and_then(|root| root.focus())
+    widget.root().and_then(|root| root.focus_child())
 }
 
 fn handle_button(window: &gtk4::ApplicationWindow, button: gilrs::Button) {

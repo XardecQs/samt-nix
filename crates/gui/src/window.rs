@@ -16,9 +16,8 @@ pub fn build_ui(app: &adw::Application) {
 
     let header = adw::HeaderBar::builder().build();
 
-    let content_box = adw::ToolbarView::builder()
-        .add_top_bar(&header)
-        .build();
+    let content_box = adw::ToolbarView::builder().build();
+    content_box.add_top_bar(&header);
 
     let stack = gtk4::Stack::builder()
         .transition_type(gtk4::StackTransitionType::SlideLeftRight)
