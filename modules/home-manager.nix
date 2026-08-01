@@ -34,10 +34,9 @@ in {
     gui = {
       enable = lib.mkEnableOption "GTA Mod Organizer GTK4 graphical interface";
       package = lib.mkOption {
-        type = lib.types.package;
-        default = pkgs.gta-mod-organizer-gui;
-        defaultText = lib.literalExpression "pkgs.gta-mod-organizer-gui";
-        description = "The gta-mod-organizer GUI package to use.";
+        type = lib.types.nullOr lib.types.package;
+        default = null;
+        description = "The gta-mod-organizer GUI package. Set this to use the GUI (e.g. inputs.gta-mo.packages.\${pkgs.system}.gta-mod-organizer-gui).";
       };
     };
 
@@ -67,7 +66,7 @@ in {
 
   config = lib.mkIf cfg.enable {
     home.packages = [ cfg.package ]
-      ++ lib.optional cfg.gui.enable cfg.gui.package;
+      ++ lib.optional (cfg.gui.enable && cfg.gui.package != null) cfg.gui.package;
 
     xdg.configFile."gta-mo/config.toml".source =
       settingsFormat.generate "gta-mo-config.toml" cfg.settings;

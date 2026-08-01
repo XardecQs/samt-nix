@@ -43,10 +43,9 @@ in {
     gui = {
       enable = lib.mkEnableOption "GTA Mod Organizer GTK4 graphical interface";
       package = lib.mkOption {
-        type = lib.types.package;
-        default = pkgs.gta-mod-organizer-gui;
-        defaultText = lib.literalExpression "pkgs.gta-mod-organizer-gui";
-        description = "The gta-mod-organizer GUI package to use.";
+        type = lib.types.nullOr lib.types.package;
+        default = null;
+        description = "The gta-mod-organizer GUI package. Set this to use the GUI (e.g. inputs.gta-mo.packages.\${pkgs.system}.gta-mod-organizer-gui).";
       };
     };
   };
