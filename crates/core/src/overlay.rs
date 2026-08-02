@@ -10,7 +10,17 @@ pub struct OverlayMount {
 
 impl OverlayMount {
     pub fn mount(lowerdir: &str, upper: &Path, work: &Path, merged: &Path) -> anyhow::Result<Self> {
-        let _ = Command::new("fusermount").arg("-u").arg(merged).status();
+        if merged.exists() {
+            crate::db::log::info("Intentando desmontar overlay anterior...");
+            if !Self::unmount_retry(merged, 10, 2000) {
+                crate::db::log::warn("Desmontaje normal fallido, intentando lazy unmount...");
+                let _ = Command::new("fusermount")
+                    .arg("-uz")
+                    .arg(merged)
+                    .status();
+                thread::sleep(Duration::from_millis(1000));
+            }
+        }
 
         std::fs::create_dir_all(upper)?;
         std::fs::create_dir_all(work)?;
@@ -51,7 +61,7 @@ impl OverlayMount {
         let child = Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "while kill -0 {pid} 2>/dev/null; do sleep 1; done; sleep 2; fusermount -u \"{merged}\" 2>/dev/null || true"
+                "while kill -0 {pid} 2>/dev/null; do sleep 1; done; sleep 2; fusermount -u \"{merged}\" 2>/dev/null || fusermount -uz \"{merged}\" 2>/dev/null || true"
             ))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -84,10 +94,16 @@ impl OverlayMount {
 
 impl Drop for OverlayMount {
     fn drop(&mut self) {
+        if !Self::unmount_retry(&self.merged, 15, 2000) {
+            crate::db::log::warn("Desmontaje bloqueado, intentando lazy unmount...");
+            let _ = Command::new("fusermount")
+                .arg("-uz")
+                .arg(&self.merged)
+                .status();
+        }
         if let Some(ref mut child) = self.guard_child {
             let _ = child.kill();
         }
-        Self::unmount_retry(&self.merged, 5, 1000);
     }
 }
 

@@ -1,3 +1,4 @@
+use gtk4::glib;
 use gtk4::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -73,9 +74,9 @@ pub fn create() -> gtk4::Box {
     up_btn.connect_clicked(move |_| {
         if let Some(row) = list_up.selected_row() {
             let idx = row.index() as usize;
-            let mods = mods_up.borrow();
-            if let Some(m) = mods.get(idx) {
-                adjust_order(&list_up, &mods_up, m.id, 5);
+            let id = mods_up.borrow().get(idx).map(|m| m.id);
+            if let Some(id) = id {
+                adjust_order(&list_up, &mods_up, id, 5);
             }
         }
     });
@@ -85,9 +86,9 @@ pub fn create() -> gtk4::Box {
     down_btn.connect_clicked(move |_| {
         if let Some(row) = list_down.selected_row() {
             let idx = row.index() as usize;
-            let mods = mods_down.borrow();
-            if let Some(m) = mods.get(idx) {
-                adjust_order(&list_down, &mods_down, m.id, -5);
+            let id = mods_down.borrow().get(idx).map(|m| m.id);
+            if let Some(id) = id {
+                adjust_order(&list_down, &mods_down, id, -5);
             }
         }
     });
@@ -164,7 +165,12 @@ fn refresh_list(list_box: &gtk4::ListBox, mods_data: &Rc<RefCell<Vec<db::ModEntr
         toggle.connect_toggled(move |toggle| {
             if let Ok(conn) = db::open_db(&db_path) {
                 let _ = db::set_mod_enabled(&conn, mod_id, toggle.is_active());
-                refresh_list(&list_clone, &mods_clone);
+                let list = list_clone.clone();
+                let data = mods_clone.clone();
+                glib::idle_add_local(move || {
+                    refresh_list(&list, &data);
+                    glib::ControlFlow::Break
+                });
             }
         });
 
@@ -217,7 +223,12 @@ fn show_add_dialog(list_box: &gtk4::ListBox, mods_data: &Rc<RefCell<Vec<db::ModE
                     match db::add_mod(&conn, folder.trim(), display_name, None) {
                         Ok(_) => {
                             log::info(format!("Mod '{}' añadido.", folder.trim()));
-                            refresh_list(&list, &data);
+                            let list = list.clone();
+                            let data = data.clone();
+                            glib::idle_add_local(move || {
+                                refresh_list(&list, &data);
+                                glib::ControlFlow::Break
+                            });
                         }
                         Err(e) => log::error(format!("{e}")),
                     }
@@ -260,7 +271,12 @@ fn show_remove_dialog(
         if response == gtk4::ResponseType::Ok {
             if let Ok(conn) = db::open_db(&db_path) {
                 let _ = db::remove_mod(&conn, mod_id);
-                refresh_list(&list, &data);
+                let list = list.clone();
+                let data = data.clone();
+                glib::idle_add_local(move || {
+                    refresh_list(&list, &data);
+                    glib::ControlFlow::Break
+                });
             }
         }
         dialog.close();

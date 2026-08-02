@@ -634,10 +634,13 @@ name = "gta-mo-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fs2",
  "gilrs",
  "gta-mo-core",
  "gtk4",
  "libadwaita",
+ "rusqlite",
+ "which",
 ]
 
 [[package]]
