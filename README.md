@@ -140,6 +140,49 @@ gta-mo completions zsh  > _gta-mo
 gta-mo completions fish > gta-mo.fish
 ```
 
+## Steam integration
+
+`gta-mo` must run **natively on the host**: it mounts `fuse-overlayfs` and then
+spawns its own container via `umu-launcher`. Do not force a Steam Play /
+Steam Linux Runtime compatibility tool on the entry, or Steam will execute
+`gta-mo` inside `pressure-vessel`, where neither the binary nor its
+dependencies exist (`Failed to execute child process ?gta-mo?`).
+
+Use the wrapper at [`scripts/steam-launch.sh`](scripts/steam-launch.sh):
+
+1. Copy it somewhere stable and make it executable
+   (`chmod +x scripts/steam-launch.sh`).
+2. In Steam: **Add a Non-Steam Game**.
+3. Set **Target** to the absolute path of `steam-launch.sh`.
+4. Set **Start In** to an existing directory (e.g. `$HOME`).
+5. In **Properties → Compatibility**, select **"Do not use a compatibility tool"**.
+6. (Optional) Add extra `gta-mo` flags in **Launch Options** (`--debug`, `--discover`, ...).
+
+The wrapper resolves the `gta-mo` binary from `$GTA_MO_BIN`, `PATH`,
+`/etc/profiles/per-user/$USER/bin`, or `~/.nix-profile/bin`, then runs
+`gta-mo launch` inside a fresh user/mount namespace
+(`unshare -m -U --map-root-user`). If it cannot find the binary, point the
+`GTA_MO_BIN` environment variable at it (and `$UNSHARE` at the `unshare`
+binary if needed).
+
+Why the namespace is required: on NixOS the Steam client runs inside a
+bubblewrap sandbox with its **own user namespace**, where uid 0 is not
+mapped. The kernel therefore ignores the setuid bit of `fusermount3`, and
+`fuse-overlayfs` fails to mount with `Operation not permitted`. Inside a
+fresh namespace where the user is root, `fuse-overlayfs` mounts directly
+(uid 0 in that namespace is the same host user, so file ownership is
+unchanged). The wrapper also clears `LD_PRELOAD`/`LD_LIBRARY_PATH`, which
+Steam populates with `gameoverlayrenderer.so`.
+
+`umu-launcher` refuses to run as root, so the wrapper passes
+`GTA_MO_DROP_UID`/`GTA_MO_DROP_GID` (the real user). When running with
+euid 0, `gta-mo` forks a child that enters a nested user namespace mapping
+that uid and drops privileges before launching `umu-run`, keeping the
+overlay mount from the parent.
+
+Note: the game process is started by `umu-launcher`, not by Steam, so the
+Steam overlay will not attach to the game window.
+
 ## Options
 
 | Flag | Description |

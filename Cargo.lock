@@ -242,6 +242,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "fs2",
+ "libc",
  "owo-colors",
  "rusqlite",
  "serde",

@@ -125,6 +125,26 @@ impl LaunchEngine {
     }
 
     pub fn launch_game(exe_path: &Path, working_dir: &Path) -> anyhow::Result<()> {
+        let drop_uid = std::env::var("GTA_MO_DROP_UID")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok());
+        let drop_gid = std::env::var("GTA_MO_DROP_GID")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok());
+
+        if unsafe { libc::geteuid() } == 0 {
+            return match drop_uid {
+                Some(uid) => Self::launch_game_dropped(exe_path, working_dir, uid, drop_gid),
+                None => anyhow::bail!(
+                    "gta-mo se ejecuta como root. Define GTA_MO_DROP_UID (y opcionalmente GTA_MO_DROP_GID) para lanzar el juego como usuario."
+                ),
+            };
+        }
+
+        Self::launch_game_direct(exe_path, working_dir)
+    }
+
+    fn launch_game_direct(exe_path: &Path, working_dir: &Path) -> anyhow::Result<()> {
         let status = std::process::Command::new("umu-run")
             .arg(exe_path)
             .current_dir(working_dir)
@@ -136,6 +156,90 @@ impl LaunchEngine {
         }
 
         Ok(())
+    }
+
+    // Cuando gta-mo corre como root dentro de un user namespace (lanzado por
+    // el wrapper de Steam), umu-run se niega a arrancar con euid 0. Este hijo
+    // entra en un user namespace anidado que mapea el uid original y luego
+    // ejecuta el juego como usuario, sin perder el montaje del overlay.
+    fn launch_game_dropped(
+        exe_path: &Path,
+        working_dir: &Path,
+        uid: u32,
+        gid: Option<u32>,
+    ) -> anyhow::Result<()> {
+        let gid = gid.unwrap_or(uid);
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            anyhow::bail!("fork falló: {}", std::io::Error::last_os_error());
+        }
+        if pid == 0 {
+            let code = Self::drop_and_run_game(exe_path, working_dir, uid, gid);
+            std::process::exit(code);
+        }
+
+        let mut status: libc::c_int = 0;
+        loop {
+            let r = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if r < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                anyhow::bail!("waitpid falló: {e}");
+            }
+            break;
+        }
+
+        if libc::WIFEXITED(status) {
+            let code = libc::WEXITSTATUS(status);
+            if code == 0 {
+                return Ok(());
+            }
+            anyhow::bail!("umu-run terminó con error: exit status: {code}");
+        }
+        if libc::WIFSIGNALED(status) {
+            anyhow::bail!("umu-run terminó por señal: {}", libc::WTERMSIG(status));
+        }
+        Ok(())
+    }
+
+    fn drop_and_run_game(exe_path: &Path, working_dir: &Path, uid: u32, gid: u32) -> i32 {
+        if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+            eprintln!(
+                "gta-mo: unshare(CLONE_NEWUSER) falló: {}",
+                std::io::Error::last_os_error()
+            );
+            return 1;
+        }
+        if let Err(e) = std::fs::write("/proc/self/uid_map", format!("{uid} 0 1")) {
+            eprintln!("gta-mo: no se pudo escribir /proc/self/uid_map: {e}");
+            return 1;
+        }
+        if let Err(e) = std::fs::write("/proc/self/gid_map", format!("{gid} 0 1")) {
+            eprintln!("gta-mo: no se pudo escribir /proc/self/gid_map: {e}");
+            return 1;
+        }
+        if unsafe { libc::setgid(gid as libc::gid_t) } != 0 {
+            eprintln!("gta-mo: setgid falló: {}", std::io::Error::last_os_error());
+            return 1;
+        }
+        if unsafe { libc::setuid(uid as libc::uid_t) } != 0 {
+            eprintln!("gta-mo: setuid falló: {}", std::io::Error::last_os_error());
+            return 1;
+        }
+        match std::process::Command::new("umu-run")
+            .arg(exe_path)
+            .current_dir(working_dir)
+            .status()
+        {
+            Ok(s) if s.success() => 0,
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("Error al ejecutar umu-run: {e}");
+                1
+            }
+        }
     }
 
     pub fn run(opts: &LaunchOptions, mut log: impl FnMut(&str)) -> anyhow::Result<LaunchResult> {
