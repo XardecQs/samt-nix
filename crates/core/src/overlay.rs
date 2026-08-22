@@ -10,7 +10,7 @@ pub struct OverlayMount {
 
 impl OverlayMount {
     pub fn mount(lowerdir: &str, upper: &Path, work: &Path, merged: &Path) -> anyhow::Result<Self> {
-        if merged.exists() {
+        if merged.exists() && Self::is_mounted(merged) {
             let _ = std::env::set_current_dir("/");
             crate::db::log::info("Intentando desmontar overlay anterior...");
             if !Self::unmount_retry(merged, 10, 2000) {
@@ -74,6 +74,25 @@ impl OverlayMount {
         &self.merged
     }
 
+    fn is_mounted(merged: &Path) -> bool {
+        let Ok(contents) = std::fs::read_to_string("/proc/self/mountinfo") else {
+            return false;
+        };
+        let escaped = merged
+            .display()
+            .to_string()
+            .replace('\\', "\\134")
+            .replace(' ', "\\040")
+            .replace('\t', "\\011")
+            .replace('\n', "\\012");
+        contents.lines().any(|line| {
+            line.split_whitespace()
+                .nth(4)
+                .map(|p| p == escaped)
+                .unwrap_or(false)
+        })
+    }
+
     fn unmount_retry(merged: &Path, retries: u32, delay_ms: u64) -> bool {
         for i in 0..retries {
             let output = Command::new("fusermount").arg("-u").arg(merged).output();
@@ -93,7 +112,7 @@ impl OverlayMount {
 impl Drop for OverlayMount {
     fn drop(&mut self) {
         let _ = std::env::set_current_dir("/");
-        if !Self::unmount_retry(&self.merged, 15, 2000) {
+        if Self::is_mounted(&self.merged) && !Self::unmount_retry(&self.merged, 15, 2000) {
             crate::db::log::warn("Desmontaje bloqueado, intentando lazy unmount...");
             let _ = Command::new("fusermount")
                 .arg("-uz")
