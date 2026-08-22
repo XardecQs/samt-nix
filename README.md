@@ -130,7 +130,6 @@ gta-mo ctl rename <id|folder> <name>
 gta-mo ctl info <id|folder>
 gta-mo ctl dep add <mod> <dependency>
 gta-mo ctl dep rm <mod> <dependency>
-gta-mo ctl tui
 ```
 
 Shell completions are installed automatically when using the Home Manager module. To generate them manually:

@@ -14,10 +14,7 @@ impl OverlayMount {
             crate::db::log::info("Intentando desmontar overlay anterior...");
             if !Self::unmount_retry(merged, 10, 2000) {
                 crate::db::log::warn("Desmontaje normal fallido, intentando lazy unmount...");
-                let _ = Command::new("fusermount")
-                    .arg("-uz")
-                    .arg(merged)
-                    .status();
+                let _ = Command::new("fusermount").arg("-uz").arg(merged).status();
                 thread::sleep(Duration::from_millis(1000));
             }
         }
@@ -105,9 +102,4 @@ impl Drop for OverlayMount {
             let _ = child.kill();
         }
     }
-}
-
-#[allow(dead_code)]
-pub fn unmount(merged: &Path) {
-    let _ = Command::new("fusermount").arg("-u").arg(merged).status();
 }

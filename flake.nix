@@ -58,54 +58,10 @@
         };
       };
 
-    mkGuiPackage = { pkgs, doCheck ? false }:
-      pkgs.rustPlatform.buildRustPackage {
-        pname = "gta-mo-gui";
-        inherit version;
-
-        src = source;
-
-        buildAndTestSubdir = "crates/gui";
-
-        cargoLock = {
-          lockFile = ./Cargo.lock;
-        };
-
-        inherit doCheck;
-
-        nativeBuildInputs = with pkgs; [
-          pkg-config
-          makeWrapper
-          wrapGAppsHook4
-        ];
-
-        buildInputs = with pkgs; [
-          fuse-overlayfs
-          umu-launcher
-          gtk4
-          libadwaita
-          udev
-        ];
-
-        postInstall = ''
-          wrapProgram "$out/bin/gta-mo-gui" \
-            --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
-            --prefix PATH : ${pkgs.umu-launcher}/bin
-        '';
-
-        meta = {
-          description = "GTA Mod Organizer — GTK4 graphical interface";
-          mainProgram = "gta-mo-gui";
-          license = nixpkgs.lib.licenses.mit;
-          platforms = supportedSystems;
-        };
-      };
-
   in {
     packages = forAllSystems (pkgs: rec {
       default = gta-mod-organizer;
       gta-mod-organizer = mkCliPackage { inherit pkgs; };
-      gta-mod-organizer-gui = mkGuiPackage { inherit pkgs; };
     });
 
     checks = forAllSystems (pkgs: let
@@ -116,7 +72,7 @@
       clippy = pkgs.stdenv.mkDerivation {
         name = "gta-mod-organizer-clippy";
         src = source;
-        nativeBuildInputs = with pkgs; [ rustc cargo clippy pkg-config ];
+        nativeBuildInputs = with pkgs; [ rustc cargo clippy ];
         buildPhase = "cargo clippy --all-targets -- -D warnings";
         installPhase = "mkdir $out";
       };
@@ -132,7 +88,6 @@
 
     overlay = final: prev: {
       gta-mod-organizer = self.packages.${final.system}.default;
-      gta-mod-organizer-gui = self.packages.${final.system}.gta-mod-organizer-gui;
     };
 
     nixosModules = {
@@ -156,12 +111,10 @@
           fuse-overlayfs
           umu-launcher
           sqlite
-          gtk4
-          libadwaita
-          pkg-config
         ];
 
         shellHook = ''
+          export CARGO_TARGET_DIR="$HOME/.cache/gta-mo-target"
           echo "Listo — GTA Mod Organizer (Rust dev shell)"
         '';
       };
