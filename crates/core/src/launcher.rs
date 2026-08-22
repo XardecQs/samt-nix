@@ -125,10 +125,9 @@ impl LaunchEngine {
     }
 
     pub fn launch_game(exe_path: &Path, working_dir: &Path) -> anyhow::Result<()> {
-        std::env::set_current_dir(working_dir)?;
-
         let status = std::process::Command::new("umu-run")
             .arg(exe_path)
+            .current_dir(working_dir)
             .status()
             .map_err(|e| anyhow::anyhow!("Error al ejecutar umu-run: {e}"))?;
 

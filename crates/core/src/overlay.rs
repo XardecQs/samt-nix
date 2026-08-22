@@ -11,6 +11,7 @@ pub struct OverlayMount {
 impl OverlayMount {
     pub fn mount(lowerdir: &str, upper: &Path, work: &Path, merged: &Path) -> anyhow::Result<Self> {
         if merged.exists() {
+            let _ = std::env::set_current_dir("/");
             crate::db::log::info("Intentando desmontar overlay anterior...");
             if !Self::unmount_retry(merged, 10, 2000) {
                 crate::db::log::warn("Desmontaje normal fallido, intentando lazy unmount...");
@@ -91,6 +92,7 @@ impl OverlayMount {
 
 impl Drop for OverlayMount {
     fn drop(&mut self) {
+        let _ = std::env::set_current_dir("/");
         if !Self::unmount_retry(&self.merged, 15, 2000) {
             crate::db::log::warn("Desmontaje bloqueado, intentando lazy unmount...");
             let _ = Command::new("fusermount")
