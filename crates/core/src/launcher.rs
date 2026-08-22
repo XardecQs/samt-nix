@@ -288,6 +288,7 @@ impl LaunchEngine {
         }
 
         graph.enable_mods_for_deps();
+        graph.warn_optional_deps();
         graph.sync_enabled_to_db(&conn)?;
 
         if graph.enabled_ids.is_empty() {

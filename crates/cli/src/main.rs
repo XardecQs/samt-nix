@@ -79,8 +79,13 @@ pub enum CtlCommand {
     Disable { ident: String },
     #[command(about = "Change load order")]
     Order { ident: String, new_order: i64 },
-    #[command(about = "Rename a mod's display name")]
-    Rename { ident: String, new_name: String },
+    #[command(about = "Rename a mod's display name (or its folder with --folder)")]
+    Rename {
+        ident: String,
+        new_name: String,
+        #[arg(long, help = "Rename the mod's folder on disk too")]
+        folder: bool,
+    },
     #[command(about = "Show detailed mod info")]
     Info { ident: String },
     #[command(about = "Manage dependencies")]
@@ -92,10 +97,15 @@ pub enum CtlCommand {
 
 #[derive(Subcommand)]
 pub enum DepAction {
-    #[command(about = "Add a dependency")]
+    #[command(about = "Add a dependency (--optional for recommended deps)")]
     Add {
         mod_ident: String,
         dep_ident: String,
+        #[arg(
+            long,
+            help = "Optional (recommended) dependency, not required to launch"
+        )]
+        optional: bool,
     },
     #[command(about = "Remove a dependency")]
     Remove {

@@ -27,13 +27,18 @@ pub fn run(conn: &Connection, args: &super::CtlArgs) -> anyhow::Result<()> {
         super::CtlCommand::Enable { ident } => cmd_enable(conn, ident),
         super::CtlCommand::Disable { ident } => cmd_disable(conn, ident),
         super::CtlCommand::Order { ident, new_order } => cmd_order(conn, ident, *new_order),
-        super::CtlCommand::Rename { ident, new_name } => cmd_rename(conn, ident, new_name),
+        super::CtlCommand::Rename {
+            ident,
+            new_name,
+            folder,
+        } => cmd_rename(conn, ident, new_name, *folder),
         super::CtlCommand::Info { ident } => cmd_info(conn, ident),
         super::CtlCommand::Dep { action } => match action {
             super::DepAction::Add {
                 mod_ident,
                 dep_ident,
-            } => cmd_dep_add(conn, mod_ident, dep_ident),
+                optional,
+            } => cmd_dep_add(conn, mod_ident, dep_ident, *optional),
             super::DepAction::Remove {
                 mod_ident,
                 dep_ident,
@@ -104,7 +109,16 @@ fn cmd_list(conn: &Connection, verbose: bool, filter: Option<&str>) -> anyhow::R
         if verbose {
             let deps = db::get_dependencies_of(conn, id)?;
             if !deps.is_empty() {
-                let names: Vec<&str> = deps.iter().map(|d| d.folder_name.as_str()).collect();
+                let names: Vec<String> = deps
+                    .iter()
+                    .map(|(d, req)| {
+                        if *req {
+                            d.folder_name.clone()
+                        } else {
+                            format!("{} {}", d.folder_name, "(opcional)".cyan())
+                        }
+                    })
+                    .collect();
                 println!("     {} {}", "-> depende de:".cyan(), names.join(" "));
             }
 
@@ -252,18 +266,91 @@ fn cmd_order(conn: &Connection, ident: &str, new_order: i64) -> anyhow::Result<(
     Ok(())
 }
 
-fn cmd_rename(conn: &Connection, ident: &str, new_name: &str) -> anyhow::Result<()> {
+fn cmd_rename(conn: &Connection, ident: &str, new_name: &str, folder: bool) -> anyhow::Result<()> {
     if new_name.is_empty() {
         anyhow::bail!("El nombre no puede estar vacio.");
     }
     let id = db::resolve_mod_ident(conn, ident)?;
     let m = db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))?;
+
+    if folder {
+        return cmd_rename_folder(conn, &m, new_name);
+    }
+
     let old_name = m.name.clone();
     db::set_mod_name(conn, id, new_name)?;
     log::info(format!(
         "'{}': nombre cambiado de '{old_name}' a '{new_name}'.",
         m.folder_name
     ));
+    Ok(())
+}
+
+fn cmd_rename_folder(conn: &Connection, m: &db::ModEntry, new_folder: &str) -> anyhow::Result<()> {
+    if new_folder.contains(':')
+        || new_folder.contains('|')
+        || new_folder.contains('/')
+        || new_folder.contains('\\')
+    {
+        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\'.");
+    }
+    if new_folder == "." || new_folder == ".." {
+        anyhow::bail!("Nombre de carpeta no valido.");
+    }
+    if new_folder.trim() != new_folder {
+        anyhow::bail!("El nombre de carpeta no puede tener espacios al inicio o final.");
+    }
+
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+
+    let old_dir = paths.mods_dir.join(&m.folder_name);
+    let new_dir = paths.mods_dir.join(new_folder);
+
+    if new_dir.exists() {
+        anyhow::bail!(
+            "Ya existe una carpeta '{}' en {}",
+            new_folder,
+            paths.mods_dir.display()
+        );
+    }
+
+    let renamed = if old_dir.exists() {
+        std::fs::rename(&old_dir, &new_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "No se pudo renombrar '{}' a '{}': {e}",
+                old_dir.display(),
+                new_dir.display()
+            )
+        })?;
+        true
+    } else {
+        log::warn(format!(
+            "La carpeta '{}' no existe en disco; solo se actualiza la base de datos.",
+            old_dir.display()
+        ));
+        false
+    };
+
+    if let Err(e) = db::set_mod_folder(conn, m.id, new_folder) {
+        if renamed {
+            let _ = std::fs::rename(&new_dir, &old_dir);
+        }
+        anyhow::bail!("No se pudo actualizar la base de datos: {e}");
+    }
+
+    if renamed {
+        log::info(format!(
+            "'{}': carpeta renombrada a '{}'.",
+            m.folder_name, new_folder
+        ));
+    } else {
+        log::info(format!(
+            "'{}': carpeta actualizada en la base de datos a '{}'.",
+            m.folder_name, new_folder
+        ));
+    }
     Ok(())
 }
 
@@ -294,15 +381,20 @@ fn cmd_info(conn: &Connection, ident: &str) -> anyhow::Result<()> {
             "Dependencias".cyan(),
             m.folder_name
         );
-        for d in &deps {
+        for (d, req) in &deps {
             let dstatus = if d.enabled {
                 "SI".green().to_string()
             } else {
                 "NO".red().to_string()
             };
+            let dkind = if *req {
+                "requerido".cyan().to_string()
+            } else {
+                "opcional".yellow().to_string()
+            };
             println!(
-                "    [{}] {} ({}) [activo: {}]",
-                d.id, d.folder_name, d.name, dstatus
+                "    [{}] {} ({}) [activo: {}] [{}]",
+                d.id, d.folder_name, d.name, dstatus, dkind
             );
         }
     }
@@ -329,7 +421,12 @@ fn cmd_info(conn: &Connection, ident: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_dep_add(conn: &Connection, mod_ident: &str, dep_ident: &str) -> anyhow::Result<()> {
+fn cmd_dep_add(
+    conn: &Connection,
+    mod_ident: &str,
+    dep_ident: &str,
+    optional: bool,
+) -> anyhow::Result<()> {
     let mod_id = db::resolve_mod_ident(conn, mod_ident)?;
     let dep_id = db::resolve_mod_ident(conn, dep_ident)?;
 
@@ -340,8 +437,14 @@ fn cmd_dep_add(conn: &Connection, mod_ident: &str, dep_ident: &str) -> anyhow::R
         .map(|m| m.folder_name)
         .unwrap_or_default();
 
-    db::add_dependency(conn, mod_id, dep_id)?;
-    log::info(format!("'{mod_folder}' ahora depende de '{dep_folder}'."));
+    db::add_dependency(conn, mod_id, dep_id, !optional)?;
+    if optional {
+        log::info(format!(
+            "'{mod_folder}' ahora recomienda '{dep_folder}' (opcional)."
+        ));
+    } else {
+        log::info(format!("'{mod_folder}' ahora depende de '{dep_folder}'."));
+    }
     Ok(())
 }
 

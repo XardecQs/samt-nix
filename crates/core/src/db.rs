@@ -11,6 +11,12 @@ pub struct ModEntry {
     pub load_order: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct DepRef {
+    pub id: i64,
+    pub required: bool,
+}
+
 pub fn ensure_db_dir(db_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -39,7 +45,7 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         .unwrap_or(false);
 
     if !has_cascade {
-        log::info("[+] Migrando schema: añadiendo ON DELETE CASCADE en mod_dependencies...");
+        log::info("Migrando schema: añadiendo ON DELETE CASCADE en mod_dependencies...");
         conn.execute_batch(
             "BEGIN;
              CREATE TABLE mod_dependencies_new (
@@ -83,7 +89,7 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
             log::warn("    El overlay usa ':' como separador de capas; el montaje fallará.");
             log::warn("    Renombra las carpetas y actualiza la base de datos antes de continuar.");
         } else {
-            log::info("[+] Migrando schema: añadiendo restricción ':' en folder_name...");
+            log::info("Migrando schema: añadiendo restricción ':' en folder_name...");
             conn.execute_batch(
                 "PRAGMA foreign_keys = OFF;
                  BEGIN;
@@ -131,6 +137,24 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         }
     }
 
+    let has_required: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('mod_dependencies')
+             WHERE name = 'required'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if !has_required {
+        log::info("Migrando schema: añadiendo columna 'required' en mod_dependencies...");
+        conn.execute_batch(
+            "ALTER TABLE mod_dependencies
+             ADD COLUMN required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0, 1));",
+        )?;
+        log::info("[+] Migración completada.");
+    }
+
     Ok(())
 }
 
@@ -151,14 +175,23 @@ pub fn load_all_mods(conn: &Connection) -> anyhow::Result<HashMap<i64, ModEntry>
     Ok(mods.into_iter().map(|m| (m.id, m)).collect())
 }
 
-pub fn load_dependencies(conn: &Connection) -> anyhow::Result<HashMap<i64, Vec<i64>>> {
-    let mut stmt = conn.prepare("SELECT mod_id, dependency_id FROM mod_dependencies")?;
-    let mut deps: HashMap<i64, Vec<i64>> = HashMap::new();
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+pub fn load_dependencies(conn: &Connection) -> anyhow::Result<HashMap<i64, Vec<DepRef>>> {
+    let mut stmt = conn.prepare("SELECT mod_id, dependency_id, required FROM mod_dependencies")?;
+    let mut deps: HashMap<i64, Vec<DepRef>> = HashMap::new();
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)? != 0,
+        ))
+    })?;
 
     for row in rows {
-        let (mod_id, dep_id) = row?;
-        deps.entry(mod_id).or_default().push(dep_id);
+        let (mod_id, dep_id, required) = row?;
+        deps.entry(mod_id).or_default().push(DepRef {
+            id: dep_id,
+            required,
+        });
     }
 
     Ok(deps)
@@ -232,6 +265,14 @@ pub fn set_mod_name(conn: &Connection, id: i64, name: &str) -> anyhow::Result<()
     Ok(())
 }
 
+pub fn set_mod_folder(conn: &Connection, id: i64, folder: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE mods SET folder_name = ?1 WHERE id = ?2",
+        params![folder, id],
+    )?;
+    Ok(())
+}
+
 pub fn get_mod_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<ModEntry>> {
     let mut stmt =
         conn.prepare("SELECT id, folder_name, name, enabled, load_order FROM mods WHERE id = ?1")?;
@@ -281,7 +322,12 @@ pub fn resolve_mod_ident(conn: &Connection, ident: &str) -> anyhow::Result<i64> 
         .ok_or_else(|| anyhow::anyhow!("Mod '{}' no encontrado.", ident))
 }
 
-pub fn add_dependency(conn: &Connection, mod_id: i64, dep_id: i64) -> anyhow::Result<()> {
+pub fn add_dependency(
+    conn: &Connection,
+    mod_id: i64,
+    dep_id: i64,
+    required: bool,
+) -> anyhow::Result<()> {
     if mod_id == dep_id {
         anyhow::bail!("Un mod no puede depender de sí mismo.");
     }
@@ -294,8 +340,8 @@ pub fn add_dependency(conn: &Connection, mod_id: i64, dep_id: i64) -> anyhow::Re
         anyhow::bail!("La dependencia ya existe.");
     }
     conn.execute(
-        "INSERT INTO mod_dependencies (mod_id, dependency_id) VALUES (?1, ?2)",
-        params![mod_id, dep_id],
+        "INSERT INTO mod_dependencies (mod_id, dependency_id, required) VALUES (?1, ?2, ?3)",
+        params![mod_id, dep_id, required as i64],
     )?;
     Ok(())
 }
@@ -316,20 +362,26 @@ pub fn remove_dependency(conn: &Connection, mod_id: i64, dep_id: i64) -> anyhow:
     Ok(())
 }
 
-pub fn get_dependencies_of(conn: &Connection, mod_id: i64) -> anyhow::Result<Vec<ModEntry>> {
+pub fn get_dependencies_of(
+    conn: &Connection,
+    mod_id: i64,
+) -> anyhow::Result<Vec<(ModEntry, bool)>> {
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.folder_name, m.name, m.enabled, m.load_order
+        "SELECT m.id, m.folder_name, m.name, m.enabled, m.load_order, d.required
          FROM mod_dependencies d JOIN mods m ON d.dependency_id = m.id
          WHERE d.mod_id = ?1 ORDER BY m.load_order DESC",
     )?;
     let rows = stmt.query_map(params![mod_id], |row| {
-        Ok(ModEntry {
-            id: row.get(0)?,
-            folder_name: row.get(1)?,
-            name: row.get(2)?,
-            enabled: row.get::<_, i64>(3)? != 0,
-            load_order: row.get(4)?,
-        })
+        Ok((
+            ModEntry {
+                id: row.get(0)?,
+                folder_name: row.get(1)?,
+                name: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                load_order: row.get(4)?,
+            },
+            row.get::<_, i64>(5)? != 0,
+        ))
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }

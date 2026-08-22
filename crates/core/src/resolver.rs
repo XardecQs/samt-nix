@@ -1,9 +1,10 @@
-use crate::db::ModEntry;
+use crate::db::{DepRef, ModEntry};
 use std::collections::{HashMap, HashSet};
 
 pub struct DepGraph {
     pub mods: HashMap<i64, ModEntry>,
     pub deps: HashMap<i64, Vec<i64>>,
+    pub optional_deps: HashMap<i64, Vec<i64>>,
     pub enabled_ids: Vec<i64>,
     skip_ids: HashSet<i64>,
     has_errors: bool,
@@ -18,12 +19,24 @@ enum CycleState {
 impl DepGraph {
     pub fn new(
         mods: HashMap<i64, ModEntry>,
-        deps: HashMap<i64, Vec<i64>>,
+        deps: HashMap<i64, Vec<DepRef>>,
         enabled_ids: Vec<i64>,
     ) -> Self {
+        let mut required: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut optional: HashMap<i64, Vec<i64>> = HashMap::new();
+        for (mid, refs) in deps {
+            for r in refs {
+                if r.required {
+                    required.entry(mid).or_default().push(r.id);
+                } else {
+                    optional.entry(mid).or_default().push(r.id);
+                }
+            }
+        }
         Self {
             mods,
-            deps,
+            deps: required,
+            optional_deps: optional,
             enabled_ids,
             skip_ids: HashSet::new(),
             has_errors: false,
@@ -53,6 +66,22 @@ impl DepGraph {
         if !ok {
             self.has_errors = true;
         }
+
+        for (mid, dep_ids) in &self.optional_deps {
+            for did in dep_ids {
+                if !mod_ids.contains(did) {
+                    let mod_name = self
+                        .mods
+                        .get(mid)
+                        .map(|m| m.folder_name.as_str())
+                        .unwrap_or("?");
+                    crate::db::log::warn(format!(
+                        "'{mod_name}' recomienda el mod con id={did}, que no existe en la base de datos."
+                    ));
+                }
+            }
+        }
+
         ok
     }
 
@@ -200,6 +229,26 @@ impl DepGraph {
         }
     }
 
+    pub fn warn_optional_deps(&self) {
+        for mid in &self.enabled_ids {
+            if let Some(dep_ids) = self.optional_deps.get(mid) {
+                let mod_name = self.mod_folder(*mid);
+                for did in dep_ids {
+                    match self.mods.get(did) {
+                        Some(m) if m.enabled => {}
+                        Some(m) => crate::db::log::warn(format!(
+                            "'{mod_name}' recomienda '{}', pero está desactivado.",
+                            m.folder_name
+                        )),
+                        None => crate::db::log::warn(format!(
+                            "'{mod_name}' recomienda el mod con id={did}, que no está instalado."
+                        )),
+                    }
+                }
+            }
+        }
+    }
+
     pub fn resolve(&self) -> Vec<String> {
         let mut visited: HashSet<i64> = HashSet::new();
         let mut resolved: Vec<String> = Vec::new();
@@ -207,9 +256,14 @@ impl DepGraph {
         let dependency_of: HashSet<i64> = self
             .enabled_ids
             .iter()
-            .filter_map(|mid| self.deps.get(mid))
-            .flatten()
-            .copied()
+            .flat_map(|mid| {
+                self.deps
+                    .get(mid)
+                    .into_iter()
+                    .chain(self.optional_deps.get(mid))
+                    .flatten()
+                    .copied()
+            })
             .collect();
 
         for mid in &self.enabled_ids {
@@ -244,6 +298,23 @@ impl DepGraph {
             sorted_deps.sort_by_key(|b| std::cmp::Reverse(b.0));
 
             for (_, did) in sorted_deps {
+                self.dfs_resolve(did, visited, resolved);
+            }
+        }
+
+        if let Some(opt_ids) = self.optional_deps.get(&mid) {
+            let mut sorted_opt: Vec<(i64, i64)> = opt_ids
+                .iter()
+                .filter_map(|did| {
+                    self.mods
+                        .get(did)
+                        .filter(|m| m.enabled)
+                        .map(|m| (m.load_order, *did))
+                })
+                .collect();
+            sorted_opt.sort_by_key(|b| std::cmp::Reverse(b.0));
+
+            for (_, did) in sorted_opt {
                 self.dfs_resolve(did, visited, resolved);
             }
         }

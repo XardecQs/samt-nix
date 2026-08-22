@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS mods (
 CREATE TABLE IF NOT EXISTS mod_dependencies (
     mod_id INTEGER NOT NULL,
     dependency_id INTEGER NOT NULL,
+    required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0, 1)),
     PRIMARY KEY (mod_id, dependency_id),
     FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
     FOREIGN KEY (dependency_id) REFERENCES mods(id) ON DELETE CASCADE,

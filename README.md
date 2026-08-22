@@ -126,11 +126,18 @@ gta-mo ctl remove <id|folder>
 gta-mo ctl enable <id|folder>
 gta-mo ctl disable <id|folder>
 gta-mo ctl order <id|folder> <n>
-gta-mo ctl rename <id|folder> <name>
+gta-mo ctl rename <id|folder> <name> [--folder]
 gta-mo ctl info <id|folder>
-gta-mo ctl dep add <mod> <dependency>
+gta-mo ctl dep add <mod> <dependency> [--optional]
 gta-mo ctl dep rm <mod> <dependency>
 ```
+
+- `rename --folder`: also renames the mod's directory on disk (and keeps the
+  database consistent), instead of only the display name. Dependencies are
+  stored by id, so they survive the rename.
+- `dep add --optional`: marks a dependency as optional/recommended. A missing
+  or disabled optional dependency only prints a warning at launch; it does
+  not block the game nor get forced on.
 
 Shell completions are installed automatically when using the Home Manager module. To generate them manually:
 
