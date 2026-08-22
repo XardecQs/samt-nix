@@ -19,7 +19,7 @@
 #
 # Usage (Steam):
 #   1. Add a non-Steam game.
-#   2. Target  -> absolute path to this script, e.g. /path/to/steam-launch.sh
+#   2. Target  -> absolute path to this script, e.g. /path/to/gta-mo-steam.sh
 #   3. Start In -> a directory that exists (any, e.g. $HOME)
 #   4. Compatibility -> "Do not use a compatibility tool"
 #   5. (Optional) Launch Options -> extra gta-mo flags (--debug, --discover, ...)
@@ -39,7 +39,7 @@ if [ -z "$bin" ] && [ -x "$HOME/.nix-profile/bin/gta-mo" ]; then
     bin="$HOME/.nix-profile/bin/gta-mo"
 fi
 if [ -z "$bin" ]; then
-    echo "steam-launch: no se encontro el binario gta-mo (usa \$GTA_MO_BIN)" >&2
+    echo "gta-mo-steam: no se encontro el binario gta-mo (usa \$GTA_MO_BIN)" >&2
     exit 1
 fi
 
@@ -48,7 +48,7 @@ if [ -z "$unshare" ]; then
     unshare="$(command -v unshare 2>/dev/null || true)"
 fi
 if [ -z "$unshare" ] || [ ! -x "$unshare" ]; then
-    echo "steam-launch: no se encontro el binario unshare (usa \$UNSHARE)" >&2
+    echo "gta-mo-steam: no se encontro el binario unshare (usa \$UNSHARE)" >&2
     exit 1
 fi
 

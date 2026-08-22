@@ -19,6 +19,7 @@
         ./crates
         ./Cargo.toml
         ./Cargo.lock
+        ./scripts
       ];
     };
 
@@ -41,6 +42,8 @@
           wrapProgram "$out/bin/gta-mo" \
             --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
             --prefix PATH : ${pkgs.umu-launcher}/bin
+
+          install -Dm755 scripts/gta-mo-steam.sh "$out/bin/gta-mo-steam.sh"
 
           mkdir -p "$out/share/bash-completion/completions" \
                    "$out/share/zsh/site-functions" \

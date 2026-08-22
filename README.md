@@ -148,15 +148,19 @@ Steam Linux Runtime compatibility tool on the entry, or Steam will execute
 `gta-mo` inside `pressure-vessel`, where neither the binary nor its
 dependencies exist (`Failed to execute child process ?gta-mo?`).
 
-Use the wrapper at [`scripts/steam-launch.sh`](scripts/steam-launch.sh):
+The wrapper is [`scripts/gta-mo-steam.sh`](scripts/gta-mo-steam.sh). When
+installed via the Nix package it is available system-wide as
+`gta-mo-steam.sh` (e.g. `/etc/profiles/per-user/$USER/bin/gta-mo-steam.sh`
+with the Home Manager module).
 
-1. Copy it somewhere stable and make it executable
-   (`chmod +x scripts/steam-launch.sh`).
-2. In Steam: **Add a Non-Steam Game**.
-3. Set **Target** to the absolute path of `steam-launch.sh`.
-4. Set **Start In** to an existing directory (e.g. `$HOME`).
-5. In **Properties → Compatibility**, select **"Do not use a compatibility tool"**.
-6. (Optional) Add extra `gta-mo` flags in **Launch Options** (`--debug`, `--discover`, ...).
+To integrate with Steam:
+
+1. In Steam: **Add a Non-Steam Game**.
+2. Set **Target** to the absolute path of `gta-mo-steam.sh`
+   (system-wide path if installed, or `scripts/gta-mo-steam.sh` in a checkout).
+3. Set **Start In** to an existing directory (e.g. `$HOME`).
+4. In **Properties → Compatibility**, select **"Do not use a compatibility tool"**.
+5. (Optional) Add extra `gta-mo` flags in **Launch Options** (`--debug`, `--discover`, ...).
 
 The wrapper resolves the `gta-mo` binary from `$GTA_MO_BIN`, `PATH`,
 `/etc/profiles/per-user/$USER/bin`, or `~/.nix-profile/bin`, then runs
