@@ -130,6 +130,7 @@
 
     overlay = final: prev: {
       gta-mod-organizer = self.packages.${final.system}.default;
+      gta-mo-gui = self.packages.${final.system}.gta-mo-gui;
     };
 
     nixosModules = {

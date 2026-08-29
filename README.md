@@ -28,6 +28,7 @@ Add the flake to your Home Manager configuration:
         {
           programs.gta-mo = {
             enable = true;
+            # enableGui = true;   # also install the gta-mo-gui (Fyne) frontend
             settings = {
               game_root = "/home/user/Games/GTA_SA";
               proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1";
@@ -64,7 +65,7 @@ This generates `~/.config/gta-mo/config.toml`, installs the `gta-mo` binary, and
 }
 ```
 
-This installs `gta-mo` system-wide and places a config template at `/etc/gta-mo/config.toml.example`.
+This installs `gta-mo` system-wide and places a config template at `/etc/gta-mo/config.toml.example`. Add `programs.gta-mo.enableGui = true;` to also install the GUI.
 
 ### Development shell
 

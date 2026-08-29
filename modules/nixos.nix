@@ -24,10 +24,12 @@ let
 
     # Directory layout expected under game_root:
     #   game_root/
-    #   ├── base/    — Clean, unmodded game files
-    #   ├── mods/    — One subdirectory per mod
-    #   ├── pfx/     — Wine prefix (auto-created by umu-launcher)
-    #   └── run/     — Overlay runtime (upper/, work/, merged/ and logs/)
+    #   ├── base/     — Clean, unmodded game files
+    #   ├── mods/     — One subdirectory per mod
+    #   ├── pfx/      — Wine prefix (auto-created by umu-launcher)
+    #   └── run/
+    #       ├── merged/             — Overlay mount point
+    #       └── profiles/<slug>/    — Per-profile upper/, work/, logs/
   '';
 in {
   options.programs.gta-mo = {
@@ -39,10 +41,14 @@ in {
       defaultText = lib.literalExpression "pkgs.gta-mod-organizer";
       description = "The gta-mod-organizer CLI package to use.";
     };
+
+    enableGui = lib.mkEnableOption "the gta-mo-gui (Fyne) frontend";
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ cfg.package ];
+    environment.systemPackages = [ cfg.package ] ++ lib.optionals cfg.enableGui [
+      pkgs.gta-mo-gui
+    ];
 
     environment.etc."gta-mo/config.toml.example" = {
       text = exampleConfig;

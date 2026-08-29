@@ -31,6 +31,8 @@ in {
       description = "The gta-mod-organizer CLI package to use.";
     };
 
+    enableGui = lib.mkEnableOption "the gta-mo-gui (Fyne) frontend";
+
     settings = lib.mkOption {
       type = settingsType;
       default = { };
@@ -56,7 +58,9 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    home.packages = [ cfg.package ];
+    home.packages = [ cfg.package ] ++ lib.optionals cfg.enableGui [
+      pkgs.gta-mo-gui
+    ];
 
     xdg.configFile."gta-mo/config.toml".source =
       settingsFormat.generate "gta-mo-config.toml" cfg.settings;
