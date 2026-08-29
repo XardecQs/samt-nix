@@ -33,6 +33,13 @@ in {
 
     enableGui = lib.mkEnableOption "the gta-mo-gui (Fyne) frontend";
 
+    guiPackage = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.gta-mo-gui;
+      defaultText = lib.literalExpression "pkgs.gta-mo-gui";
+      description = "The gta-mo-gui (Fyne frontend) package to use.";
+    };
+
     settings = lib.mkOption {
       type = settingsType;
       default = { };
@@ -59,7 +66,7 @@ in {
 
   config = lib.mkIf cfg.enable {
     home.packages = [ cfg.package ] ++ lib.optionals cfg.enableGui [
-      pkgs.gta-mo-gui
+      cfg.guiPackage
     ];
 
     xdg.configFile."gta-mo/config.toml".source =
