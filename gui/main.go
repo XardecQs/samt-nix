@@ -129,10 +129,14 @@ func (g *GUI) modRow(m Mod) fyne.CanvasObject {
 		label += "\n    depende de: " + strings.Join(deps, ", ")
 	}
 
-	check := widget.NewCheck(label, func(on bool) {
-		g.toggleMod(m, on)
-	})
+	check := widget.NewCheck(label, nil)
 	check.SetChecked(m.Enabled)
+	check.OnChanged = func(on bool) {
+		if on == m.Enabled {
+			return
+		}
+		g.toggleMod(m, on)
+	}
 
 	up := widget.NewButton("▲", func() { g.moveMod(m, -1) })
 	down := widget.NewButton("▼", func() { g.moveMod(m, 1) })
