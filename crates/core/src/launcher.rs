@@ -11,6 +11,9 @@ pub struct LaunchOptions {
     pub discover: bool,
     pub clean: bool,
     pub auto_discover: bool,
+    pub profile: Option<String>,
+    pub deps_enable: bool,
+    pub deps_ignore: bool,
 }
 
 impl Default for LaunchOptions {
@@ -21,6 +24,9 @@ impl Default for LaunchOptions {
             discover: false,
             clean: false,
             auto_discover: true,
+            profile: None,
+            deps_enable: false,
+            deps_ignore: false,
         }
     }
 }
@@ -97,8 +103,13 @@ impl LaunchEngine {
         layers.join(":")
     }
 
-    pub fn setup_env(cfg: &config::Config, paths: &config::RuntimePaths, debug: bool) {
-        std::env::set_var("WINEPREFIX", &paths.wine_prefix);
+    pub fn setup_env(
+        cfg: &config::Config,
+        wine_prefix: &std::path::Path,
+        log_dir: &std::path::Path,
+        debug: bool,
+    ) {
+        std::env::set_var("WINEPREFIX", wine_prefix);
         std::env::set_var("PROTONPATH", &cfg.proton_path);
         std::env::set_var("GAMEID", cfg.game_id());
         std::env::set_var(
@@ -115,10 +126,10 @@ impl LaunchEngine {
         );
 
         if debug {
-            std::fs::create_dir_all(&paths.log_dir).ok();
+            std::fs::create_dir_all(log_dir).ok();
             std::env::set_var("PROTON_LOG", "1");
             std::env::set_var("DXVK_LOG_LEVEL", "debug");
-            std::env::set_var("DXVK_LOG_PATH", &paths.log_dir);
+            std::env::set_var("DXVK_LOG_PATH", log_dir);
             std::env::set_var("DXVK_HUD", cfg.dxvk_hud());
             std::env::set_var("WINEDEBUG", "+loaddll");
         }
@@ -257,6 +268,8 @@ impl LaunchEngine {
         let conn = db::open_db(&db_path)?;
         db::run_migrations(&conn)?;
 
+        Self::migrate_legacy_upper(&cfg, &paths, &conn)?;
+
         let do_discover = opts.discover || (opts.auto_discover && cfg.auto_discover());
         if do_discover {
             log("Auto-descubriendo mods...");
@@ -277,11 +290,21 @@ impl LaunchEngine {
             });
         }
 
-        let all_mods = db::load_all_mods(&conn)?;
-        let deps = db::load_dependencies(&conn)?;
-        let enabled_ids = db::load_enabled_mod_ids(&conn)?;
+        let profile = Self::resolve_profile(&cfg, &conn, opts.profile.as_deref())?;
+        let profile_id = profile.id;
+        let ppaths = paths.profile_paths(&profile.slug);
 
-        let mut graph = resolver::DepGraph::new(all_mods, deps, enabled_ids);
+        let all_mods = db::load_all_mods_for_profile(&conn, profile_id)?;
+        let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
+        let deps = db::load_dependencies(&conn)?;
+        let enabled_ids = db::load_enabled_mod_ids_for_profile(&conn, profile_id)?;
+
+        let mut graph = resolver::DepGraph::new(mods_map, deps, enabled_ids);
+        if opts.deps_enable {
+            graph.prompt = resolver::DepPrompt::AutoEnable;
+        } else if opts.deps_ignore {
+            graph.prompt = resolver::DepPrompt::Ignore;
+        }
 
         if !graph.validate_dependencies() || !graph.detect_cycles() {
             anyhow::bail!("Errores en la resolución de dependencias.");
@@ -289,18 +312,18 @@ impl LaunchEngine {
 
         graph.enable_mods_for_deps();
         graph.warn_optional_deps();
-        graph.sync_enabled_to_db(&conn)?;
+        graph.sync_enabled_to_db(&conn, profile_id)?;
 
         if graph.enabled_ids.is_empty() {
             log("Sin mods activos — lanzando juego limpio.");
 
             if opts.dry_run {
                 return Ok(LaunchResult {
-                    log: Self::dry_run_report(&cfg, &paths, &[], opts.debug),
+                    log: Self::dry_run_report(&cfg, &paths, &profile, &ppaths, &[], opts.debug),
                 });
             }
 
-            Self::setup_env(&cfg, &paths, opts.debug);
+            Self::setup_env(&cfg, &paths.wine_prefix, &ppaths.log_dir, opts.debug);
             let exe = paths.base_game.join(cfg.game_exe());
             Self::launch_game(&exe, &paths.base_game)?;
             return Ok(LaunchResult {
@@ -328,14 +351,16 @@ impl LaunchEngine {
         }
 
         if opts.dry_run {
-            log_output.push_str(&Self::dry_run_report(&cfg, &paths, &resolved, opts.debug));
+            log_output.push_str(&Self::dry_run_report(
+                &cfg, &paths, &profile, &ppaths, &resolved, opts.debug,
+            ));
             return Ok(LaunchResult { log: log_output });
         }
 
         let lowerdir = Self::build_lowerdir(&paths.mods_dir, &resolved, &paths.base_game);
 
         let mut ov =
-            overlay::OverlayMount::mount(&lowerdir, &paths.upper, &paths.work, &paths.merged)?;
+            overlay::OverlayMount::mount(&lowerdir, &ppaths.upper, &ppaths.work, &paths.merged)?;
         ov.start_guard();
 
         let game_exe = paths.merged.join(cfg.game_exe());
@@ -343,7 +368,7 @@ impl LaunchEngine {
             anyhow::bail!("{} no encontrado tras el montaje", game_exe.display());
         }
 
-        Self::setup_env(&cfg, &paths, opts.debug);
+        Self::setup_env(&cfg, &paths.wine_prefix, &ppaths.log_dir, opts.debug);
         log("Lanzando juego...");
         Self::launch_game(&game_exe, &paths.merged)?;
 
@@ -351,14 +376,61 @@ impl LaunchEngine {
         Ok(LaunchResult { log: log_output })
     }
 
+    fn resolve_profile(
+        cfg: &config::Config,
+        conn: &rusqlite::Connection,
+        ident: Option<&str>,
+    ) -> anyhow::Result<db::Profile> {
+        if let Some(ident) = ident {
+            return db::resolve_profile(conn, ident);
+        }
+        if let Some(dp) = cfg.default_profile() {
+            if let Ok(p) = db::resolve_profile(conn, dp) {
+                return Ok(p);
+            }
+            db::log::warn(format!(
+                "default_profile '{}' no existe; usando el perfil activo.",
+                dp
+            ));
+        }
+        db::active_profile(conn)
+    }
+
+    fn migrate_legacy_upper(
+        cfg: &config::Config,
+        paths: &config::RuntimePaths,
+        conn: &rusqlite::Connection,
+    ) -> anyhow::Result<()> {
+        let legacy_upper = std::path::PathBuf::from(&cfg.game_root).join("run/upper");
+        if !legacy_upper.is_dir() {
+            return Ok(());
+        }
+        let Ok(Some(profile)) = db::get_profile_by_slug(conn, "default") else {
+            return Ok(());
+        };
+        let target = paths.profile_paths(&profile.slug).upper;
+        if target.exists() {
+            db::log::warn("run/upper existe pero run/profiles/default/upper también; no se migra.");
+            return Ok(());
+        }
+        std::fs::create_dir_all(target.parent().unwrap())?;
+        db::log::info("Migrando run/upper a run/profiles/default/upper...");
+        std::fs::rename(&legacy_upper, &target)?;
+        db::log::info("[+] Migración completada.");
+        Ok(())
+    }
+
     fn dry_run_report(
         cfg: &config::Config,
         paths: &config::RuntimePaths,
+        profile: &db::Profile,
+        ppaths: &config::ProfilePaths,
         resolved: &[String],
         debug: bool,
     ) -> String {
         let mut out = String::new();
         out.push_str("\n=== DRY RUN: no se montara overlay ni se lanzara el juego ===\n\n");
+        out.push_str(&format!("Perfil: {} ({})\n", profile.name, profile.slug));
         out.push_str("lowerdir capas (ordenadas mayor -> menor prioridad):\n");
 
         if resolved.is_empty() {
@@ -382,8 +454,8 @@ impl LaunchEngine {
         }
 
         out.push('\n');
-        out.push_str(&format!("upperdir: {}\n", paths.upper.display()));
-        out.push_str(&format!("workdir:  {}\n", paths.work.display()));
+        out.push_str(&format!("upperdir: {}\n", ppaths.upper.display()));
+        out.push_str(&format!("workdir:  {}\n", ppaths.work.display()));
         out.push_str(&format!("merged:   {}\n", paths.merged.display()));
         out.push('\n');
         out.push_str(&format!(
@@ -412,7 +484,7 @@ impl LaunchEngine {
             out.push_str("  DXVK_LOG_LEVEL:          debug\n");
             out.push_str(&format!(
                 "  DXVK_LOG_PATH:           {}\n",
-                paths.log_dir.display()
+                ppaths.log_dir.display()
             ));
             out.push_str(&format!("  DXVK_HUD:                {}\n", cfg.dxvk_hud()));
             out.push_str("  WINEDEBUG:               +loaddll\n");

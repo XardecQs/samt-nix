@@ -15,6 +15,9 @@ use std::io::Write;
     version
 )]
 struct Cli {
+    #[arg(long, global = true, help = "Profile to use (name, slug or id)")]
+    profile: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -26,6 +29,8 @@ enum Command {
         shell: String,
     },
     Launch(LaunchArgs),
+    #[command(about = "Launch from Steam (re-execs inside a user/mount namespace)")]
+    Steam(LaunchArgs),
     Ctl(CtlArgs),
 }
 
@@ -42,6 +47,20 @@ struct LaunchArgs {
 
     #[arg(long, help = "Remove orphaned mod entries from database and exit")]
     clean: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "deps_ignore",
+        help = "Auto-enable disabled dependencies without prompting"
+    )]
+    deps_enable: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "deps_enable",
+        help = "Skip disabled dependencies without prompting"
+    )]
+    deps_ignore: bool,
 }
 
 #[derive(Args)]
@@ -62,6 +81,9 @@ pub enum CtlCommand {
 
         #[arg(long = "disabled", group = "filter", help = "Only disabled mods")]
         disabled: bool,
+
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
     },
     #[command(about = "Add a new mod")]
     Add {
@@ -72,11 +94,19 @@ pub enum CtlCommand {
         order: Option<i64>,
     },
     #[command(about = "Remove a mod")]
-    Remove { ident: String },
+    Remove {
+        ident: String,
+        #[arg(long, help = "Skip confirmation")]
+        yes: bool,
+    },
     #[command(about = "Enable a mod")]
     Enable { ident: String },
     #[command(about = "Disable a mod")]
-    Disable { ident: String },
+    Disable {
+        ident: String,
+        #[arg(long, help = "Skip confirmation")]
+        yes: bool,
+    },
     #[command(about = "Change load order")]
     Order { ident: String, new_order: i64 },
     #[command(about = "Rename a mod's display name (or its folder with --folder)")]
@@ -87,12 +117,44 @@ pub enum CtlCommand {
         folder: bool,
     },
     #[command(about = "Show detailed mod info")]
-    Info { ident: String },
+    Info {
+        ident: String,
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
     #[command(about = "Manage dependencies")]
     Dep {
         #[command(subcommand)]
         action: DepAction,
     },
+    #[command(about = "Manage profiles")]
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProfileAction {
+    #[command(about = "List profiles")]
+    List {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Create a new profile")]
+    Create { name: String },
+    #[command(about = "Delete a profile (keeps the last one)")]
+    Delete {
+        ident: String,
+        #[arg(long, help = "Skip confirmation")]
+        yes: bool,
+    },
+    #[command(about = "Set the active profile")]
+    Use { ident: String },
+    #[command(about = "Rename a profile (slug and directories stay unchanged)")]
+    Rename { ident: String, new_name: String },
+    #[command(about = "Copy a profile's mod states to a new profile")]
+    Copy { source: String, new_name: String },
 }
 
 #[derive(Subcommand)]
@@ -117,11 +179,15 @@ pub enum DepAction {
 fn main() {
     let cli = Cli::parse();
 
+    let profile = cli.profile.clone();
+
     let command = cli.command.unwrap_or(Command::Launch(LaunchArgs {
         dry_run: false,
         debug: false,
         discover: false,
         clean: false,
+        deps_enable: false,
+        deps_ignore: false,
     }));
 
     let result = match command {
@@ -153,7 +219,8 @@ fn main() {
                 ))
             }
         }
-        Command::Launch(args) => cmd_launch(args),
+        Command::Launch(args) => cmd_launch(args, profile.as_deref()),
+        Command::Steam(args) => cmd_steam(args, profile.as_deref()),
         Command::Ctl(args) => {
             let db_path = config::db_path();
             db::ensure_db_dir(&db_path).unwrap_or_else(|e| {
@@ -165,7 +232,7 @@ fn main() {
             db::run_migrations(&conn).unwrap_or_else(|e| {
                 db::log::die(format!("Error en migraciones: {e}"));
             });
-            ctl::run(&conn, &args)
+            ctl::run(&conn, &args, profile.as_deref())
         }
     };
 
@@ -175,7 +242,7 @@ fn main() {
     }
 }
 
-fn cmd_launch(args: LaunchArgs) -> anyhow::Result<()> {
+fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
     println!("=== GTA SA Mod Organizer ===");
 
     let opts = LaunchOptions {
@@ -184,6 +251,9 @@ fn cmd_launch(args: LaunchArgs) -> anyhow::Result<()> {
         discover: args.discover,
         clean: args.clean,
         auto_discover: true,
+        profile: profile.map(String::from),
+        deps_enable: args.deps_enable,
+        deps_ignore: args.deps_ignore,
     };
 
     let result = LaunchEngine::run(&opts, |msg| println!("{msg}"))?;
@@ -192,5 +262,77 @@ fn cmd_launch(args: LaunchArgs) -> anyhow::Result<()> {
         println!("{}", result.log);
     }
 
+    Ok(())
+}
+
+fn cmd_steam(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
+    if std::env::var_os("GTA_MO_STEAM_NS").is_some() {
+        return cmd_launch(args, profile);
+    }
+
+    let unshare = std::env::var("GTA_MO_UNSHARE")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.exists())
+        .or_else(|| which::which("unshare").ok())
+        .ok_or_else(|| anyhow::anyhow!("No se encontró 'unshare'. Defínelo con GTA_MO_UNSHARE."))?;
+
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+
+    let mut steam_args = Vec::<std::ffi::OsString>::new();
+    if args.dry_run {
+        steam_args.push("--dry-run".into());
+    }
+    if args.debug {
+        steam_args.push("--debug".into());
+    }
+    if args.discover {
+        steam_args.push("--discover".into());
+    }
+    if args.clean {
+        steam_args.push("--clean".into());
+    }
+    if args.deps_enable {
+        steam_args.push("--deps-enable".into());
+    }
+    if args.deps_ignore {
+        steam_args.push("--deps-ignore".into());
+    }
+    if let Some(p) = profile {
+        steam_args.push("--profile".into());
+        steam_args.push(p.into());
+    }
+
+    let self_exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("No se pudo resolver el binario gta-mo: {e}"))?;
+
+    let mut cmd = std::process::Command::new(&unshare);
+    cmd.arg("-m")
+        .arg("-U")
+        .arg("--map-root-user")
+        .arg(&self_exe)
+        .arg("steam")
+        .args(&steam_args)
+        .env("GTA_MO_STEAM_NS", "1")
+        .env_remove("LD_PRELOAD")
+        .env_remove("LD_LIBRARY_PATH");
+    if uid != 0 {
+        cmd.env("GTA_MO_DROP_UID", uid.to_string())
+            .env("GTA_MO_DROP_GID", gid.to_string());
+    }
+
+    db::log::info("Entrando en user/mount namespace (modo Steam)...");
+    let status = cmd.status().map_err(|e| {
+        anyhow::anyhow!(
+            "No se pudo ejecutar unshare en '{}': {e}",
+            unshare.display()
+        )
+    })?;
+
+    if !status.success() {
+        let code = status.code().unwrap_or(1);
+        anyhow::bail!("gta-mo steam terminó con error: exit status: {code}");
+    }
     Ok(())
 }

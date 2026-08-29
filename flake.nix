@@ -19,7 +19,6 @@
         ./crates
         ./Cargo.toml
         ./Cargo.lock
-        ./scripts
       ];
     };
 
@@ -43,8 +42,6 @@
             --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
             --prefix PATH : ${pkgs.umu-launcher}/bin
 
-          install -Dm755 scripts/gta-mo-steam.sh "$out/bin/gta-mo-steam.sh"
-
           mkdir -p "$out/share/bash-completion/completions" \
                    "$out/share/zsh/site-functions" \
                    "$out/share/fish/vendor_completions.d"
@@ -61,10 +58,52 @@
         };
       };
 
+    mkGuiPackage = { pkgs }:
+      pkgs.buildGoModule {
+        pname = "gta-mo-gui";
+        inherit version;
+
+        src = ./gui;
+
+        vendorHash = "sha256-8eY85GmiZugF9HHRxGFFmnlwny5Agewt2tjPcC95RzI=";
+
+        nativeBuildInputs = with pkgs; [ pkg-config makeWrapper ];
+
+        buildInputs = with pkgs; [
+          glfw3
+          libGL
+          mesa
+          libx11
+          libxcb
+          libxcursor
+          libxrandr
+          libxi
+          libxinerama
+          libxext
+          libxxf86vm
+          libxkbcommon
+          wayland
+          wayland-protocols
+        ];
+
+        postInstall = ''
+          wrapProgram "$out/bin/gta-mo-gui" \
+            --prefix PATH : ${self.packages.${pkgs.system}.gta-mod-organizer}/bin
+        '';
+
+        meta = {
+          description = "GTA San Andreas mod organizer GUI (Fyne frontend for gta-mo)";
+          mainProgram = "gta-mo-gui";
+          license = nixpkgs.lib.licenses.mit;
+          platforms = supportedSystems;
+        };
+      };
+
   in {
     packages = forAllSystems (pkgs: rec {
       default = gta-mod-organizer;
       gta-mod-organizer = mkCliPackage { inherit pkgs; };
+      gta-mo-gui = mkGuiPackage { inherit pkgs; };
     });
 
     checks = forAllSystems (pkgs: let
@@ -114,11 +153,28 @@
           fuse-overlayfs
           umu-launcher
           sqlite
+          go
+          gcc
+          pkg-config
+          glfw3
+          libGL
+          mesa
+          libx11
+          libxcb
+          libxcursor
+          libxrandr
+          libxi
+          libxinerama
+          libxext
+          libxxf86vm
+          libxkbcommon
+          wayland
+          wayland-protocols
         ];
 
         shellHook = ''
           export CARGO_TARGET_DIR="$HOME/.cache/gta-mo-target"
-          echo "Listo — GTA Mod Organizer (Rust dev shell)"
+          echo "Listo — GTA Mod Organizer (Rust + Go dev shell)"
         '';
       };
     });

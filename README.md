@@ -86,11 +86,20 @@ The tool expects this structure under `game_root` (defined in `config.toml`):
 
 ```
 game_root/
-├── base/          # Clean, unmodded game files
-├── mods/          # One subdirectory per mod
-├── pfx/           # Wine prefix (auto-created by umu-launcher)
-└── run/           # Overlay runtime (upper/, work/, merged/)
+├── base/              # Clean, unmodded game files
+├── mods/              # One subdirectory per mod
+├── pfx/               # Wine prefix (auto-created by umu-launcher)
+└── run/
+    ├── merged/        # Overlay mount point (single)
+    └── profiles/
+        └── <slug>/    # Per-profile state (saves, configs, logs)
+            ├── upper/ # Overlay upperdir (game writes land here)
+            ├── work/  # Overlay workdir
+            └── logs/  # DXVK/Proton logs (when --debug)
 ```
+
+Each profile gets its own `upper/`, so savegames (e.g. with PortableGTA),
+game-written configs and logs never mix between profiles.
 
 ## Configuration
 
@@ -112,6 +121,7 @@ game_exe = "gta_sa.exe"
 proton_use_wined3d = false
 proton_disable_ntsync = false
 auto_discover = true
+# default_profile = "vanilla"   # used by `launch` when --profile is not given
 # Optional: custom mods directory (defaults to game_root/mods)
 # mods_dir = "/path/to/mods"
 ```
@@ -119,19 +129,38 @@ auto_discover = true
 ## CLI
 
 ```
-gta-mo launch [--dry-run] [--debug] [--discover] [--clean]
-gta-mo ctl list [-v] [--enabled|--disabled]
-gta-mo ctl add <folder> [--name <name>] [--order <n>]
+gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>]
+gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/mount namespace (for Steam)
+gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
+gta-mo ctl add <folder> [--name <name>]
 gta-mo ctl remove <id|folder>
-gta-mo ctl enable <id|folder>
-gta-mo ctl disable <id|folder>
-gta-mo ctl order <id|folder> <n>
+gta-mo ctl enable <id|folder> [--profile <name>]
+gta-mo ctl disable <id|folder> [--profile <name>]
+gta-mo ctl order <id|folder> <n> [--profile <name>]
 gta-mo ctl rename <id|folder> <name> [--folder]
-gta-mo ctl info <id|folder>
+gta-mo ctl info <id|folder> [--json] [--profile <name>]
 gta-mo ctl dep add <mod> <dependency> [--optional]
 gta-mo ctl dep rm <mod> <dependency>
+gta-mo ctl profile list [--json]
+gta-mo ctl profile create <name>
+gta-mo ctl profile delete <name>
+gta-mo ctl profile use <name>
+gta-mo ctl profile rename <old> <new>
+gta-mo ctl profile copy <source> <new-name>
 ```
 
+- `--profile <name>` (global flag, also `--profile <slug|id>`): selects which
+  profile a command operates on. Defaults to the active profile.
+- Profiles group the `enabled`/`load_order` state of mods. Mods themselves
+  (folders, names, dependencies) are global. A `default` profile is created
+  automatically on first run.
+- `profile use` persists the active profile; `launch` uses it unless
+  `--profile` or `default_profile` in the config says otherwise.
+- `profile rename` only changes the display name — the directory slug (and
+  therefore the saves/logs in `run/profiles/<slug>/`) stays unchanged.
+- `profile copy` duplicates the mod states of another profile.
+- `--json` prints structured output (list, info, profile list) to stdout,
+  useful for the GUI and scripting.
 - `rename --folder`: also renames the mod's directory on disk (and keeps the
   database consistent), instead of only the display name. Dependencies are
   stored by id, so they survive the rename.
@@ -155,26 +184,22 @@ Steam Linux Runtime compatibility tool on the entry, or Steam will execute
 `gta-mo` inside `pressure-vessel`, where neither the binary nor its
 dependencies exist (`Failed to execute child process ?gta-mo?`).
 
-The wrapper is [`scripts/gta-mo-steam.sh`](scripts/gta-mo-steam.sh). When
-installed via the Nix package it is available system-wide as
-`gta-mo-steam.sh` (e.g. `/etc/profiles/per-user/$USER/bin/gta-mo-steam.sh`
-with the Home Manager module).
+The built-in `gta-mo steam` subcommand does the namespace dance that the old
+shell wrapper did (the legacy wrapper lives in
+[`bash-legacy/gta-mo-steam.sh`](bash-legacy/gta-mo-steam.sh)).
 
 To integrate with Steam:
 
 1. In Steam: **Add a Non-Steam Game**.
-2. Set **Target** to the absolute path of `gta-mo-steam.sh`
-   (system-wide path if installed, or `scripts/gta-mo-steam.sh` in a checkout).
+2. Set **Target** to the absolute path of the `gta-mo` binary.
 3. Set **Start In** to an existing directory (e.g. `$HOME`).
 4. In **Properties → Compatibility**, select **"Do not use a compatibility tool"**.
-5. (Optional) Add extra `gta-mo` flags in **Launch Options** (`--debug`, `--discover`, ...).
+5. In **Launch Options** put `steam` plus any extra flags
+   (`steam --debug --profile vanilla`, ...).
 
-The wrapper resolves the `gta-mo` binary from `$GTA_MO_BIN`, `PATH`,
-`/etc/profiles/per-user/$USER/bin`, or `~/.nix-profile/bin`, then runs
-`gta-mo launch` inside a fresh user/mount namespace
-(`unshare -m -U --map-root-user`). If it cannot find the binary, point the
-`GTA_MO_BIN` environment variable at it (and `$UNSHARE` at the `unshare`
-binary if needed).
+`gta-mo steam` re-execs itself inside a fresh user/mount namespace
+(`unshare -m -U --map-root-user`). It resolves `unshare` from `$GTA_MO_UNSHARE`
+or `PATH`.
 
 Why the namespace is required: on NixOS the Steam client runs inside a
 bubblewrap sandbox with its **own user namespace**, where uid 0 is not
@@ -182,10 +207,10 @@ mapped. The kernel therefore ignores the setuid bit of `fusermount3`, and
 `fuse-overlayfs` fails to mount with `Operation not permitted`. Inside a
 fresh namespace where the user is root, `fuse-overlayfs` mounts directly
 (uid 0 in that namespace is the same host user, so file ownership is
-unchanged). The wrapper also clears `LD_PRELOAD`/`LD_LIBRARY_PATH`, which
+unchanged). The subcommand also clears `LD_PRELOAD`/`LD_LIBRARY_PATH`, which
 Steam populates with `gameoverlayrenderer.so`.
 
-`umu-launcher` refuses to run as root, so the wrapper passes
+`umu-launcher` refuses to run as root, so `gta-mo steam` passes
 `GTA_MO_DROP_UID`/`GTA_MO_DROP_GID` (the real user). When running with
 euid 0, `gta-mo` forks a child that enters a nested user namespace mapping
 that uid and drops privileges before launching `umu-run`, keeping the
@@ -202,12 +227,39 @@ Steam overlay will not attach to the game window.
 | `--debug` | Enable Proton/DXVK debug logging |
 | `--discover` | Scan `mods/` for new mods and exit |
 | `--clean` | Remove orphaned mod entries from the database |
+| `--profile` | Launch with a specific profile (name, slug or id) |
+
+## GUI
+
+There is a lightweight Fyne (Go) frontend that drives the CLI — it never
+touches the database or the overlay directly, it only spawns `gta-mo` and
+parses the `--json` output.
+
+```
+nix build .#gta-mo-gui
+./result/bin/gta-mo-gui
+```
+
+The binary finds `gta-mo` via `GTA_MO_BIN`, `PATH`, or the dev
+`target/debug/gta-mo`. The Nix package is wrapped so it always finds the
+installed `gta-mo`.
+
+Features: list of mods with enable/disable toggles, move up/down load order,
+profile selector plus create/use/rename/copy/delete, and a launch button
+(uses `--deps-enable`, so missing dependencies are auto-enabled instead of
+prompting).
+
+To develop it: `nix develop` (the shell includes Go and the Fyne
+dependencies), then `cd gui && go run .`.
 
 ## How it works
 
 1. Mods live as subdirectories under `mods/`
-2. `schema.sql` defines the SQLite database that tracks mods, their load order, and dependencies
-3. The binary builds a `fuse-overlayfs` layer stack from enabled mods and runs the game with `umu-launcher` (Proton)
+2. `schema.sql` defines the SQLite database that tracks mods, their
+   dependencies, and per-profile enabled/load-order state
+3. The binary builds a `fuse-overlayfs` layer stack from the enabled mods of
+   the active profile (writing through to that profile's `upper/`) and runs
+   the game with `umu-launcher` (Proton)
 
 ## Legacy version
 

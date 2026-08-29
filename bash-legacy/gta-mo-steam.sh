@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# LEGACY — superseeded by the built-in `gta-mo steam` subcommand (0.36+).
+# Keep in bash-legacy for reference and for setups still on older versions.
 # Steam launcher for GTA Mod Organizer.
 #
 # gta-mo must run natively on the host: it mounts fuse-overlayfs and

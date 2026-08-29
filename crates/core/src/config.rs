@@ -21,6 +21,8 @@ pub struct Config {
     pub auto_discover: Option<bool>,
     #[serde(alias = "mods_dir")]
     pub mods_dir: Option<String>,
+    #[serde(alias = "default_profile")]
+    pub default_profile: Option<String>,
 }
 
 impl Config {
@@ -49,15 +51,23 @@ impl Config {
             .as_deref()
             .unwrap_or("devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls")
     }
+
+    pub fn default_profile(&self) -> Option<&str> {
+        self.default_profile.as_deref()
+    }
 }
 
 pub struct RuntimePaths {
     pub base_game: PathBuf,
     pub mods_dir: PathBuf,
     pub wine_prefix: PathBuf,
+    pub profiles_root: PathBuf,
+    pub merged: PathBuf,
+}
+
+pub struct ProfilePaths {
     pub upper: PathBuf,
     pub work: PathBuf,
-    pub merged: PathBuf,
     pub log_dir: PathBuf,
 }
 
@@ -71,13 +81,20 @@ impl RuntimePaths {
             .unwrap_or_else(|| game_root.join("mods"));
 
         Self {
-            upper: game_root.join("run/upper"),
-            work: game_root.join("run/work"),
+            profiles_root: game_root.join("run/profiles"),
             merged: game_root.join("run/merged"),
-            log_dir: game_root.join("run/logs"),
             base_game: game_root.join("base"),
             mods_dir,
             wine_prefix: game_root.join("pfx"),
+        }
+    }
+
+    pub fn profile_paths(&self, slug: &str) -> ProfilePaths {
+        let base = self.profiles_root.join(slug);
+        ProfilePaths {
+            upper: base.join("upper"),
+            work: base.join("work"),
+            log_dir: base.join("logs"),
         }
     }
 }

@@ -17,6 +17,242 @@ pub struct DepRef {
     pub required: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct Profile {
+    pub id: i64,
+    pub name: String,
+    pub slug: String,
+    pub is_active: bool,
+    pub created_at: String,
+}
+
+pub fn slugify(input: &str) -> String {
+    let mut slug = String::new();
+    for c in input.trim().to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            slug.push(c);
+        } else if (c.is_whitespace() || c == '-' || c == '_')
+            && !slug.is_empty()
+            && !slug.ends_with('-')
+        {
+            slug.push('-');
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+pub fn unique_slug(conn: &Connection, base: &str) -> anyhow::Result<String> {
+    let base = slugify(base);
+    let base = if base.is_empty() {
+        "p".to_string()
+    } else {
+        base
+    };
+
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM profiles WHERE slug = ?1",
+        params![base],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(base);
+    }
+    for i in 2.. {
+        let cand = format!("{base}-{i}");
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM profiles WHERE slug = ?1",
+            params![cand],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Ok(cand);
+        }
+    }
+    unreachable!("unique_slug agotó candidatos")
+}
+
+pub fn create_profile(conn: &Connection, name: &str) -> anyhow::Result<i64> {
+    if name.trim().is_empty() {
+        anyhow::bail!("El nombre del perfil no puede estar vacío.");
+    }
+    let slug = unique_slug(conn, name)?;
+    conn.execute(
+        "INSERT INTO profiles (name, slug) VALUES (?1, ?2)",
+        params![name.trim(), slug],
+    )?;
+    let id = conn.last_insert_rowid();
+
+    let mut stmt = conn.prepare("SELECT id FROM mods ORDER BY id")?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (i, mid) in ids.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+             VALUES (?1, ?2, 0, ?3)",
+            params![id, mid, (i as i64 + 1) * 10],
+        )?;
+    }
+    Ok(id)
+}
+
+fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<Profile> {
+    Ok(Profile {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        slug: row.get(2)?,
+        is_active: row.get::<_, i64>(3)? != 0,
+        created_at: row.get(4)?,
+    })
+}
+
+pub fn get_profile_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<Profile>> {
+    let mut stmt =
+        conn.prepare("SELECT id, name, slug, is_active, created_at FROM profiles WHERE id = ?1")?;
+    let mut rows = stmt.query_map(params![id], row_to_profile)?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn get_profile_by_slug(conn: &Connection, slug: &str) -> anyhow::Result<Option<Profile>> {
+    let mut stmt =
+        conn.prepare("SELECT id, name, slug, is_active, created_at FROM profiles WHERE slug = ?1")?;
+    let mut rows = stmt.query_map(params![slug], row_to_profile)?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn get_profile_by_name(conn: &Connection, name: &str) -> anyhow::Result<Option<Profile>> {
+    let mut stmt =
+        conn.prepare("SELECT id, name, slug, is_active, created_at FROM profiles WHERE name = ?1")?;
+    let mut rows = stmt.query_map(params![name], row_to_profile)?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn list_profiles(conn: &Connection) -> anyhow::Result<Vec<Profile>> {
+    let mut stmt =
+        conn.prepare("SELECT id, name, slug, is_active, created_at FROM profiles ORDER BY id")?;
+    let rows = stmt.query_map([], row_to_profile)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn resolve_profile(conn: &Connection, ident: &str) -> anyhow::Result<Profile> {
+    if let Ok(id) = ident.parse::<i64>() {
+        if let Some(p) = get_profile_by_id(conn, id)? {
+            return Ok(p);
+        }
+    }
+    if let Some(p) = get_profile_by_slug(conn, ident)? {
+        return Ok(p);
+    }
+    if let Some(p) = get_profile_by_name(conn, ident)? {
+        return Ok(p);
+    }
+    anyhow::bail!("Perfil '{}' no encontrado.", ident)
+}
+
+pub fn rename_profile(conn: &Connection, id: i64, new_name: &str) -> anyhow::Result<()> {
+    if new_name.trim().is_empty() {
+        anyhow::bail!("El nombre del perfil no puede estar vacío.");
+    }
+    conn.execute(
+        "UPDATE profiles SET name = ?1 WHERE id = ?2",
+        params![new_name.trim(), id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_profile(conn: &Connection, id: i64) -> anyhow::Result<()> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))?;
+    if count <= 1 {
+        anyhow::bail!("No se puede eliminar el último perfil.");
+    }
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    conn.execute("DELETE FROM profiles WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn set_active_profile(conn: &Connection, id: i64) -> anyhow::Result<()> {
+    conn.execute("BEGIN", [])?;
+    let res = (|| -> anyhow::Result<()> {
+        conn.execute("UPDATE profiles SET is_active = 0", [])?;
+        conn.execute(
+            "UPDATE profiles SET is_active = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    })();
+    match res {
+        Ok(()) => {
+            conn.execute("COMMIT", [])?;
+            Ok(())
+        }
+        Err(e) => {
+            conn.execute("ROLLBACK", [])?;
+            Err(e)
+        }
+    }
+}
+
+pub fn active_profile(conn: &Connection) -> anyhow::Result<Profile> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, slug, is_active, created_at FROM profiles WHERE is_active = 1",
+    )?;
+    let mut rows = stmt.query_map([], row_to_profile)?;
+    if let Some(p) = rows.next().transpose()? {
+        return Ok(p);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT id, name, slug, is_active, created_at FROM profiles ORDER BY id LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map([], row_to_profile)?;
+    if let Some(p) = rows.next().transpose()? {
+        set_active_profile(conn, p.id)?;
+        return Ok(p);
+    }
+
+    let id = create_profile(conn, "default")?;
+    set_active_profile(conn, id)?;
+    get_profile_by_id(conn, id)?
+        .ok_or_else(|| anyhow::anyhow!("No se pudo crear el perfil default"))
+}
+
+pub fn copy_profile(conn: &Connection, src_id: i64, new_name: &str) -> anyhow::Result<i64> {
+    let src = get_profile_by_id(conn, src_id)?
+        .ok_or_else(|| anyhow::anyhow!("Perfil origen no encontrado."))?;
+    if new_name.trim().is_empty() {
+        anyhow::bail!("El nombre del perfil no puede estar vacío.");
+    }
+    let slug = unique_slug(conn, new_name)?;
+    conn.execute(
+        "INSERT INTO profiles (name, slug) VALUES (?1, ?2)",
+        params![new_name.trim(), slug],
+    )?;
+    let new_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+         SELECT ?1, mod_id, enabled, load_order FROM profile_mods WHERE profile_id = ?2",
+        params![new_id, src.id],
+    )?;
+    Ok(new_id)
+}
+
+pub fn profile_mod_count(conn: &Connection, profile_id: i64) -> anyhow::Result<(i64, i64)> {
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM profile_mods WHERE profile_id = ?1",
+        params![profile_id],
+        |row| row.get(0),
+    )?;
+    let enabled: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM profile_mods WHERE profile_id = ?1 AND enabled = 1",
+        params![profile_id],
+        |row| row.get(0),
+    )?;
+    Ok((total, enabled))
+}
+
 pub fn ensure_db_dir(db_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -155,13 +391,118 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         log::info("[+] Migración completada.");
     }
 
+    let profiles_exist: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'profiles'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if profiles_exist > 0 {
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))?;
+        if count == 0 {
+            log::info("Migrando schema: creando perfil 'default'...");
+            conn.execute(
+                "INSERT INTO profiles (name, slug, is_active) VALUES ('default', 'default', 1)",
+                [],
+            )?;
+            log::info("[+] Perfil 'default' creado.");
+        } else {
+            let active: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM profiles WHERE is_active = 1",
+                [],
+                |row| row.get(0),
+            )?;
+            if active == 0 {
+                let first: i64 =
+                    conn.query_row("SELECT id FROM profiles ORDER BY id LIMIT 1", [], |row| {
+                        row.get(0)
+                    })?;
+                conn.execute(
+                    "UPDATE profiles SET is_active = 1 WHERE id = ?1",
+                    params![first],
+                )?;
+            }
+        }
+    }
+
+    let has_enabled_col: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mods') WHERE name = 'enabled'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if has_enabled_col > 0 {
+        log::info("Migrando schema: moviendo estados a perfiles...");
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             BEGIN;
+             INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+                 SELECT p.id, m.id, m.enabled, m.load_order
+                 FROM mods m JOIN profiles p ON p.slug = 'default';
+             CREATE TABLE mods_new (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 folder_name TEXT NOT NULL UNIQUE,
+                 name TEXT NOT NULL CHECK(length(name) > 0),
+                 CHECK(
+                     length(folder_name) > 0
+                     AND folder_name NOT LIKE '%|%'
+                     AND folder_name NOT LIKE '%/%'
+                     AND folder_name NOT LIKE '%\\%'
+                     AND folder_name NOT LIKE '%:%'
+                     AND folder_name != '.'
+                     AND folder_name != '..'
+                     AND folder_name NOT LIKE '.. %'
+                     AND folder_name NOT LIKE '..\\%'
+                     AND folder_name NOT LIKE '../%'
+                     AND trim(folder_name) = folder_name
+                 )
+             );
+             INSERT INTO mods_new (id, folder_name, name) SELECT id, folder_name, name FROM mods;
+             DROP TABLE mods;
+             ALTER TABLE mods_new RENAME TO mods;
+             UPDATE sqlite_sequence SET seq = (SELECT MAX(id) FROM mods) WHERE name = 'mods';
+             COMMIT;
+             PRAGMA foreign_keys = ON;",
+        )?;
+        log::info("[+] Migración completada.");
+    }
+
     Ok(())
 }
 
-pub fn load_all_mods(conn: &Connection) -> anyhow::Result<HashMap<i64, ModEntry>> {
-    let mut stmt = conn.prepare("SELECT id, folder_name, name, enabled, load_order FROM mods")?;
+pub fn load_all_mods(conn: &Connection) -> anyhow::Result<Vec<ModEntry>> {
+    let mut stmt = conn.prepare("SELECT id, folder_name, name FROM mods")?;
     let mods = stmt
         .query_map([], |row| {
+            Ok(ModEntry {
+                id: row.get(0)?,
+                folder_name: row.get(1)?,
+                name: row.get(2)?,
+                enabled: false,
+                load_order: 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(mods)
+}
+
+pub fn load_all_mods_for_profile(
+    conn: &Connection,
+    profile_id: i64,
+) -> anyhow::Result<Vec<ModEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.folder_name, m.name,
+                COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0)
+         FROM mods m
+         LEFT JOIN profile_mods pm ON pm.mod_id = m.id AND pm.profile_id = ?1
+         ORDER BY pm.load_order DESC",
+    )?;
+    let mods = stmt
+        .query_map(params![profile_id], |row| {
             Ok(ModEntry {
                 id: row.get(0)?,
                 folder_name: row.get(1)?,
@@ -171,8 +512,7 @@ pub fn load_all_mods(conn: &Connection) -> anyhow::Result<HashMap<i64, ModEntry>
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(mods.into_iter().map(|m| (m.id, m)).collect())
+    Ok(mods)
 }
 
 pub fn load_dependencies(conn: &Connection) -> anyhow::Result<HashMap<i64, Vec<DepRef>>> {
@@ -197,11 +537,17 @@ pub fn load_dependencies(conn: &Connection) -> anyhow::Result<HashMap<i64, Vec<D
     Ok(deps)
 }
 
-pub fn load_enabled_mod_ids(conn: &Connection) -> anyhow::Result<Vec<i64>> {
-    let mut stmt =
-        conn.prepare("SELECT id FROM mods WHERE enabled = 1 ORDER BY load_order DESC")?;
+pub fn load_enabled_mod_ids_for_profile(
+    conn: &Connection,
+    profile_id: i64,
+) -> anyhow::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT mod_id FROM profile_mods
+         WHERE profile_id = ?1 AND enabled = 1
+         ORDER BY load_order DESC",
+    )?;
     let ids = stmt
-        .query_map([], |row| row.get(0))?
+        .query_map(params![profile_id], |row| row.get(0))?
         .collect::<Result<Vec<i64>, _>>()?;
     Ok(ids)
 }
@@ -215,8 +561,9 @@ pub fn mod_exists(conn: &Connection, folder_name: &str) -> anyhow::Result<bool> 
     Ok(count > 0)
 }
 
-pub fn add_mod(
+pub fn add_mod_for_profile(
     conn: &Connection,
+    profile_id: i64,
     folder_name: &str,
     display_name: &str,
     order: Option<i64>,
@@ -224,18 +571,53 @@ pub fn add_mod(
     let order = match order {
         Some(o) => o,
         None => conn.query_row(
-            "SELECT COALESCE(MAX(load_order), 0) + 10 FROM mods",
-            [],
+            "SELECT COALESCE(MAX(load_order), 0) + 10 FROM profile_mods WHERE profile_id = ?1",
+            params![profile_id],
             |row| row.get(0),
         )?,
     };
 
     conn.execute(
-        "INSERT INTO mods (folder_name, name, enabled, load_order) VALUES (?1, ?2, 0, ?3)",
-        params![folder_name, display_name, order],
+        "INSERT INTO mods (folder_name, name) VALUES (?1, ?2)",
+        params![folder_name, display_name],
+    )?;
+    let mod_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+         VALUES (?1, ?2, 0, ?3)",
+        params![profile_id, mod_id, order],
     )?;
 
-    Ok(conn.last_insert_rowid())
+    Ok(mod_id)
+}
+
+pub fn add_mod_to_all_profiles(
+    conn: &Connection,
+    folder_name: &str,
+    display_name: &str,
+) -> anyhow::Result<i64> {
+    conn.execute(
+        "INSERT INTO mods (folder_name, name) VALUES (?1, ?2)",
+        params![folder_name, display_name],
+    )?;
+    let mod_id = conn.last_insert_rowid();
+
+    let profiles = list_profiles(conn)?;
+    for p in &profiles {
+        let order: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(load_order), 0) + 10 FROM profile_mods WHERE profile_id = ?1",
+            params![p.id],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+             VALUES (?1, ?2, 0, ?3)",
+            params![p.id, mod_id, order],
+        )?;
+    }
+
+    Ok(mod_id)
 }
 
 pub fn remove_mod(conn: &Connection, id: i64) -> anyhow::Result<()> {
@@ -244,18 +626,54 @@ pub fn remove_mod(conn: &Connection, id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn set_mod_enabled(conn: &Connection, id: i64, enabled: bool) -> anyhow::Result<()> {
+pub fn set_mod_enabled(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+    enabled: bool,
+) -> anyhow::Result<()> {
     conn.execute(
-        "UPDATE mods SET enabled = ?1 WHERE id = ?2",
-        params![enabled as i64, id],
+        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+         VALUES (?1, ?2, ?3, 0)
+         ON CONFLICT(profile_id, mod_id) DO UPDATE SET enabled = excluded.enabled",
+        params![profile_id, mod_id, enabled as i64],
     )?;
     Ok(())
 }
 
-pub fn set_mod_order(conn: &Connection, id: i64, order: i64) -> anyhow::Result<()> {
+pub fn profile_mod_state(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+) -> anyhow::Result<(bool, i64)> {
+    let mut stmt = conn.prepare(
+        "SELECT enabled, load_order FROM profile_mods WHERE profile_id = ?1 AND mod_id = ?2",
+    )?;
+    let mut rows = stmt.query_map(params![profile_id, mod_id], |row| {
+        Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)?))
+    })?;
+    Ok(rows.next().transpose()?.unwrap_or((false, 0)))
+}
+
+pub fn disable_mod_all_profiles(conn: &Connection, mod_id: i64) -> anyhow::Result<()> {
     conn.execute(
-        "UPDATE mods SET load_order = ?1 WHERE id = ?2",
-        params![order, id],
+        "UPDATE profile_mods SET enabled = 0 WHERE mod_id = ?1",
+        params![mod_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_mod_order(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+    order: i64,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+         VALUES (?1, ?2, 0, ?3)
+         ON CONFLICT(profile_id, mod_id) DO UPDATE SET load_order = excluded.load_order",
+        params![profile_id, mod_id, order],
     )?;
     Ok(())
 }
@@ -274,31 +692,28 @@ pub fn set_mod_folder(conn: &Connection, id: i64, folder: &str) -> anyhow::Resul
 }
 
 pub fn get_mod_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<ModEntry>> {
-    let mut stmt =
-        conn.prepare("SELECT id, folder_name, name, enabled, load_order FROM mods WHERE id = ?1")?;
+    let mut stmt = conn.prepare("SELECT id, folder_name, name FROM mods WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], |row| {
         Ok(ModEntry {
             id: row.get(0)?,
             folder_name: row.get(1)?,
             name: row.get(2)?,
-            enabled: row.get::<_, i64>(3)? != 0,
-            load_order: row.get(4)?,
+            enabled: false,
+            load_order: 0,
         })
     })?;
     Ok(rows.next().transpose()?)
 }
 
 pub fn get_mod_by_folder(conn: &Connection, folder: &str) -> anyhow::Result<Option<ModEntry>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, folder_name, name, enabled, load_order FROM mods WHERE folder_name = ?1",
-    )?;
+    let mut stmt = conn.prepare("SELECT id, folder_name, name FROM mods WHERE folder_name = ?1")?;
     let mut rows = stmt.query_map(params![folder], |row| {
         Ok(ModEntry {
             id: row.get(0)?,
             folder_name: row.get(1)?,
             name: row.get(2)?,
-            enabled: row.get::<_, i64>(3)? != 0,
-            load_order: row.get(4)?,
+            enabled: false,
+            load_order: 0,
         })
     })?;
     Ok(rows.next().transpose()?)
@@ -364,14 +779,18 @@ pub fn remove_dependency(conn: &Connection, mod_id: i64, dep_id: i64) -> anyhow:
 
 pub fn get_dependencies_of(
     conn: &Connection,
+    profile_id: i64,
     mod_id: i64,
 ) -> anyhow::Result<Vec<(ModEntry, bool)>> {
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.folder_name, m.name, m.enabled, m.load_order, d.required
-         FROM mod_dependencies d JOIN mods m ON d.dependency_id = m.id
-         WHERE d.mod_id = ?1 ORDER BY m.load_order DESC",
+        "SELECT m.id, m.folder_name, m.name,
+                COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0), d.required
+         FROM mod_dependencies d
+         JOIN mods m ON d.dependency_id = m.id
+         LEFT JOIN profile_mods pm ON pm.mod_id = m.id AND pm.profile_id = ?1
+         WHERE d.mod_id = ?2 ORDER BY pm.load_order DESC",
     )?;
-    let rows = stmt.query_map(params![mod_id], |row| {
+    let rows = stmt.query_map(params![profile_id, mod_id], |row| {
         Ok((
             ModEntry {
                 id: row.get(0)?,
@@ -386,13 +805,20 @@ pub fn get_dependencies_of(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-pub fn get_dependents_of(conn: &Connection, mod_id: i64) -> anyhow::Result<Vec<ModEntry>> {
+pub fn get_dependents_of(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+) -> anyhow::Result<Vec<ModEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.folder_name, m.name, m.enabled, m.load_order
-         FROM mod_dependencies d JOIN mods m ON d.mod_id = m.id
-         WHERE d.dependency_id = ?1 ORDER BY m.load_order DESC",
+        "SELECT m.id, m.folder_name, m.name,
+                COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0)
+         FROM mod_dependencies d
+         JOIN mods m ON d.mod_id = m.id
+         LEFT JOIN profile_mods pm ON pm.mod_id = m.id AND pm.profile_id = ?1
+         WHERE d.dependency_id = ?2 ORDER BY pm.load_order DESC",
     )?;
-    let rows = stmt.query_map(params![mod_id], |row| {
+    let rows = stmt.query_map(params![profile_id, mod_id], |row| {
         Ok(ModEntry {
             id: row.get(0)?,
             folder_name: row.get(1)?,
@@ -439,24 +865,15 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
     }
 
     let all_mods = load_all_mods(conn)?;
-    let db_folders: Vec<String> = all_mods.values().map(|m| m.folder_name.clone()).collect();
+    let db_folders: Vec<String> = all_mods.iter().map(|m| m.folder_name.clone()).collect();
 
     for folder in &disk_folders {
         if !db_folders.contains(folder) {
             let display_name = folder.replace('_', " ");
-            let order: i64 = conn
-                .query_row(
-                    "SELECT COALESCE(MAX(load_order), 0) + 10 FROM mods",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(10);
 
-            match add_mod(conn, folder, &display_name, Some(order)) {
+            match add_mod_to_all_profiles(conn, folder, &display_name) {
                 Ok(_id) => {
-                    log::info(format!(
-                        "    [+] Nuevo: {folder} -> '{display_name}' (load_order={order})"
-                    ));
+                    log::info(format!("    [+] Nuevo: {folder} -> '{display_name}'"));
                     new_count += 1;
                 }
                 Err(e) => {
@@ -468,19 +885,12 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
 
     for db_folder in &db_folders {
         if !disk_folders.contains(db_folder) {
-            if let Some(m) = all_mods.values().find(|m| &m.folder_name == db_folder) {
-                if m.enabled {
-                    let _ = set_mod_enabled(conn, m.id, false);
-                    log::warn(format!(
-                        "    [!] Huérfano desactivado: '{}' (carpeta eliminada del disco)",
-                        db_folder
-                    ));
-                } else {
-                    log::warn(format!(
-                        "    [!] Huérfano: '{}' (carpeta eliminada del disco)",
-                        db_folder
-                    ));
-                }
+            if let Some(m) = all_mods.iter().find(|m| &m.folder_name == db_folder) {
+                let _ = disable_mod_all_profiles(conn, m.id);
+                log::warn(format!(
+                    "    [!] Huérfano desactivado: '{}' (carpeta eliminada del disco)",
+                    db_folder
+                ));
                 orphan_count += 1;
             }
         }
@@ -502,7 +912,7 @@ pub fn clean_orphans(conn: &Connection, mods_dir: &Path) -> anyhow::Result<usize
     let all_mods = load_all_mods(conn)?;
     let mut deleted = 0usize;
 
-    for m in all_mods.values() {
+    for m in &all_mods {
         let mod_path = mods_dir.join(&m.folder_name);
         if !mod_path.exists() {
             conn.execute("DELETE FROM mods WHERE id = ?1", params![m.id])?;
@@ -540,5 +950,146 @@ pub mod log {
     pub fn die(msg: impl Display) -> ! {
         error(msg);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn
+    }
+
+    /// Old pre-profiles schema (enabled/load_order in mods), matching the
+    /// schema.sql as it existed before the profiles feature.
+    fn build_old_schema(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE mods (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_name TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL CHECK(length(name) > 0),
+                enabled INTEGER DEFAULT 0 CHECK(enabled IN (0, 1)),
+                load_order INTEGER DEFAULT 0,
+                CHECK(
+                    length(folder_name) > 0
+                    AND folder_name NOT LIKE '%|%'
+                    AND folder_name NOT LIKE '%/%'
+                    AND folder_name NOT LIKE '%\\%'
+                    AND folder_name NOT LIKE '%:%'
+                    AND folder_name != '.'
+                    AND folder_name != '..'
+                    AND folder_name NOT LIKE '.. %'
+                    AND folder_name NOT LIKE '..\\%'
+                    AND folder_name NOT LIKE '../%'
+                    AND trim(folder_name) = folder_name
+                )
+            );
+            CREATE TABLE mod_dependencies (
+                mod_id INTEGER NOT NULL,
+                dependency_id INTEGER NOT NULL,
+                required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0, 1)),
+                PRIMARY KEY (mod_id, dependency_id),
+                FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
+                FOREIGN KEY (dependency_id) REFERENCES mods(id) ON DELETE CASCADE,
+                CHECK(mod_id != dependency_id)
+            );
+            INSERT INTO mods (folder_name, name, enabled, load_order) VALUES ('m1', 'M1', 1, 20);
+            INSERT INTO mods (folder_name, name, enabled, load_order) VALUES ('m2', 'M2', 0, 10);
+            INSERT INTO mod_dependencies (mod_id, dependency_id, required) VALUES (1, 2, 1);
+        ",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn migration_from_old_schema_preserves_states() {
+        let conn = mem_conn();
+        build_old_schema(&conn);
+        run_migrations(&conn).unwrap();
+
+        let p = active_profile(&conn).unwrap();
+        assert_eq!(p.slug, "default");
+        assert!(p.is_active);
+
+        let mods = load_all_mods_for_profile(&conn, p.id).unwrap();
+        let m1 = mods.iter().find(|m| m.folder_name == "m1").unwrap();
+        assert!(m1.enabled);
+        assert_eq!(m1.load_order, 20);
+        let m2 = mods.iter().find(|m| m.folder_name == "m2").unwrap();
+        assert!(!m2.enabled);
+        assert_eq!(m2.load_order, 10);
+
+        let deps = load_dependencies(&conn).unwrap();
+        assert!(deps.get(&1).map(|d| d.len()).unwrap_or(0) == 1);
+        assert!(deps.get(&1).unwrap()[0].required);
+
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+    }
+
+    #[test]
+    fn slugify_is_kebab_and_stable() {
+        assert_eq!(slugify("Vanilla Play"), "vanilla-play");
+        assert_eq!(slugify("  Graphics   Mods  "), "graphics-mods");
+        assert_eq!(slugify("A.B/C_1"), "abc-1");
+        assert_eq!(slugify("---"), "");
+    }
+
+    #[test]
+    fn profile_lifecycle_and_isolation() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "m2", "M2").unwrap();
+
+        let p1 = active_profile(&conn).unwrap();
+        set_mod_enabled(&conn, p1.id, 1, true).unwrap();
+        set_mod_order(&conn, p1.id, 1, 50).unwrap();
+        assert_eq!(profile_mod_state(&conn, p1.id, 1).unwrap(), (true, 50));
+
+        let id2 = create_profile(&conn, "Second").unwrap();
+        let p2 = get_profile_by_id(&conn, id2).unwrap().unwrap();
+        assert_eq!(p2.slug, "second");
+        let (enabled2, _) = profile_mod_state(&conn, p2.id, 1).unwrap();
+        assert!(!enabled2, "perfil nuevo arranca con mods desactivados");
+
+        assert!(active_profile(&conn).unwrap().id == p1.id);
+        set_active_profile(&conn, p2.id).unwrap();
+        assert!(active_profile(&conn).unwrap().id == p2.id);
+        set_active_profile(&conn, p1.id).unwrap();
+
+        let cid = copy_profile(&conn, p1.id, "Copy").unwrap();
+        assert_eq!(profile_mod_state(&conn, cid, 1).unwrap(), (true, 50));
+
+        delete_profile(&conn, p2.id).unwrap();
+        delete_profile(&conn, cid).unwrap();
+        assert!(
+            delete_profile(&conn, p1.id).is_err(),
+            "no se puede borrar el último"
+        );
+
+        rename_profile(&conn, p1.id, "Renamed").unwrap();
+        let pr = get_profile_by_id(&conn, p1.id).unwrap().unwrap();
+        assert_eq!(pr.name, "Renamed");
+        assert_eq!(pr.slug, "default");
+    }
+
+    #[test]
+    fn new_mod_registered_in_all_profiles() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+        create_profile(&conn, "Vanilla").unwrap();
+
+        add_mod_to_all_profiles(&conn, "newmod", "New Mod").unwrap();
+
+        for p in list_profiles(&conn).unwrap() {
+            let state = profile_mod_state(&conn, p.id, 1).unwrap();
+            assert!(!state.0, "nuevo mod registrado desactivado en cada perfil");
+            assert!(state.1 > 0, "nuevo mod registrado con orden auto");
+        }
     }
 }

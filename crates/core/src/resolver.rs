@@ -6,8 +6,16 @@ pub struct DepGraph {
     pub deps: HashMap<i64, Vec<i64>>,
     pub optional_deps: HashMap<i64, Vec<i64>>,
     pub enabled_ids: Vec<i64>,
+    pub prompt: DepPrompt,
     skip_ids: HashSet<i64>,
     has_errors: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DepPrompt {
+    Prompt,
+    AutoEnable,
+    Ignore,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -38,6 +46,7 @@ impl DepGraph {
             deps: required,
             optional_deps: optional,
             enabled_ids,
+            prompt: DepPrompt::Prompt,
             skip_ids: HashSet::new(),
             has_errors: false,
         }
@@ -187,35 +196,49 @@ impl DepGraph {
             return;
         }
 
-        eprintln!();
-        eprintln!("[!] Se detectaron dependencias deshabilitadas:");
-        for (mid, did) in &disabled_deps {
-            let mod_name = self.mod_folder(*mid);
-            let dep_name = self.mod_folder(*did);
-            eprintln!("    - '{mod_name}' requiere '{dep_name}' (deshabilitado)");
+        if self.prompt == DepPrompt::Prompt {
+            eprintln!();
+            eprintln!("[!] Se detectaron dependencias deshabilitadas:");
+            for (mid, did) in &disabled_deps {
+                let mod_name = self.mod_folder(*mid);
+                let dep_name = self.mod_folder(*did);
+                eprintln!("    - '{mod_name}' requiere '{dep_name}' (deshabilitado)");
+            }
+            eprintln!();
+            eprintln!("Opciones:");
+            eprintln!("  1) Activar dependencias (incluyendo transitivas) y continuar");
+            eprintln!("  2) Continuar sin las dependencias (ignorar)");
+            eprintln!("  3) Cancelar");
+            eprint!("Elige una opción [1-3]: ");
+
+            let mut input = String::new();
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            std::io::stdin().read_line(&mut input).ok();
+            let choice = input.trim().to_string();
+            self.apply_dep_choice(&disabled_deps, choice.as_str());
+        } else if self.prompt == DepPrompt::AutoEnable {
+            crate::db::log::info(
+                "Activando dependencias deshabilitadas automáticamente (--deps-enable)...",
+            );
+            self.apply_dep_choice(&disabled_deps, "1");
+        } else {
+            crate::db::log::warn(
+                "Ignorando dependencias deshabilitadas (--deps-ignore). Puede que el juego falle.",
+            );
+            self.apply_dep_choice(&disabled_deps, "2");
         }
-        eprintln!();
-        eprintln!("Opciones:");
-        eprintln!("  1) Activar dependencias (incluyendo transitivas) y continuar");
-        eprintln!("  2) Continuar sin las dependencias (ignorar)");
-        eprintln!("  3) Cancelar");
-        eprint!("Elige una opción [1-3]: ");
+    }
 
-        let mut input = String::new();
-        std::io::Write::flush(&mut std::io::stdout()).ok();
-        std::io::stdin().read_line(&mut input).ok();
-        let choice = input.trim();
-
+    fn apply_dep_choice(&mut self, disabled_deps: &[(i64, i64)], choice: &str) {
         match choice {
             "1" => {
-                for (_, did) in &disabled_deps {
+                for (_, did) in disabled_deps {
                     self.enable_recursive(*did);
                 }
                 eprintln!();
             }
             "2" => {
-                crate::db::log::warn("Continuando sin las dependencias. Puede que el juego falle.");
-                for (_, did) in &disabled_deps {
+                for (_, did) in disabled_deps {
                     self.skip_ids.insert(*did);
                 }
                 eprintln!();
@@ -327,10 +350,115 @@ impl DepGraph {
             .unwrap_or("?")
     }
 
-    pub fn sync_enabled_to_db(&self, conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    pub fn sync_enabled_to_db(
+        &self,
+        conn: &rusqlite::Connection,
+        profile_id: i64,
+    ) -> anyhow::Result<()> {
         for m in self.mods.values() {
-            crate::db::set_mod_enabled(conn, m.id, m.enabled)?;
+            crate::db::set_mod_enabled(conn, profile_id, m.id, m.enabled)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{DepRef, ModEntry};
+
+    fn mods(entries: &[(i64, &str, bool, i64)]) -> HashMap<i64, ModEntry> {
+        entries
+            .iter()
+            .map(|&(id, folder, enabled, order)| ModEntry {
+                id,
+                folder_name: folder.to_string(),
+                name: folder.to_string(),
+                enabled,
+                load_order: order,
+            })
+            .map(|m| (m.id, m))
+            .collect()
+    }
+
+    fn deps(entries: &[(i64, i64, bool)]) -> HashMap<i64, Vec<DepRef>> {
+        let mut map: HashMap<i64, Vec<DepRef>> = HashMap::new();
+        for &(a, b, req) in entries {
+            map.entry(a).or_default().push(DepRef {
+                id: b,
+                required: req,
+            });
+        }
+        map
+    }
+
+    #[test]
+    fn resolve_puts_mod_above_its_deps() {
+        let m = mods(&[(1, "mod", true, 30), (2, "dep", true, 10)]);
+        let d = deps(&[(1, 2, true)]);
+        let g = DepGraph::new(m, d, vec![1, 2]);
+        assert_eq!(g.resolve(), vec!["mod".to_string(), "dep".to_string()]);
+    }
+
+    #[test]
+    fn detect_cycles_finds_cycles() {
+        let m = mods(&[(1, "a", true, 10), (2, "b", true, 20)]);
+        let d = deps(&[(1, 2, true), (2, 1, true)]);
+        let mut g = DepGraph::new(m, d, vec![1, 2]);
+        assert!(!g.detect_cycles());
+    }
+
+    #[test]
+    fn no_cycle_is_ok() {
+        let m = mods(&[(1, "a", true, 10), (2, "b", true, 20), (3, "c", true, 30)]);
+        let d = deps(&[(1, 2, true), (2, 3, true)]);
+        let mut g = DepGraph::new(m, d, vec![1, 2, 3]);
+        assert!(g.detect_cycles());
+    }
+
+    #[test]
+    fn optional_deps_only_included_if_enabled() {
+        let m = mods(&[
+            (1, "mod", true, 30),
+            (2, "opt_on", true, 20),
+            (3, "opt_off", false, 10),
+        ]);
+        let d = deps(&[(1, 2, false), (1, 3, false)]);
+        let g = DepGraph::new(m, d, vec![1]);
+        let out = g.resolve();
+        assert!(out.contains(&"opt_on".to_string()));
+        assert!(!out.contains(&"opt_off".to_string()));
+    }
+
+    #[test]
+    fn disabled_deps_are_reported() {
+        let m = mods(&[(1, "mod", true, 30), (2, "needed", false, 10)]);
+        let d = deps(&[(1, 2, true)]);
+        let g = DepGraph::new(m, d, vec![1]);
+        let disabled = g.check_disabled_deps();
+        assert_eq!(disabled, vec![(1, 2)]);
+    }
+
+    #[test]
+    fn enable_recursive_activates_transitive_deps() {
+        let mut m = mods(&[
+            (1, "mod", true, 30),
+            (2, "mid", false, 20),
+            (3, "base", false, 10),
+        ]);
+        let d = deps(&[(1, 2, true), (2, 3, true)]);
+        let mut g = DepGraph::new(m, d, vec![1]);
+        g.enable_recursive(2);
+        assert!(g.mods.get(&2).unwrap().enabled);
+        assert!(g.mods.get(&3).unwrap().enabled);
+    }
+
+    #[test]
+    fn skip_ids_are_excluded_from_resolve() {
+        let m = mods(&[(1, "mod", true, 30), (2, "broken", true, 10)]);
+        let d = deps(&[(1, 2, true)]);
+        let mut g = DepGraph::new(m, d, vec![1, 2]);
+        g.skip_ids.insert(2);
+        assert_eq!(g.resolve(), vec!["mod".to_string()]);
     }
 }
