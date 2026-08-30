@@ -388,7 +388,7 @@ impl LaunchEngine {
             if let Ok(p) = db::resolve_profile(conn, dp) {
                 return Ok(p);
             }
-            db::log::warn(format!(
+            crate::log::warn(format!(
                 "default_profile '{}' no existe; usando el perfil activo.",
                 dp
             ));
@@ -410,13 +410,15 @@ impl LaunchEngine {
         };
         let target = paths.profile_paths(&profile.slug).upper;
         if target.exists() {
-            db::log::warn("run/upper existe pero run/profiles/default/upper también; no se migra.");
+            crate::log::warn(
+                "run/upper existe pero run/profiles/default/upper también; no se migra.",
+            );
             return Ok(());
         }
         std::fs::create_dir_all(target.parent().unwrap())?;
-        db::log::info("Migrando run/upper a run/profiles/default/upper...");
+        crate::log::info("Migrando run/upper a run/profiles/default/upper...");
         std::fs::rename(&legacy_upper, &target)?;
-        db::log::info("[+] Migración completada.");
+        crate::log::info("[+] Migración completada.");
         Ok(())
     }
 

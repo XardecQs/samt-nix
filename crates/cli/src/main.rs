@@ -6,6 +6,7 @@ use clap_complete::shells::{Bash, Fish, Zsh};
 use gta_mo_core::config;
 use gta_mo_core::db;
 use gta_mo_core::launcher::{LaunchEngine, LaunchOptions};
+use gta_mo_core::log;
 use std::io::Write;
 
 #[derive(Parser)]
@@ -61,6 +62,12 @@ struct LaunchArgs {
         help = "Skip disabled dependencies without prompting"
     )]
     deps_ignore: bool,
+
+    #[arg(
+        long,
+        help = "Do not auto-discover mods/ on launch, even if auto_discover is set"
+    )]
+    no_auto_discover: bool,
 }
 
 #[derive(Args)]
@@ -90,8 +97,6 @@ pub enum CtlCommand {
         folder: String,
         #[arg(long, help = "Visible display name")]
         name: Option<String>,
-        #[arg(long, help = "Load order (default: auto)")]
-        order: Option<i64>,
     },
     #[command(about = "Remove a mod")]
     Remove {
@@ -188,6 +193,7 @@ fn main() {
         clean: false,
         deps_enable: false,
         deps_ignore: false,
+        no_auto_discover: false,
     }));
 
     let result = match command {
@@ -224,20 +230,20 @@ fn main() {
         Command::Ctl(args) => {
             let db_path = config::db_path();
             db::ensure_db_dir(&db_path).unwrap_or_else(|e| {
-                db::log::die(format!("No se pudo acceder a la base de datos: {e}"));
+                log::die(format!("No se pudo acceder a la base de datos: {e}"));
             });
             let conn = db::open_db(&db_path).unwrap_or_else(|e| {
-                db::log::die(format!("No se pudo abrir la base de datos: {e}"));
+                log::die(format!("No se pudo abrir la base de datos: {e}"));
             });
             db::run_migrations(&conn).unwrap_or_else(|e| {
-                db::log::die(format!("Error en migraciones: {e}"));
+                log::die(format!("Error en migraciones: {e}"));
             });
             ctl::run(&conn, &args, profile.as_deref())
         }
     };
 
     if let Err(e) = result {
-        db::log::error(format!("{e:#}"));
+        log::error(format!("{e:#}"));
         std::process::exit(1);
     }
 }
@@ -250,7 +256,7 @@ fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
         debug: args.debug,
         discover: args.discover,
         clean: args.clean,
-        auto_discover: true,
+        auto_discover: !args.no_auto_discover,
         profile: profile.map(String::from),
         deps_enable: args.deps_enable,
         deps_ignore: args.deps_ignore,
@@ -299,6 +305,9 @@ fn cmd_steam(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
     if args.deps_ignore {
         steam_args.push("--deps-ignore".into());
     }
+    if args.no_auto_discover {
+        steam_args.push("--no-auto-discover".into());
+    }
     if let Some(p) = profile {
         steam_args.push("--profile".into());
         steam_args.push(p.into());
@@ -322,7 +331,7 @@ fn cmd_steam(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
             .env("GTA_MO_DROP_GID", gid.to_string());
     }
 
-    db::log::info("Entrando en user/mount namespace (modo Steam)...");
+    log::info("Entrando en user/mount namespace (modo Steam)...");
     let status = cmd.status().map_err(|e| {
         anyhow::anyhow!(
             "No se pudo ejecutar unshare en '{}': {e}",

@@ -12,9 +12,9 @@ impl OverlayMount {
     pub fn mount(lowerdir: &str, upper: &Path, work: &Path, merged: &Path) -> anyhow::Result<Self> {
         if merged.exists() && Self::is_mounted(merged) {
             let _ = std::env::set_current_dir("/");
-            crate::db::log::info("Intentando desmontar overlay anterior...");
+            crate::log::info("Intentando desmontar overlay anterior...");
             if !Self::unmount_retry(merged, 10, 2000) {
-                crate::db::log::warn("Desmontaje normal fallido, intentando lazy unmount...");
+                crate::log::warn("Desmontaje normal fallido, intentando lazy unmount...");
                 let _ = Command::new("fusermount").arg("-uz").arg(merged).status();
                 thread::sleep(Duration::from_millis(1000));
             }
@@ -31,7 +31,7 @@ impl OverlayMount {
             work.display()
         );
 
-        crate::db::log::info("Montando capas...");
+        crate::log::info("Montando capas...");
 
         let output = Command::new("fuse-overlayfs")
             .arg("-o")
@@ -44,7 +44,7 @@ impl OverlayMount {
             anyhow::bail!("Error al montar overlay: {stderr}");
         }
 
-        crate::db::log::info("Overlay montado correctamente.");
+        crate::log::info("Overlay montado correctamente.");
 
         Ok(OverlayMount {
             merged: merged.to_path_buf(),
@@ -113,7 +113,7 @@ impl Drop for OverlayMount {
     fn drop(&mut self) {
         let _ = std::env::set_current_dir("/");
         if Self::is_mounted(&self.merged) && !Self::unmount_retry(&self.merged, 15, 2000) {
-            crate::db::log::warn("Desmontaje bloqueado, intentando lazy unmount...");
+            crate::log::warn("Desmontaje bloqueado, intentando lazy unmount...");
             let _ = Command::new("fusermount")
                 .arg("-uz")
                 .arg(&self.merged)

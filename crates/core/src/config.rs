@@ -3,25 +3,15 @@ use std::path::PathBuf;
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Config {
-    #[serde(alias = "game_root")]
     pub game_root: String,
-    #[serde(alias = "proton_path")]
     pub proton_path: String,
-    #[serde(alias = "game_id")]
     pub game_id: Option<String>,
-    #[serde(alias = "game_exe")]
     pub game_exe: Option<String>,
-    #[serde(alias = "proton_use_wined3d")]
     pub proton_use_wined3d: Option<bool>,
-    #[serde(alias = "proton_disable_ntsync")]
     pub proton_disable_ntsync: Option<bool>,
-    #[serde(alias = "dxvk_hud")]
     pub dxvk_hud: Option<String>,
-    #[serde(alias = "auto_discover")]
     pub auto_discover: Option<bool>,
-    #[serde(alias = "mods_dir")]
     pub mods_dir: Option<String>,
-    #[serde(alias = "default_profile")]
     pub default_profile: Option<String>,
 }
 
@@ -105,6 +95,10 @@ pub fn find_config_file() -> Option<PathBuf> {
         if p.exists() {
             return Some(p);
         }
+        crate::log::warn(format!(
+            "GTA_MO_CONFIG apunta a un archivo inexistente: {}",
+            p.display()
+        ));
     }
 
     let local = PathBuf::from("config.toml");
@@ -143,14 +137,4 @@ pub fn load_config() -> anyhow::Result<Config> {
     let config: Config = toml::from_str(&content)?;
 
     Ok(config)
-}
-
-pub fn load_config_or_die() -> Config {
-    match load_config() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[X] Error: {e}");
-            std::process::exit(1);
-        }
-    }
 }

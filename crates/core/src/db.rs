@@ -1,3 +1,4 @@
+use crate::log;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
@@ -9,6 +10,14 @@ pub struct ModEntry {
     pub name: String,
     pub enabled: bool,
     pub load_order: i64,
+}
+
+/// Identity data of a mod, without any profile-scoped state (enabled/order).
+#[derive(Debug, Clone)]
+pub struct ModIdentity {
+    pub id: i64,
+    pub folder_name: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -267,7 +276,35 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
+/// Current schema version. Every new migration step bumps it.
+const SCHEMA_VERSION: i64 = 1;
+
 pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+    if version < 1 {
+        bootstrap_to_v1(conn)?;
+        conn.pragma_update(None, "user_version", 1)?;
+    }
+
+    // Future steps (add a numbered function per step):
+    // if version < 2 {
+    //     migrate_to_v2(conn)?;
+    //     conn.pragma_update(None, "user_version", 2)?;
+    // }
+
+    debug_assert!(
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap_or(0)
+            == SCHEMA_VERSION
+    );
+    Ok(())
+}
+
+/// Applies the base schema and the legacy migrations that bring any
+/// pre-versioned database up to v1. Introspection-based, so it is idempotent
+/// for fresh databases, databases from before profiles, and v1 databases.
+fn bootstrap_to_v1(conn: &Connection) -> anyhow::Result<()> {
     let schema = include_str!("../schema.sql");
     conn.execute_batch(schema)?;
 
@@ -474,16 +511,14 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn load_all_mods(conn: &Connection) -> anyhow::Result<Vec<ModEntry>> {
+pub fn load_all_mods(conn: &Connection) -> anyhow::Result<Vec<ModIdentity>> {
     let mut stmt = conn.prepare("SELECT id, folder_name, name FROM mods")?;
     let mods = stmt
         .query_map([], |row| {
-            Ok(ModEntry {
+            Ok(ModIdentity {
                 id: row.get(0)?,
                 folder_name: row.get(1)?,
                 name: row.get(2)?,
-                enabled: false,
-                load_order: 0,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -561,37 +596,6 @@ pub fn mod_exists(conn: &Connection, folder_name: &str) -> anyhow::Result<bool> 
     Ok(count > 0)
 }
 
-pub fn add_mod_for_profile(
-    conn: &Connection,
-    profile_id: i64,
-    folder_name: &str,
-    display_name: &str,
-    order: Option<i64>,
-) -> anyhow::Result<i64> {
-    let order = match order {
-        Some(o) => o,
-        None => conn.query_row(
-            "SELECT COALESCE(MAX(load_order), 0) + 10 FROM profile_mods WHERE profile_id = ?1",
-            params![profile_id],
-            |row| row.get(0),
-        )?,
-    };
-
-    conn.execute(
-        "INSERT INTO mods (folder_name, name) VALUES (?1, ?2)",
-        params![folder_name, display_name],
-    )?;
-    let mod_id = conn.last_insert_rowid();
-
-    conn.execute(
-        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
-         VALUES (?1, ?2, 0, ?3)",
-        params![profile_id, mod_id, order],
-    )?;
-
-    Ok(mod_id)
-}
-
 pub fn add_mod_to_all_profiles(
     conn: &Connection,
     folder_name: &str,
@@ -621,7 +625,6 @@ pub fn add_mod_to_all_profiles(
 }
 
 pub fn remove_mod(conn: &Connection, id: i64) -> anyhow::Result<()> {
-    conn.execute("PRAGMA foreign_keys = ON", [])?;
     conn.execute("DELETE FROM mods WHERE id = ?1", params![id])?;
     Ok(())
 }
@@ -691,29 +694,25 @@ pub fn set_mod_folder(conn: &Connection, id: i64, folder: &str) -> anyhow::Resul
     Ok(())
 }
 
-pub fn get_mod_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<ModEntry>> {
+pub fn get_mod_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<ModIdentity>> {
     let mut stmt = conn.prepare("SELECT id, folder_name, name FROM mods WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], |row| {
-        Ok(ModEntry {
+        Ok(ModIdentity {
             id: row.get(0)?,
             folder_name: row.get(1)?,
             name: row.get(2)?,
-            enabled: false,
-            load_order: 0,
         })
     })?;
     Ok(rows.next().transpose()?)
 }
 
-pub fn get_mod_by_folder(conn: &Connection, folder: &str) -> anyhow::Result<Option<ModEntry>> {
+pub fn get_mod_by_folder(conn: &Connection, folder: &str) -> anyhow::Result<Option<ModIdentity>> {
     let mut stmt = conn.prepare("SELECT id, folder_name, name FROM mods WHERE folder_name = ?1")?;
     let mut rows = stmt.query_map(params![folder], |row| {
-        Ok(ModEntry {
+        Ok(ModIdentity {
             id: row.get(0)?,
             folder_name: row.get(1)?,
             name: row.get(2)?,
-            enabled: false,
-            load_order: 0,
         })
     })?;
     Ok(rows.next().transpose()?)
@@ -728,6 +727,9 @@ pub fn resolve_mod_ident(conn: &Connection, ident: &str) -> anyhow::Result<i64> 
         )?;
         if exists == 1 {
             return Ok(id);
+        }
+        if let Some(m) = get_mod_by_folder(conn, ident)? {
+            return Ok(m.id);
         }
         anyhow::bail!("Mod con id={} no encontrado.", id);
     }
@@ -928,29 +930,6 @@ pub fn clean_orphans(conn: &Connection, mods_dir: &Path) -> anyhow::Result<usize
     }
 
     Ok(deleted)
-}
-
-/// Logging helpers that mimic the bash output style
-pub mod log {
-    use owo_colors::OwoColorize;
-    use std::fmt::Display;
-
-    pub fn info(msg: impl Display) {
-        eprintln!("{} {}", "[+]".green().bold(), msg);
-    }
-
-    pub fn warn(msg: impl Display) {
-        eprintln!("{} {}", "[!]".yellow().bold(), msg);
-    }
-
-    pub fn error(msg: impl Display) {
-        eprintln!("{} {}", "[X]".red().bold(), msg);
-    }
-
-    pub fn die(msg: impl Display) -> ! {
-        error(msg);
-        std::process::exit(1);
-    }
 }
 
 #[cfg(test)]

@@ -130,7 +130,7 @@ auto_discover = true
 ## CLI
 
 ```
-gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>]
+gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [--no-auto-discover]
 gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/mount namespace (for Steam)
 gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
 gta-mo ctl add <folder> [--name <name>]
@@ -229,6 +229,9 @@ Steam overlay will not attach to the game window.
 | `--discover` | Scan `mods/` for new mods and exit |
 | `--clean` | Remove orphaned mod entries from the database |
 | `--profile` | Launch with a specific profile (name, slug or id) |
+| `--deps-enable` | Auto-enable disabled dependencies without prompting |
+| `--deps-ignore` | Skip disabled dependencies without prompting |
+| `--no-auto-discover` | Do not auto-scan `mods/`, even if `auto_discover` is set |
 
 ## GUI
 

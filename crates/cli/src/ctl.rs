@@ -1,4 +1,5 @@
-use gta_mo_core::db::{self, log};
+use gta_mo_core::db;
+use gta_mo_core::log;
 use owo_colors::OwoColorize;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -64,11 +65,7 @@ pub fn run(
             let profile = active()?;
             cmd_list(conn, &profile, *verbose, filter, *json)
         }
-        super::CtlCommand::Add {
-            folder,
-            name,
-            order,
-        } => cmd_add(conn, folder, name.as_deref(), *order),
+        super::CtlCommand::Add { folder, name } => cmd_add(conn, folder, name.as_deref()),
         super::CtlCommand::Remove { ident, yes } => cmd_remove(conn, ident, *yes),
         super::CtlCommand::Enable { ident } => {
             let profile = active()?;
@@ -337,12 +334,7 @@ fn cmd_list(
     Ok(())
 }
 
-fn cmd_add(
-    conn: &Connection,
-    folder: &str,
-    name: Option<&str>,
-    order: Option<i64>,
-) -> anyhow::Result<()> {
+fn cmd_add(conn: &Connection, folder: &str, name: Option<&str>) -> anyhow::Result<()> {
     if folder.contains(':') || folder.contains('|') || folder.contains('/') || folder.contains('\\')
     {
         anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\'.");
@@ -357,10 +349,6 @@ fn cmd_add(
     let display_name = name
         .map(|n| n.to_string())
         .unwrap_or_else(|| folder.replace('_', " "));
-
-    if order.is_some() {
-        anyhow::bail!("--order no es compatible con perfiles; usa 'order' después de añadir.");
-    }
 
     let id = db::add_mod_to_all_profiles(conn, folder, &display_name)?;
     log::info(format!(
@@ -504,7 +492,11 @@ fn cmd_rename(conn: &Connection, ident: &str, new_name: &str, folder: bool) -> a
     Ok(())
 }
 
-fn cmd_rename_folder(conn: &Connection, m: &db::ModEntry, new_folder: &str) -> anyhow::Result<()> {
+fn cmd_rename_folder(
+    conn: &Connection,
+    m: &db::ModIdentity,
+    new_folder: &str,
+) -> anyhow::Result<()> {
     if new_folder.contains(':')
         || new_folder.contains('|')
         || new_folder.contains('/')
@@ -580,6 +572,7 @@ fn cmd_info(
 ) -> anyhow::Result<()> {
     let id = db::resolve_mod_ident(conn, ident)?;
     let m = db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))?;
+    let (enabled, order) = db::profile_mod_state(conn, profile.id, id)?;
 
     let deps = db::get_dependencies_of(conn, profile.id, id)?;
     let dependents = db::get_dependents_of(conn, profile.id, id)?;
@@ -599,8 +592,8 @@ fn cmd_info(
             id: m.id,
             folder: m.folder_name,
             name: m.name,
-            enabled: m.enabled,
-            order: m.load_order,
+            enabled,
+            order,
             dependencies: deps
                 .iter()
                 .map(|(d, req)| DepJson::from_entry(d, *req))
@@ -614,7 +607,7 @@ fn cmd_info(
         return Ok(());
     }
 
-    let status = if m.enabled {
+    let status = if enabled {
         "Activado".green().to_string()
     } else {
         "Desactivado".red().to_string()
@@ -625,7 +618,7 @@ fn cmd_info(
     println!("  {}  {}", "Carpeta:".bold(), m.folder_name);
     println!("  {}   {}", "Nombre:".bold(), m.name);
     println!("  {}   {}", "Estado:".bold(), status);
-    println!("  {}    {}", "Orden:".bold(), m.load_order);
+    println!("  {}    {}", "Orden:".bold(), order);
     println!("  {}   {}", "Perfil:".bold(), profile.name);
     println!();
 

@@ -8,7 +8,6 @@ pub struct DepGraph {
     pub enabled_ids: Vec<i64>,
     pub prompt: DepPrompt,
     skip_ids: HashSet<i64>,
-    has_errors: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -48,11 +47,10 @@ impl DepGraph {
             enabled_ids,
             prompt: DepPrompt::Prompt,
             skip_ids: HashSet::new(),
-            has_errors: false,
         }
     }
 
-    pub fn validate_dependencies(&mut self) -> bool {
+    pub fn validate_dependencies(&self) -> bool {
         let mut ok = true;
         let mod_ids: HashSet<i64> = self.mods.keys().copied().collect();
 
@@ -64,16 +62,12 @@ impl DepGraph {
                         .get(mid)
                         .map(|m| m.folder_name.as_str())
                         .unwrap_or("?");
-                    crate::db::log::error(format!(
+                    crate::log::error(format!(
                         "'{mod_name}' depende del mod con id={did}, que no existe en la base de datos."
                     ));
                     ok = false;
                 }
             }
-        }
-
-        if !ok {
-            self.has_errors = true;
         }
 
         for (mid, dep_ids) in &self.optional_deps {
@@ -84,7 +78,7 @@ impl DepGraph {
                         .get(mid)
                         .map(|m| m.folder_name.as_str())
                         .unwrap_or("?");
-                    crate::db::log::warn(format!(
+                    crate::log::warn(format!(
                         "'{mod_name}' recomienda el mod con id={did}, que no existe en la base de datos."
                     ));
                 }
@@ -94,7 +88,7 @@ impl DepGraph {
         ok
     }
 
-    pub fn detect_cycles(&mut self) -> bool {
+    pub fn detect_cycles(&self) -> bool {
         let mut state: HashMap<i64, CycleState> = HashMap::new();
         let mut ok = true;
 
@@ -108,9 +102,6 @@ impl DepGraph {
             }
         }
 
-        if !ok {
-            self.has_errors = true;
-        }
         ok
     }
 
@@ -131,7 +122,7 @@ impl DepGraph {
                             .get(did)
                             .map(|m| m.folder_name.as_str())
                             .unwrap_or("?");
-                        crate::db::log::error(format!(
+                        crate::log::error(format!(
                             "Ciclo de dependencias detectado: {path}{folder} -> {folder}"
                         ));
                         return false;
@@ -181,7 +172,7 @@ impl DepGraph {
                 return;
             }
             m.enabled = true;
-            crate::db::log::info(format!("    [+] Activado: {}", m.folder_name));
+            crate::log::info(format!("    [+] Activado: {}", m.folder_name));
 
             let sub_deps: Vec<i64> = self.deps.get(&did).cloned().unwrap_or_default();
             for sub in sub_deps {
@@ -217,12 +208,12 @@ impl DepGraph {
             let choice = input.trim().to_string();
             self.apply_dep_choice(&disabled_deps, choice.as_str());
         } else if self.prompt == DepPrompt::AutoEnable {
-            crate::db::log::info(
+            crate::log::info(
                 "Activando dependencias deshabilitadas automáticamente (--deps-enable)...",
             );
             self.apply_dep_choice(&disabled_deps, "1");
         } else {
-            crate::db::log::warn(
+            crate::log::warn(
                 "Ignorando dependencias deshabilitadas (--deps-ignore). Puede que el juego falle.",
             );
             self.apply_dep_choice(&disabled_deps, "2");
@@ -244,10 +235,10 @@ impl DepGraph {
                 eprintln!();
             }
             "3" => {
-                crate::db::log::die("Cancelado.");
+                crate::log::die("Cancelado.");
             }
             _ => {
-                crate::db::log::die("Opción inválida. Cancelando.");
+                crate::log::die("Opción inválida. Cancelando.");
             }
         }
     }
@@ -259,11 +250,11 @@ impl DepGraph {
                 for did in dep_ids {
                     match self.mods.get(did) {
                         Some(m) if m.enabled => {}
-                        Some(m) => crate::db::log::warn(format!(
+                        Some(m) => crate::log::warn(format!(
                             "'{mod_name}' recomienda '{}', pero está desactivado.",
                             m.folder_name
                         )),
-                        None => crate::db::log::warn(format!(
+                        None => crate::log::warn(format!(
                             "'{mod_name}' recomienda el mod con id={did}, que no está instalado."
                         )),
                     }
@@ -404,7 +395,7 @@ mod tests {
     fn detect_cycles_finds_cycles() {
         let m = mods(&[(1, "a", true, 10), (2, "b", true, 20)]);
         let d = deps(&[(1, 2, true), (2, 1, true)]);
-        let mut g = DepGraph::new(m, d, vec![1, 2]);
+        let g = DepGraph::new(m, d, vec![1, 2]);
         assert!(!g.detect_cycles());
     }
 
@@ -412,7 +403,7 @@ mod tests {
     fn no_cycle_is_ok() {
         let m = mods(&[(1, "a", true, 10), (2, "b", true, 20), (3, "c", true, 30)]);
         let d = deps(&[(1, 2, true), (2, 3, true)]);
-        let mut g = DepGraph::new(m, d, vec![1, 2, 3]);
+        let g = DepGraph::new(m, d, vec![1, 2, 3]);
         assert!(g.detect_cycles());
     }
 
