@@ -310,7 +310,7 @@ impl LaunchEngine {
             anyhow::bail!("Errores en la resolución de dependencias.");
         }
 
-        graph.enable_mods_for_deps();
+        graph.enable_mods_for_deps()?;
         graph.warn_optional_deps();
         graph.sync_enabled_to_db(&conn, profile_id)?;
 
@@ -396,6 +396,14 @@ impl LaunchEngine {
         db::active_profile(conn)
     }
 
+    /// One-time migration of the pre-profiles `run/upper` directory into the
+    /// `default` profile's upperdir.
+    ///
+    /// This runs at launch time (not in `db::run_migrations`) on purpose: `ctl`
+    /// works without a config, so it has no game_root to compute the paths from.
+    /// It is idempotent and safe to defer — if the user only ever runs `ctl`,
+    /// the legacy directory stays untouched until the first `launch`, when it
+    /// is moved (see README, "Directory layout").
     fn migrate_legacy_upper(
         cfg: &config::Config,
         paths: &config::RuntimePaths,

@@ -102,6 +102,10 @@ game_root/
 Each profile gets its own `upper/`, so savegames (e.g. with PortableGTA),
 game-written configs and logs never mix between profiles.
 
+> **Upgrading from before 0.36.0:** the old shared `run/upper/` is moved to
+> `run/profiles/default/upper` on the first `gta-mo launch` (this is done at
+> launch time because `ctl` works without a config file).
+
 ## Configuration
 
 Configuration is read from (in priority order):

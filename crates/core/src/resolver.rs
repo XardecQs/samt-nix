@@ -181,10 +181,10 @@ impl DepGraph {
         }
     }
 
-    pub fn enable_mods_for_deps(&mut self) {
+    pub fn enable_mods_for_deps(&mut self) -> anyhow::Result<()> {
         let disabled_deps = self.check_disabled_deps();
         if disabled_deps.is_empty() {
-            return;
+            return Ok(());
         }
 
         if self.prompt == DepPrompt::Prompt {
@@ -206,40 +206,43 @@ impl DepGraph {
             std::io::Write::flush(&mut std::io::stdout()).ok();
             std::io::stdin().read_line(&mut input).ok();
             let choice = input.trim().to_string();
-            self.apply_dep_choice(&disabled_deps, choice.as_str());
+            self.apply_dep_choice(&disabled_deps, choice.as_str())?;
         } else if self.prompt == DepPrompt::AutoEnable {
             crate::log::info(
                 "Activando dependencias deshabilitadas automáticamente (--deps-enable)...",
             );
-            self.apply_dep_choice(&disabled_deps, "1");
+            self.apply_dep_choice(&disabled_deps, "1")?;
         } else {
             crate::log::warn(
                 "Ignorando dependencias deshabilitadas (--deps-ignore). Puede que el juego falle.",
             );
-            self.apply_dep_choice(&disabled_deps, "2");
+            self.apply_dep_choice(&disabled_deps, "2")?;
         }
+        Ok(())
     }
 
-    fn apply_dep_choice(&mut self, disabled_deps: &[(i64, i64)], choice: &str) {
+    fn apply_dep_choice(
+        &mut self,
+        disabled_deps: &[(i64, i64)],
+        choice: &str,
+    ) -> anyhow::Result<()> {
         match choice {
             "1" => {
                 for (_, did) in disabled_deps {
                     self.enable_recursive(*did);
                 }
                 eprintln!();
+                Ok(())
             }
             "2" => {
                 for (_, did) in disabled_deps {
                     self.skip_ids.insert(*did);
                 }
                 eprintln!();
+                Ok(())
             }
-            "3" => {
-                crate::log::die("Cancelado.");
-            }
-            _ => {
-                crate::log::die("Opción inválida. Cancelando.");
-            }
+            "3" => anyhow::bail!("Cancelado."),
+            _ => anyhow::bail!("Opción inválida. Cancelando."),
         }
     }
 
