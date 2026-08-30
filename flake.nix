@@ -43,7 +43,8 @@
         postInstall = ''
           wrapProgram "$out/bin/gta-mo" \
             --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
-            --prefix PATH : ${pkgs.umu-launcher}/bin
+            --prefix PATH : ${pkgs.umu-launcher}/bin \
+            --prefix PATH : ${pkgs.fuse3}/bin
 
           mkdir -p "$out/share/bash-completion/completions" \
                    "$out/share/zsh/site-functions" \
@@ -156,6 +157,7 @@
           rust-analyzer
           fuse-overlayfs
           umu-launcher
+          fuse3
           sqlite
           go
           gcc

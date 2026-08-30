@@ -131,9 +131,17 @@ proton_use_wined3d = false
 proton_disable_ntsync = false
 auto_discover = true
 # default_profile = "vanilla"   # used by `launch` when --profile is not given
+# proton_disable_upscalers = false   # true = stop Proton (GE/CachyOS) from downloading/upgrading FSR/DLSS/XeSS/OptiScaler DLLs
 # Optional: custom mods directory (defaults to game_root/mods)
 # mods_dir = "/path/to/mods"
 ```
+
+> **Proton upscalers**: GE and CachyOS Proton run `protonfixes.setup_upscalers()`
+> on every launch, which downloads/installs upscaler DLLs (FSR3/FSR4/MLFG/DLSS/
+> XeSS/OptiScaler). Set `proton_disable_upscalers = true` to export
+> `PROTON_*_UPGRADE=0` and skip that. This works fully on GE-Proton; recent
+> CachyOS builds may still fetch the FSR4 DLL on first use (their code enables
+> it unconditionally), though the upgrade will not be applied to the game.
 
 ## CLI
 

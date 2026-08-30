@@ -1,7 +1,31 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
+
+/// Resolves the fusermount binary, preferring fuse3's `fusermount3` (which
+/// reads /proc/self/mounts) over the legacy fuse2 `fusermount` (which consults
+/// /etc/mtab and prints noisy warnings for fuse-overlayfs mounts).
+fn fusermount_bin() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        which::which("fusermount3")
+            .or_else(|_| which::which("fusermount"))
+            .unwrap_or_else(|_| PathBuf::from("fusermount"))
+    })
+    .as_path()
+}
+
+fn unmount(merged: &Path, lazy: bool) -> bool {
+    let mut cmd = Command::new(fusermount_bin());
+    cmd.arg(if lazy { "-uz" } else { "-u" })
+        .arg(merged)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.status().map(|s| s.success()).unwrap_or(false)
+}
 
 pub struct OverlayMount {
     merged: PathBuf,
@@ -14,7 +38,7 @@ impl OverlayMount {
             crate::log::info("Intentando desmontar overlay anterior...");
             if !Self::unmount_retry(merged, 10, 2000) {
                 crate::log::warn("Desmontaje normal fallido, intentando lazy unmount...");
-                let _ = Command::new("fusermount").arg("-uz").arg(merged).status();
+                unmount(merged, true);
                 thread::sleep(Duration::from_millis(1000));
             }
         }
@@ -57,6 +81,7 @@ impl OverlayMount {
     pub fn start_guard(&mut self) {
         let merged = self.merged.clone();
         let self_pid = std::process::id() as libc::pid_t;
+        let _fusermount = fusermount_bin().to_owned();
 
         let pid = unsafe { libc::fork() };
         if pid < 0 {
@@ -74,14 +99,8 @@ impl OverlayMount {
                 thread::sleep(Duration::from_secs(1));
             }
             thread::sleep(Duration::from_secs(2));
-            let ok = Command::new("fusermount")
-                .arg("-u")
-                .arg(&merged)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !ok {
-                let _ = Command::new("fusermount").arg("-uz").arg(&merged).status();
+            if !unmount(&merged, false) {
+                unmount(&merged, true);
             }
             std::process::exit(0);
         }
@@ -112,14 +131,11 @@ impl OverlayMount {
 
     fn unmount_retry(merged: &Path, retries: u32, delay_ms: u64) -> bool {
         for i in 0..retries {
-            let output = Command::new("fusermount").arg("-u").arg(merged).output();
-
-            match output {
-                Ok(o) if o.status.success() => return true,
-                _ if i < retries - 1 => {
-                    thread::sleep(Duration::from_millis(delay_ms));
-                }
-                _ => {}
+            if unmount(merged, false) {
+                return true;
+            }
+            if i < retries - 1 {
+                thread::sleep(Duration::from_millis(delay_ms));
             }
         }
         false
@@ -131,10 +147,7 @@ impl Drop for OverlayMount {
         let _ = std::env::set_current_dir("/");
         if Self::is_mounted(&self.merged) && !Self::unmount_retry(&self.merged, 15, 2000) {
             crate::log::warn("Desmontaje bloqueado, intentando lazy unmount...");
-            let _ = Command::new("fusermount")
-                .arg("-uz")
-                .arg(&self.merged)
-                .status();
+            unmount(&self.merged, true);
         }
     }
 }

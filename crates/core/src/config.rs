@@ -9,6 +9,7 @@ pub struct Config {
     pub game_exe: Option<String>,
     pub proton_use_wined3d: Option<bool>,
     pub proton_disable_ntsync: Option<bool>,
+    pub proton_disable_upscalers: Option<bool>,
     pub dxvk_hud: Option<String>,
     pub auto_discover: Option<bool>,
     pub mods_dir: Option<String>,
@@ -30,6 +31,10 @@ impl Config {
 
     pub fn proton_disable_ntsync(&self) -> bool {
         self.proton_disable_ntsync.unwrap_or(false)
+    }
+
+    pub fn proton_disable_upscalers(&self) -> bool {
+        self.proton_disable_upscalers.unwrap_or(false)
     }
 
     pub fn auto_discover(&self) -> bool {

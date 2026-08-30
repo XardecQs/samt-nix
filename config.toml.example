@@ -16,6 +16,7 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 # game_exe = "gta_sa.exe"
 # proton_use_wined3d = true
 # proton_disable_ntsync = false
+# proton_disable_upscalers = false   # true = evitar que Proton (GE/CachyOS) descargue/actualice upscalers (FSR/DLSS/XeSS/OptiScaler)
 # auto_discover = true
 # default_profile = "vanilla"   # used by `launch` when --profile is not given
 # dxvk_hud = "devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls"

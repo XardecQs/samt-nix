@@ -125,6 +125,19 @@ impl LaunchEngine {
             },
         );
 
+        if cfg.proton_disable_upscalers() {
+            // GE/CachyOS Proton's protonfixes setup_upscalers() downloads and
+            // installs upscaler DLLs (FSR3/FSR4/MLFG/DLSS/XeSS/OptiScaler) on
+            // launch. Set every *UPGRADE var to 0 so it is skipped.
+            std::env::set_var("PROTON_FSR3_UPGRADE", "0");
+            std::env::set_var("PROTON_FSR4_UPGRADE", "0");
+            std::env::set_var("PROTON_FSR4_RDNA3_UPGRADE", "0");
+            std::env::set_var("PROTON_MLFG_UPGRADE", "0");
+            std::env::set_var("PROTON_DLSS_UPGRADE", "0");
+            std::env::set_var("PROTON_XESS_UPGRADE", "0");
+            std::env::set_var("PROTON_USE_OPTISCALER", "0");
+        }
+
         if debug {
             std::fs::create_dir_all(log_dir).ok();
             std::env::set_var("PROTON_LOG", "1");
@@ -484,6 +497,10 @@ impl LaunchEngine {
             cfg.proton_disable_ntsync()
         ));
         out.push_str(&format!(
+            "PROTON_DISABLE_UPSCALERS:  {}\n",
+            cfg.proton_disable_upscalers()
+        ));
+        out.push_str(&format!(
             "AUTO_DISCOVER:             {}\n",
             cfg.auto_discover()
         ));
@@ -505,5 +522,65 @@ impl LaunchEngine {
         ));
 
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const UPSCALER_VARS: [&str; 7] = [
+        "PROTON_FSR3_UPGRADE",
+        "PROTON_FSR4_UPGRADE",
+        "PROTON_FSR4_RDNA3_UPGRADE",
+        "PROTON_MLFG_UPGRADE",
+        "PROTON_DLSS_UPGRADE",
+        "PROTON_XESS_UPGRADE",
+        "PROTON_USE_OPTISCALER",
+    ];
+
+    fn base_config() -> Config {
+        Config {
+            game_root: "/tmp".into(),
+            proton_path: "/tmp".into(),
+            game_id: None,
+            game_exe: None,
+            proton_use_wined3d: None,
+            proton_disable_ntsync: None,
+            proton_disable_upscalers: None,
+            dxvk_hud: None,
+            auto_discover: None,
+            mods_dir: None,
+            default_profile: None,
+        }
+    }
+
+    #[test]
+    fn disable_upscalers_exports_upgrade_vars() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut cfg = base_config();
+        cfg.proton_disable_upscalers = Some(true);
+        LaunchEngine::setup_env(&cfg, Path::new("/tmp/pfx"), Path::new("/tmp/logs"), false);
+
+        for var in UPSCALER_VARS {
+            assert_eq!(std::env::var(var).unwrap(), "0", "{var} debe ser 0");
+        }
+        for var in UPSCALER_VARS {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[test]
+    fn upscalers_left_alone_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let cfg = base_config();
+        LaunchEngine::setup_env(&cfg, Path::new("/tmp/pfx"), Path::new("/tmp/logs"), false);
+        assert!(UPSCALER_VARS
+            .iter()
+            .all(|var| std::env::var_os(var).is_none()));
     }
 }
