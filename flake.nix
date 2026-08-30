@@ -53,7 +53,7 @@
         meta = {
           description = "GTA San Andreas mod organizer with fuse-overlayfs";
           mainProgram = "gta-mo";
-          license = nixpkgs.lib.licenses.mit;
+          license = nixpkgs.lib.licenses.gpl3Plus;
           platforms = supportedSystems;
         };
       };
@@ -94,7 +94,7 @@
         meta = {
           description = "GTA San Andreas mod organizer GUI (Fyne frontend for gta-mo)";
           mainProgram = "gta-mo-gui";
-          license = nixpkgs.lib.licenses.mit;
+          license = nixpkgs.lib.licenses.gpl3Plus;
           platforms = supportedSystems;
         };
       };

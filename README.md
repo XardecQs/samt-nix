@@ -265,3 +265,7 @@ dependencies), then `cd gui && go run .`.
 ## Legacy version
 
 The original bash implementation is preserved in [`bash-legacy/`](bash-legacy/).
+
+## License
+
+GPL-3.0-or-later — see [`LICENSE`](LICENSE).
