@@ -43,8 +43,12 @@
         postInstall = ''
           wrapProgram "$out/bin/gta-mo" \
             --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
-            --prefix PATH : ${pkgs.umu-launcher}/bin \
-            --prefix PATH : ${pkgs.fuse3}/bin
+            --prefix PATH : ${pkgs.umu-launcher}/bin
+
+          # NOTE: do not add `fuse3` to PATH here. Its bin/ contains a
+          # non-setuid fusermount3 that shadows the setuid wrapper in
+          # /run/wrappers/bin (or /usr/bin), breaking both fuse-overlayfs
+          # mounts and unmounts with "Permission denied".
 
           mkdir -p "$out/share/bash-completion/completions" \
                    "$out/share/zsh/site-functions" \
@@ -157,7 +161,6 @@
           rust-analyzer
           fuse-overlayfs
           umu-launcher
-          fuse3
           sqlite
           go
           gcc
