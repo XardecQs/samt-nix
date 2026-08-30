@@ -20,6 +20,18 @@ pub struct ModIdentity {
     pub name: String,
 }
 
+/// Cached mod metadata, populated from `mod.toml` on every `discover`.
+#[derive(Debug, Clone, Default)]
+pub struct ModMetaCache {
+    pub version: Option<String>,
+    pub author: Option<String>,
+    pub url: Option<String>,
+    pub description: Option<String>,
+    pub cover: Option<String>,
+    pub mount: Vec<String>,
+    pub guides: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DepRef {
     pub id: i64,
@@ -277,7 +289,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -287,17 +299,48 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.pragma_update(None, "user_version", 1)?;
     }
 
-    // Future steps (add a numbered function per step):
-    // if version < 2 {
-    //     migrate_to_v2(conn)?;
-    //     conn.pragma_update(None, "user_version", 2)?;
-    // }
+    if version < 2 {
+        migrate_to_v2(conn)?;
+        conn.pragma_update(None, "user_version", 2)?;
+    }
 
     debug_assert!(
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0)
             == SCHEMA_VERSION
     );
+    Ok(())
+}
+
+/// Adds the mod metadata cache columns (version, author, url, description,
+/// cover, mount, guides) to `mods`. Introspection-based, so it is idempotent
+/// and works for fresh databases and pre-v2 ones alike.
+fn migrate_to_v2(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    let additions = [
+        ("version", "ALTER TABLE mods ADD COLUMN version TEXT"),
+        ("author", "ALTER TABLE mods ADD COLUMN author TEXT"),
+        ("url", "ALTER TABLE mods ADD COLUMN url TEXT"),
+        (
+            "description",
+            "ALTER TABLE mods ADD COLUMN description TEXT",
+        ),
+        ("cover", "ALTER TABLE mods ADD COLUMN cover TEXT"),
+        ("mount", "ALTER TABLE mods ADD COLUMN mount TEXT"),
+        ("guides", "ALTER TABLE mods ADD COLUMN guides TEXT"),
+    ];
+
+    for (name, sql) in additions {
+        if cols.iter().any(|c| c.as_str() == name) {
+            continue;
+        }
+        log::info(format!("Migrando schema: {sql}"));
+        conn.execute(sql, [])?;
+    }
     Ok(())
 }
 
@@ -394,6 +437,7 @@ fn bootstrap_to_v1(conn: &Connection) -> anyhow::Result<()> {
                  CREATE TABLE mod_dependencies (
                      mod_id INTEGER NOT NULL,
                      dependency_id INTEGER NOT NULL,
+                     required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0, 1)),
                      PRIMARY KEY (mod_id, dependency_id),
                      FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
                      FOREIGN KEY (dependency_id) REFERENCES mods(id) ON DELETE CASCADE,
@@ -718,6 +762,59 @@ pub fn get_mod_by_folder(conn: &Connection, folder: &str) -> anyhow::Result<Opti
     Ok(rows.next().transpose()?)
 }
 
+fn json_list(v: &Option<Vec<String>>) -> Option<String> {
+    v.as_ref()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::to_string(l).unwrap_or_default())
+}
+
+fn parse_json_list(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Loads the cached metadata for a mod (empty default if none was discovered).
+pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache> {
+    let mut stmt = conn.prepare(
+        "SELECT version, author, url, description, cover, mount, guides FROM mods WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![id], |row| {
+        Ok(ModMetaCache {
+            version: row.get(0)?,
+            author: row.get(1)?,
+            url: row.get(2)?,
+            description: row.get(3)?,
+            cover: row.get(4)?,
+            mount: parse_json_list(row.get(5)?),
+            guides: parse_json_list(row.get(6)?),
+        })
+    })?;
+    Ok(rows.next().transpose()?.unwrap_or_default())
+}
+
+/// Stores (or clears) the metadata cache for a mod from its `mod.toml`.
+pub fn update_mod_meta(
+    conn: &Connection,
+    id: i64,
+    meta: &Option<crate::meta::ModMeta>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE mods SET version = ?1, author = ?2, url = ?3, description = ?4,
+         cover = ?5, mount = ?6, guides = ?7 WHERE id = ?8",
+        params![
+            meta.as_ref().and_then(|m| m.version.clone()),
+            meta.as_ref().and_then(|m| m.author.clone()),
+            meta.as_ref().and_then(|m| m.url.clone()),
+            meta.as_ref().and_then(|m| m.description.clone()),
+            meta.as_ref().and_then(|m| m.cover.clone()),
+            json_list(&meta.as_ref().and_then(|m| m.mount.clone())),
+            json_list(&meta.as_ref().and_then(|m| m.guides.clone())),
+            id,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn resolve_mod_ident(conn: &Connection, ident: &str) -> anyhow::Result<i64> {
     if let Ok(id) = ident.parse::<i64>() {
         let exists: i64 = conn.query_row(
@@ -869,20 +966,56 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
     let all_mods = load_all_mods(conn)?;
     let db_folders: Vec<String> = all_mods.iter().map(|m| m.folder_name.clone()).collect();
     let db_folders_set: HashSet<&String> = db_folders.iter().collect();
+    let mods_by_folder: HashMap<&str, &ModIdentity> = all_mods
+        .iter()
+        .map(|m| (m.folder_name.as_str(), m))
+        .collect();
 
     for folder in &disk_folders {
+        let meta = match crate::meta::read_mod_meta(mods_dir, folder) {
+            Ok(meta) => meta,
+            Err(e) => {
+                log::warn(format!("    [!] {folder}: {e}"));
+                None
+            }
+        };
+        if let Some(m) = &meta {
+            if let Some(mount) = &m.mount {
+                for entry in mount {
+                    if !crate::meta::valid_mount_entry(entry) {
+                        log::warn(format!(
+                            "    [!] {folder}: 'mount' con entrada inválida '{entry}' (se ignora)"
+                        ));
+                    } else if !mods_dir.join(folder).join(entry).is_dir() {
+                        log::warn(format!(
+                            "    [!] {folder}: 'mount' '{}' no existe en el disco",
+                            entry
+                        ));
+                    }
+                }
+            }
+        }
+
         if !db_folders_set.contains(folder) {
-            let display_name = folder.replace('_', " ");
+            let display_name = meta
+                .as_ref()
+                .and_then(|m| m.name.clone())
+                .unwrap_or_else(|| folder.replace('_', " "));
 
             match add_mod_to_all_profiles(conn, folder, &display_name) {
                 Ok(_id) => {
                     log::info(format!("    [+] Nuevo: {folder} -> '{display_name}'"));
                     new_count += 1;
+                    if let Some(m) = get_mod_by_folder(conn, folder)? {
+                        update_mod_meta(conn, m.id, &meta)?;
+                    }
                 }
                 Err(e) => {
                     log::warn(format!("    [!] Error al insertar: {folder}: {e}"));
                 }
             }
+        } else if let Some(m) = mods_by_folder.get(folder.as_str()) {
+            update_mod_meta(conn, m.id, &meta)?;
         }
     }
 
@@ -1072,5 +1205,82 @@ mod tests {
             assert!(!state.0, "nuevo mod registrado desactivado en cada perfil");
             assert!(state.1 > 0, "nuevo mod registrado con orden auto");
         }
+    }
+
+    #[test]
+    fn v2_migration_adds_metadata_columns() {
+        let conn = mem_conn();
+        conn.execute_batch(
+            "CREATE TABLE mods (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_name TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                enabled INTEGER DEFAULT 0,
+                load_order INTEGER DEFAULT 0
+            );
+            INSERT INTO mods (folder_name, name) VALUES ('m1', 'M1');",
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('mods')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for c in [
+            "version",
+            "author",
+            "url",
+            "description",
+            "cover",
+            "mount",
+            "guides",
+        ] {
+            assert!(cols.contains(&c.to_string()), "falta columna {c}");
+        }
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
+    }
+
+    #[test]
+    fn discover_populates_metadata_cache() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("gta-mo-disc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("MyMod/models")).unwrap();
+        std::fs::write(
+            dir.join("MyMod/mod.toml"),
+            "name = \"My Mod\"\nversion = \"2.0\"\nauthor = \"Author\"\nmount = [\"models\"]\n",
+        )
+        .unwrap();
+
+        let (new_count, _) = discover_mods(&conn, &dir).unwrap();
+        assert_eq!(new_count, 1);
+
+        let m = get_mod_by_folder(&conn, "MyMod").unwrap().unwrap();
+        assert_eq!(m.name, "My Mod");
+        let meta = load_mod_meta(&conn, m.id).unwrap();
+        assert_eq!(meta.version.as_deref(), Some("2.0"));
+        assert_eq!(meta.author.as_deref(), Some("Author"));
+        assert_eq!(meta.mount, vec!["models".to_string()]);
+
+        // re-discover refreshes and keeps the display name
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("MyMod/models")).unwrap();
+        std::fs::write(dir.join("MyMod/mod.toml"), "version = \"2.1\"\n").unwrap();
+        discover_mods(&conn, &dir).unwrap();
+        let meta = load_mod_meta(&conn, m.id).unwrap();
+        assert_eq!(meta.version.as_deref(), Some("2.1"));
+        assert_eq!(
+            get_mod_by_folder(&conn, "MyMod").unwrap().unwrap().name,
+            "My Mod"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

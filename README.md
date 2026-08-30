@@ -143,6 +143,39 @@ auto_discover = true
 > CachyOS builds may still fetch the FSR4 DLL on first use (their code enables
 > it unconditionally), though the upgrade will not be applied to the game.
 
+## Mod packaging (`mod.toml`)
+
+Each mod folder may carry a `mod.toml` manifest with metadata and mount
+control. A template is provided as [`mod.toml.example`](mod.toml.example) and
+can be generated per-mod with `gta-mo ctl init <folder>`:
+
+```toml
+# GTA Mod Organizer manifest
+name = "Nombre visible"          # si falta, se usa el nombre de la carpeta
+version = "1.2.0"
+author = "Autor"
+url = "https://github.com/..."
+description = "Descripción larga..."
+
+cover = "cover.png"                # ruta relativa dentro del mod
+guides = ["guides/instalacion.md"] # lista de archivos de guía
+
+# Subdirectorios que se montan sobre la raíz del juego.
+# Sin esta clave se monta la carpeta entera (comportamiento por defecto).
+mount = ["models", "data"]
+```
+
+- All fields are optional. `mount` entries are relative paths (no `..`, no
+  absolute paths); each one becomes its own overlay layer. With no `mount`,
+  the whole folder is mounted, so legacy mods keep working untouched.
+- The manifest is the canonical source of metadata; the database caches the
+  fields (version, author, url, description, cover, mount, guides) on every
+  `discover` so `ctl` and the GUI work without reading files. Existing mods'
+  display names are never overwritten by `discover` (use `ctl rename`).
+- The metadata shows up in `ctl list -v`, `ctl info`, and the `--json` output
+  of both. Covers and guides stay as files in the mod folder; rendering them
+  in the GUI is planned for a future GUI rewrite.
+
 ## CLI
 
 ```
@@ -150,6 +183,7 @@ gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [-
 gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/mount namespace (for Steam)
 gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
 gta-mo ctl add <folder> [--name <name>]
+gta-mo ctl init <folder>                    # generate a mod.toml metadata template
 gta-mo ctl remove <id|folder>
 gta-mo ctl enable <id|folder> [--profile <name>]
 gta-mo ctl disable <id|folder> [--profile <name>]

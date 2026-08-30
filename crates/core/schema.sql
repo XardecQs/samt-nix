@@ -4,6 +4,13 @@ CREATE TABLE IF NOT EXISTS mods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     folder_name TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL CHECK(length(name) > 0),
+    version TEXT,
+    author TEXT,
+    url TEXT,
+    description TEXT,
+    cover TEXT,
+    mount TEXT,
+    guides TEXT,
     CHECK(
         length(folder_name) > 0
         AND folder_name NOT LIKE '%|%'

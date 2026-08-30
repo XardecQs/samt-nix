@@ -30,6 +30,20 @@ struct ModJson {
     name: String,
     enabled: bool,
     order: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cover: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mount: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    guides: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     deps: Vec<DepJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -66,6 +80,7 @@ pub fn run(
             cmd_list(conn, &profile, *verbose, filter, *json)
         }
         super::CtlCommand::Add { folder, name } => cmd_add(conn, folder, name.as_deref()),
+        super::CtlCommand::Init { folder } => cmd_init(conn, folder),
         super::CtlCommand::Remove { ident, yes } => cmd_remove(conn, ident, *yes),
         super::CtlCommand::Enable { ident } => {
             let profile = active()?;
@@ -106,6 +121,55 @@ pub fn run(
 fn resolve_mod(conn: &Connection, ident: &str) -> anyhow::Result<db::ModIdentity> {
     let id = db::resolve_mod_ident(conn, ident)?;
     db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))
+}
+
+const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
+# Todos los campos son opcionales. Rellena los que quieras.
+
+name = "NOMBRE"
+version = "1.0.0"
+author = "AUTOR"
+url = "https://..."
+description = "Descripción del mod."
+
+# Carátula y guías (rutas relativas dentro de esta carpeta)
+# cover = "cover.png"
+# guides = ["guides/instalacion.md"]
+
+# Subdirectorios que se montan sobre la raíz del juego.
+# Sin esta clave se monta la carpeta entera (comportamiento por defecto).
+# mount = ["models", "data", "modloader"]
+"#;
+
+fn cmd_init(conn: &Connection, folder: &str) -> anyhow::Result<()> {
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+
+    let mod_dir = paths.mods_dir.join(folder);
+    if !mod_dir.is_dir() {
+        anyhow::bail!("La carpeta del mod no existe: {}", mod_dir.display());
+    }
+
+    let meta_path = mod_dir.join("mod.toml");
+    if meta_path.exists() {
+        anyhow::bail!("{} ya existe.", meta_path.display());
+    }
+
+    std::fs::write(&meta_path, MOD_TOML_TEMPLATE)?;
+    log::info(format!("Plantilla creada: {}", meta_path.display()));
+
+    if let Some(m) = db::get_mod_by_folder(conn, folder)? {
+        let meta = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, folder)?;
+        db::update_mod_meta(conn, m.id, &meta)?;
+        log::info(format!("Metadata actualizada para '{}'.", folder));
+    } else {
+        log::warn(format!(
+            "'{}' no está registrado; usa `gta-mo launch --discover` para registrarlo.",
+            folder
+        ));
+    }
+    Ok(())
 }
 
 fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Result<()> {
@@ -256,6 +320,7 @@ fn cmd_list(
     if json {
         let mut out = Vec::new();
         for m in &mods {
+            let meta = db::load_mod_meta(conn, m.id)?;
             let deps = db::get_dependencies_of(conn, profile.id, m.id)?
                 .into_iter()
                 .map(|(d, req)| DepJson::from_entry(&d, req))
@@ -270,6 +335,13 @@ fn cmd_list(
                 name: m.name.clone(),
                 enabled: m.enabled,
                 order: m.load_order,
+                version: meta.version,
+                author: meta.author,
+                url: meta.url,
+                description: meta.description,
+                cover: meta.cover,
+                mount: meta.mount,
+                guides: meta.guides,
                 deps,
                 dependents,
             });
@@ -311,6 +383,24 @@ fn cmd_list(
         println!();
 
         if verbose {
+            let meta = db::load_mod_meta(conn, m.id)?;
+            let mut meta_parts: Vec<String> = Vec::new();
+            if let Some(v) = &meta.version {
+                meta_parts.push(format!("v{}", v.cyan()));
+            }
+            if let Some(a) = &meta.author {
+                meta_parts.push(format!("por {}", a.magenta()));
+            }
+            if let Some(d) = &meta.description {
+                meta_parts.push(format!("\"{}\"", d.yellow()));
+            }
+            if !meta_parts.is_empty() {
+                println!("     {}", meta_parts.join(" "));
+            }
+            if !meta.mount.is_empty() {
+                println!("     {} {}", "mount:".cyan(), meta.mount.join(", "));
+            }
+
             let deps = db::get_dependencies_of(conn, profile.id, m.id)?;
             if !deps.is_empty() {
                 let names: Vec<String> = deps
@@ -581,6 +671,7 @@ fn cmd_info(
 
     let deps = db::get_dependencies_of(conn, profile.id, id)?;
     let dependents = db::get_dependents_of(conn, profile.id, id)?;
+    let meta = db::load_mod_meta(conn, id)?;
 
     if json {
         #[derive(Serialize)]
@@ -590,6 +681,13 @@ fn cmd_info(
             name: String,
             enabled: bool,
             order: i64,
+            version: Option<String>,
+            author: Option<String>,
+            url: Option<String>,
+            description: Option<String>,
+            cover: Option<String>,
+            mount: Vec<String>,
+            guides: Vec<String>,
             dependencies: Vec<DepJson>,
             dependents: Vec<DepJson>,
         }
@@ -599,6 +697,13 @@ fn cmd_info(
             name: m.name,
             enabled,
             order,
+            version: meta.version,
+            author: meta.author,
+            url: meta.url,
+            description: meta.description,
+            cover: meta.cover,
+            mount: meta.mount,
+            guides: meta.guides,
             dependencies: deps
                 .iter()
                 .map(|(d, req)| DepJson::from_entry(d, *req))
@@ -622,6 +727,27 @@ fn cmd_info(
     println!("  {}       {}", "ID:".bold(), m.id);
     println!("  {}  {}", "Carpeta:".bold(), m.folder_name);
     println!("  {}   {}", "Nombre:".bold(), m.name);
+    if let Some(v) = &meta.version {
+        println!("  {}      {}", "Versión:".bold(), v.cyan());
+    }
+    if let Some(a) = &meta.author {
+        println!("  {}    {}", "Autor:".bold(), a.magenta());
+    }
+    if let Some(u) = &meta.url {
+        println!("  {}       {}", "URL:".bold(), u.blue().underline());
+    }
+    if let Some(d) = &meta.description {
+        println!("  {} {}", "Descripción:".bold(), d.yellow());
+    }
+    if let Some(c) = &meta.cover {
+        println!("  {}  {}", "Carátula:".bold(), c);
+    }
+    if !meta.mount.is_empty() {
+        println!("  {}     {}", "Mount:".bold(), meta.mount.join(", "));
+    }
+    if !meta.guides.is_empty() {
+        println!("  {}     {}", "Guías:".bold(), meta.guides.join(", "));
+    }
     println!("  {}   {}", "Estado:".bold(), status);
     println!("  {}    {}", "Orden:".bold(), order);
     println!("  {}   {}", "Perfil:".bold(), profile.name);

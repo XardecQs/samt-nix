@@ -98,6 +98,8 @@ pub enum CtlCommand {
         #[arg(long, help = "Visible display name")]
         name: Option<String>,
     },
+    #[command(about = "Generate a mod.toml metadata template in a mod folder")]
+    Init { folder: String },
     #[command(about = "Remove a mod")]
     Remove {
         ident: String,

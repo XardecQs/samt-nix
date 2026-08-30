@@ -97,7 +97,8 @@ impl LaunchEngine {
     pub fn build_lowerdir(mods_dir: &Path, resolved: &[String], base_game: &Path) -> String {
         let mut layers: Vec<String> = resolved
             .iter()
-            .map(|f| mods_dir.join(f).display().to_string())
+            .flat_map(|f| crate::meta::mod_layers(mods_dir, f))
+            .map(|p| p.display().to_string())
             .collect();
         layers.push(base_game.display().to_string());
         layers.join(":")
@@ -347,13 +348,15 @@ impl LaunchEngine {
         let resolved = graph.resolve();
 
         for folder in &resolved {
-            let mod_path = paths.mods_dir.join(folder);
-            if !mod_path.exists() {
-                anyhow::bail!(
-                    "La carpeta del mod '{}' no existe: {}",
-                    folder,
-                    mod_path.display()
-                );
+            let layers = crate::meta::mod_layers(&paths.mods_dir, folder);
+            for layer in &layers {
+                if !layer.exists() {
+                    anyhow::bail!(
+                        "La capa del mod '{}' no existe: {} (revisa 'mount' en mod.toml)",
+                        folder,
+                        layer.display()
+                    );
+                }
             }
         }
 
@@ -382,11 +385,12 @@ impl LaunchEngine {
         }
 
         Self::setup_env(&cfg, &paths.wine_prefix, &ppaths.log_dir, opts.debug);
+        log(log_output.trim_end());
         log("Lanzando juego...");
         Self::launch_game(&game_exe, &paths.merged)?;
 
         drop(ov);
-        Ok(LaunchResult { log: log_output })
+        Ok(LaunchResult { log: String::new() })
     }
 
     fn resolve_profile(
@@ -462,16 +466,22 @@ impl LaunchEngine {
                 paths.base_game.display()
             ));
         } else {
-            for (i, folder) in resolved.iter().enumerate() {
-                out.push_str(&format!(
-                    "  {}. {}\n",
-                    i + 1,
-                    paths.mods_dir.join(folder).display()
-                ));
+            let mut n = 0;
+            for folder in resolved {
+                let layers = crate::meta::mod_layers(&paths.mods_dir, folder);
+                if layers.len() == 1 && layers[0] == paths.mods_dir.join(folder) {
+                    n += 1;
+                    out.push_str(&format!("  {}. {}\n", n, layers[0].display()));
+                } else {
+                    for layer in &layers {
+                        n += 1;
+                        out.push_str(&format!("  {}. {} (de '{folder}')\n", n, layer.display()));
+                    }
+                }
             }
             out.push_str(&format!(
                 "  {}. {} (base)\n",
-                resolved.len() + 1,
+                n + 1,
                 paths.base_game.display()
             ));
         }
@@ -582,5 +592,29 @@ mod tests {
         assert!(UPSCALER_VARS
             .iter()
             .all(|var| std::env::var_os(var).is_none()));
+    }
+
+    #[test]
+    fn build_lowerdir_expands_mount_lists() {
+        let dir = std::env::temp_dir().join(format!("gta-mo-lowerdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("M1/models")).unwrap();
+        std::fs::create_dir_all(dir.join("M1/data")).unwrap();
+        std::fs::create_dir_all(dir.join("M2")).unwrap();
+        std::fs::create_dir_all(dir.join("base")).unwrap();
+        std::fs::write(dir.join("M1/mod.toml"), "mount = [\"models\", \"data\"]\n").unwrap();
+
+        let lower = LaunchEngine::build_lowerdir(
+            &dir,
+            &["M1".to_string(), "M2".to_string()],
+            &dir.join("base"),
+        );
+        let layers: Vec<&str> = lower.split(':').collect();
+        assert_eq!(layers[0], dir.join("M1/models").display().to_string());
+        assert_eq!(layers[1], dir.join("M1/data").display().to_string());
+        assert_eq!(layers[2], dir.join("M2").display().to_string());
+        assert_eq!(layers[3], dir.join("base").display().to_string());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
