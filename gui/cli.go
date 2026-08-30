@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -113,4 +115,34 @@ func runJSON(bin string, out interface{}, args ...string) error {
 		return nil
 	}
 	return json.Unmarshal(stdout.Bytes(), out)
+}
+
+// runStream executes gta-mo streaming merged stdout+stderr line by line to
+// onLine (which runs on a background goroutine). It blocks until the command
+// exits.
+func runStream(bin string, args []string, onLine func(string)) error {
+	cmd := exec.Command(bin, args...)
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		return err
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sc := bufio.NewScanner(pr)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			onLine(sc.Text())
+		}
+	}()
+
+	err := cmd.Wait()
+	pw.Close()
+	<-done
+	return err
 }

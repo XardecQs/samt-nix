@@ -25,11 +25,13 @@ type GUI struct {
 	modsBox       *fyne.Container
 	profilesBox   *fyne.Container
 	status        *widget.Label
+	logText       *widget.Label
+	logScroll     *container.Scroll
 
-	actionUse      *widget.Button
-	actionRename   *widget.Button
-	actionCopy     *widget.Button
-	actionDelete   *widget.Button
+	actionUse    *widget.Button
+	actionRename *widget.Button
+	actionCopy   *widget.Button
+	actionDelete *widget.Button
 
 	mods []Mod
 }
@@ -59,7 +61,10 @@ func (g *GUI) buildUI() fyne.CanvasObject {
 	})
 
 	g.status = widget.NewLabel("")
-	g.status.Wrapping = fyne.TextWrapWord
+
+	g.logText = widget.NewLabel("")
+	g.logText.Wrapping = fyne.TextWrapWord
+	g.logScroll = container.NewVScroll(g.logText)
 
 	launchBtn := widget.NewButton("Lanzar", g.launch)
 	refreshBtn := widget.NewButton("Actualizar", g.refreshProfiles)
@@ -89,6 +94,7 @@ func (g *GUI) buildUI() fyne.CanvasObject {
 	tabs := container.NewAppTabs(
 		container.NewTabItem("Mods", modsTab),
 		container.NewTabItem("Perfiles", profilesTab),
+		container.NewTabItem("Log", g.logScroll),
 	)
 
 	return container.NewBorder(
@@ -103,6 +109,42 @@ func (g *GUI) buildUI() fyne.CanvasObject {
 		nil, nil,
 		tabs,
 	)
+}
+
+// log appends a line to the Log tab, scrolling to the bottom.
+func (g *GUI) log(s string) {
+	fyne.Do(func() {
+		if g.logText.Text != "" {
+			g.logText.SetText(g.logText.Text + "\n" + s)
+		} else {
+			g.logText.SetText(s)
+		}
+		g.logScroll.ScrollToBottom()
+	})
+}
+
+// busy runs fn off the UI thread showing a modal spinner, then refreshes via
+// onDone (or shows an error dialog).
+func (g *GUI) busy(desc string, fn func() error, onDone func()) {
+	content := container.NewVBox(
+		widget.NewLabel(desc + "…"),
+		widget.NewProgressBarInfinite(),
+	)
+	busy := dialog.NewCustom(desc, "", content, g.win)
+	busy.Show()
+	go func() {
+		err := fn()
+		fyne.Do(func() {
+			busy.Hide()
+			if err != nil {
+				dialog.ShowError(err, g.win)
+				return
+			}
+			if onDone != nil {
+				onDone()
+			}
+		})
+	}()
 }
 
 // ---------- Mods tab ----------
@@ -167,18 +209,20 @@ func (g *GUI) refreshMods() {
 	g.modsBox.Refresh()
 }
 
+// toggleArgs builds the ctl command to set a mod's enabled state.
+func toggleArgs(m Mod, on bool, active string) []string {
+	if on {
+		return []string{"ctl", "enable", fmt.Sprint(m.ID), "--profile", active}
+	}
+	return []string{"ctl", "disable", fmt.Sprint(m.ID), "--yes", "--profile", active}
+}
+
 func (g *GUI) toggleMod(m Mod, on bool) {
-	verb := "disable"
-	args := []string{"ctl", verb, fmt.Sprint(m.ID), "--profile", g.active}
-	if !on {
-		args = []string{"ctl", "disable", fmt.Sprint(m.ID), "--yes", "--profile", g.active}
-	}
-	if _, err := run(g.bin, args...); err != nil {
-		dialog.ShowError(err, g.win)
-		g.refreshMods()
-		return
-	}
-	g.refreshMods()
+	args := toggleArgs(m, on, g.active)
+	g.busy("Actualizando mod", func() error {
+		_, err := run(g.bin, args...)
+		return err
+	}, g.refreshMods)
 }
 
 func (g *GUI) moveMod(m Mod, dir int) {
@@ -194,15 +238,13 @@ func (g *GUI) moveMod(m Mod, dir int) {
 		return
 	}
 	other := g.mods[ni]
-	if _, err := run(g.bin, "ctl", "order", fmt.Sprint(m.ID), fmt.Sprint(other.Order), "--profile", g.active); err != nil {
-		dialog.ShowError(err, g.win)
-		return
-	}
-	if _, err := run(g.bin, "ctl", "order", fmt.Sprint(other.ID), fmt.Sprint(m.Order), "--profile", g.active); err != nil {
-		dialog.ShowError(err, g.win)
-		return
-	}
-	g.refreshMods()
+	g.busy("Reordenando mod", func() error {
+		if _, err := run(g.bin, "ctl", "order", fmt.Sprint(m.ID), fmt.Sprint(other.Order), "--profile", g.active); err != nil {
+			return err
+		}
+		_, err := run(g.bin, "ctl", "order", fmt.Sprint(other.ID), fmt.Sprint(m.Order), "--profile", g.active)
+		return err
+	}, g.refreshMods)
 }
 
 func (g *GUI) addMod() {
@@ -211,11 +253,10 @@ func (g *GUI) addMod() {
 		if folder == "" {
 			return
 		}
-		if _, err := run(g.bin, "ctl", "add", folder); err != nil {
-			dialog.ShowError(err, g.win)
-			return
-		}
-		g.refreshMods()
+		g.busy("Añadiendo mod", func() error {
+			_, err := run(g.bin, "ctl", "add", folder)
+			return err
+		}, g.refreshMods)
 	}, g.win)
 }
 
@@ -300,11 +341,13 @@ func (g *GUI) newProfile() {
 		if name == "" {
 			return
 		}
-		if _, err := run(g.bin, "ctl", "profile", "create", name); err != nil {
-			dialog.ShowError(err, g.win)
-			return
-		}
-		g.refreshProfiles()
+		g.busy("Creando perfil", func() error {
+			_, err := run(g.bin, "ctl", "profile", "create", name)
+			return err
+		}, func() {
+			g.status.SetText("Perfil creado: " + name)
+			g.refreshProfiles()
+		})
 	}, g.win)
 }
 
@@ -313,11 +356,10 @@ func (g *GUI) useSelectedProfile() {
 	if p == nil {
 		return
 	}
-	if _, err := run(g.bin, "ctl", "profile", "use", p.Slug); err != nil {
-		dialog.ShowError(err, g.win)
-		return
-	}
-	g.refreshProfiles()
+	g.busy("Cambiando perfil", func() error {
+		_, err := run(g.bin, "ctl", "profile", "use", p.Slug)
+		return err
+	}, g.refreshProfiles)
 }
 
 func (g *GUI) renameSelectedProfile() {
@@ -330,11 +372,10 @@ func (g *GUI) renameSelectedProfile() {
 		if name == "" {
 			return
 		}
-		if _, err := run(g.bin, "ctl", "profile", "rename", p.Slug, name); err != nil {
-			dialog.ShowError(err, g.win)
-			return
-		}
-		g.refreshProfiles()
+		g.busy("Renombrando perfil", func() error {
+			_, err := run(g.bin, "ctl", "profile", "rename", p.Slug, name)
+			return err
+		}, g.refreshProfiles)
 	}, g.win)
 }
 
@@ -348,11 +389,10 @@ func (g *GUI) copySelectedProfile() {
 		if name == "" {
 			return
 		}
-		if _, err := run(g.bin, "ctl", "profile", "copy", p.Slug, name); err != nil {
-			dialog.ShowError(err, g.win)
-			return
-		}
-		g.refreshProfiles()
+		g.busy("Copiando perfil", func() error {
+			_, err := run(g.bin, "ctl", "profile", "copy", p.Slug, name)
+			return err
+		}, g.refreshProfiles)
 	}, g.win)
 }
 
@@ -368,12 +408,14 @@ func (g *GUI) deleteSelectedProfile() {
 			if !ok {
 				return
 			}
-			if _, err := run(g.bin, "ctl", "profile", "delete", p.Slug, "--yes"); err != nil {
-				dialog.ShowError(err, g.win)
-				return
-			}
-			g.selectedProfile = -1
-			g.refreshProfiles()
+			slug := p.Slug
+			g.busy("Eliminando perfil", func() error {
+				_, err := run(g.bin, "ctl", "profile", "delete", slug, "--yes")
+				return err
+			}, func() {
+				g.selectedProfile = -1
+				g.refreshProfiles()
+			})
 		},
 		g.win,
 	)
@@ -413,12 +455,10 @@ func (g *GUI) selectProfile(slug string) {
 	if slug == "" {
 		return
 	}
-	if _, err := run(g.bin, "ctl", "profile", "use", slug); err != nil {
-		dialog.ShowError(err, g.win)
-		return
-	}
-	g.active = slug
-	g.refreshProfiles()
+	g.busy("Cambiando perfil", func() error {
+		_, err := run(g.bin, "ctl", "profile", "use", slug)
+		return err
+	}, g.refreshProfiles)
 }
 
 func (g *GUI) launch() {
@@ -427,20 +467,22 @@ func (g *GUI) launch() {
 	}
 	bin := g.bin
 	profile := g.active
+	g.logText.SetText("")
+	g.log("--- Lanzando perfil '" + profile + "' ---")
 	g.status.SetText("Lanzando…")
 	go func() {
-		out, err := run(bin, "launch", "--deps-enable", "--profile", profile)
+		err := runStream(bin, []string{"launch", "--deps-enable", "--profile", profile}, func(line string) {
+			g.log(line)
+		})
 		fyne.Do(func() {
 			if err != nil {
 				g.status.SetText("Error al lanzar")
+				g.log("[error] " + err.Error())
 				dialog.ShowError(err, g.win)
 				return
 			}
-			text := "Juego terminado."
-			if strings.TrimSpace(out) != "" {
-				text += "\n" + out
-			}
-			g.status.SetText(text)
+			g.status.SetText("Juego terminado.")
+			g.log("--- Juego terminado ---")
 		})
 	}()
 }
