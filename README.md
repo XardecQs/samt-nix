@@ -114,6 +114,10 @@ Configuration is read from (in priority order):
 2. `./config.toml` (current directory)
 3. `$XDG_CONFIG_HOME/gta-mo/config.toml`
 
+A template with every option is provided as
+[`config.toml.example`](config.toml.example) — copy it to `config.toml` and
+edit the paths (the file `config.toml` is intentionally not versioned).
+
 The database is stored at `$GTA_MO_DB` or `$XDG_DATA_HOME/gta-mo/organizer.db`.
 
 Example `config.toml`:
@@ -145,7 +149,7 @@ gta-mo ctl order <id|folder> <n> [--profile <name>]
 gta-mo ctl rename <id|folder> <name> [--folder]
 gta-mo ctl info <id|folder> [--json] [--profile <name>]
 gta-mo ctl dep add <mod> <dependency> [--optional]
-gta-mo ctl dep rm <mod> <dependency>
+gta-mo ctl dep remove <mod> <dependency>
 gta-mo ctl profile list [--json]
 gta-mo ctl profile create <name>
 gta-mo ctl profile delete <name>

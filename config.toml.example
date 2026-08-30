@@ -1,0 +1,22 @@
+# GTA Mod Organizer — Configuration template
+#
+# Copy this file to `config.toml` (next to the binary, or in the repo root)
+# and edit the paths. gta-mo looks for it in this order:
+#   1. $GTA_MO_CONFIG
+#   2. ./config.toml
+#   3. $XDG_CONFIG_HOME/gta-mo/config.toml
+#
+# The database lives at $GTA_MO_DB or $XDG_DATA_HOME/gta-mo/organizer.db.
+
+game_root = "/home/user/Games/GTA_SA"
+proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
+
+# Optional settings (defaults shown):
+# game_id = "umu-gtasa"
+# game_exe = "gta_sa.exe"
+# proton_use_wined3d = true
+# proton_disable_ntsync = false
+# auto_discover = true
+# default_profile = "vanilla"   # used by `launch` when --profile is not given
+# dxvk_hud = "devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls"
+# mods_dir = "/path/to/mods"    # defaults to game_root/mods

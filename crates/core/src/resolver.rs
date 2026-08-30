@@ -172,6 +172,9 @@ impl DepGraph {
                 return;
             }
             m.enabled = true;
+            if !self.enabled_ids.contains(&did) {
+                self.enabled_ids.push(did);
+            }
             crate::log::info(format!("    [+] Activado: {}", m.folder_name));
 
             let sub_deps: Vec<i64> = self.deps.get(&did).cloned().unwrap_or_default();
@@ -445,6 +448,8 @@ mod tests {
         g.enable_recursive(2);
         assert!(g.mods.get(&2).unwrap().enabled);
         assert!(g.mods.get(&3).unwrap().enabled);
+        assert!(g.enabled_ids.contains(&2));
+        assert!(g.enabled_ids.contains(&3));
     }
 
     #[test]

@@ -1,11 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 pub struct OverlayMount {
     merged: PathBuf,
-    guard_child: Option<std::process::Child>,
 }
 
 impl OverlayMount {
@@ -48,26 +47,44 @@ impl OverlayMount {
 
         Ok(OverlayMount {
             merged: merged.to_path_buf(),
-            guard_child: None,
         })
     }
 
+    /// Spawns a detached helper that unmounts `merged` shortly after this
+    /// process dies, so a killed or crashed gta-mo does not leave the overlay
+    /// mounted. Done with fork() instead of a `sh -c` wrapper; the child just
+    /// polls for the parent's death and then runs fusermount.
     pub fn start_guard(&mut self) {
-        let merged = self.merged.display().to_string();
-        let pid = std::process::id().to_string();
+        let merged = self.merged.clone();
+        let self_pid = std::process::id() as libc::pid_t;
 
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "while kill -0 {pid} 2>/dev/null; do sleep 1; done; sleep 2; fusermount -u \"{merged}\" 2>/dev/null || fusermount -uz \"{merged}\" 2>/dev/null || true"
-            ))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok();
-
-        self.guard_child = child;
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            crate::log::warn(
+                "No se pudo crear el proceso guardián; un cierre forzado puede dejar el overlay montado.",
+            );
+            return;
+        }
+        if pid == 0 {
+            unsafe { libc::setsid() };
+            loop {
+                if unsafe { libc::kill(self_pid, 0) } != 0 {
+                    break;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+            thread::sleep(Duration::from_secs(2));
+            let ok = Command::new("fusermount")
+                .arg("-u")
+                .arg(&merged)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                let _ = Command::new("fusermount").arg("-uz").arg(&merged).status();
+            }
+            std::process::exit(0);
+        }
     }
 
     pub fn merged_path(&self) -> &Path {
@@ -118,9 +135,6 @@ impl Drop for OverlayMount {
                 .arg("-uz")
                 .arg(&self.merged)
                 .status();
-        }
-        if let Some(ref mut child) = self.guard_child {
-            let _ = child.kill();
         }
     }
 }

@@ -11,7 +11,8 @@
       let pkgs = nixpkgs.legacyPackages.${system};
       in f pkgs);
 
-    version = (builtins.fromTOML (builtins.readFile ./crates/cli/Cargo.toml)).package.version;
+    version =
+      (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
     source = nixpkgs.lib.fileset.toSource {
       root = ./.;
@@ -19,6 +20,8 @@
         ./crates
         ./Cargo.toml
         ./Cargo.lock
+        ./README.md
+        ./LICENSE
       ];
     };
 
@@ -88,7 +91,7 @@
 
         postInstall = ''
           wrapProgram "$out/bin/gta-mo-gui" \
-            --prefix PATH : ${self.packages.${pkgs.system}.gta-mod-organizer}/bin
+            --prefix PATH : ${self.packages.${pkgs.stdenv.hostPlatform.system}.gta-mod-organizer}/bin
         '';
 
         meta = {
@@ -107,7 +110,7 @@
     });
 
     checks = forAllSystems (pkgs: let
-      pkg = self.packages.${pkgs.system}.default;
+      pkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
     in {
       build = pkg;
 
@@ -129,8 +132,8 @@
     });
 
     overlay = final: prev: {
-      gta-mod-organizer = self.packages.${final.system}.default;
-      gta-mo-gui = self.packages.${final.system}.gta-mo-gui;
+      gta-mod-organizer = self.packages.${final.stdenv.hostPlatform.system}.default;
+      gta-mo-gui = self.packages.${final.stdenv.hostPlatform.system}.gta-mo-gui;
     };
 
     nixosModules = {

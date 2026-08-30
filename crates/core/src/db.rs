@@ -1,6 +1,6 @@
 use crate::log;
 use rusqlite::{params, Connection};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -868,9 +868,10 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
 
     let all_mods = load_all_mods(conn)?;
     let db_folders: Vec<String> = all_mods.iter().map(|m| m.folder_name.clone()).collect();
+    let db_folders_set: HashSet<&String> = db_folders.iter().collect();
 
     for folder in &disk_folders {
-        if !db_folders.contains(folder) {
+        if !db_folders_set.contains(folder) {
             let display_name = folder.replace('_', " ");
 
             match add_mod_to_all_profiles(conn, folder, &display_name) {
@@ -885,8 +886,9 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
         }
     }
 
+    let disk_folders_set: HashSet<&String> = disk_folders.iter().collect();
     for db_folder in &db_folders {
-        if !disk_folders.contains(db_folder) {
+        if !disk_folders_set.contains(db_folder) {
             if let Some(m) = all_mods.iter().find(|m| &m.folder_name == db_folder) {
                 let _ = disable_mod_all_profiles(conn, m.id);
                 log::warn(format!(

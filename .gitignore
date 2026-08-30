@@ -7,3 +7,6 @@ organizer.db-*
 launcher.lock
 run/
 *.log
+
+# Local config (personal paths) — use config.toml.example as a template
+config.toml

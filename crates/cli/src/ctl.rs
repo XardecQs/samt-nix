@@ -103,6 +103,11 @@ pub fn run(
     }
 }
 
+fn resolve_mod(conn: &Connection, ident: &str) -> anyhow::Result<db::ModIdentity> {
+    let id = db::resolve_mod_ident(conn, ident)?;
+    db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))
+}
+
 fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Result<()> {
     match action {
         super::ProfileAction::List { json } => {
@@ -358,8 +363,8 @@ fn cmd_add(conn: &Connection, folder: &str, name: Option<&str>) -> anyhow::Resul
 }
 
 fn cmd_remove(conn: &Connection, ident: &str, yes: bool) -> anyhow::Result<()> {
-    let id = db::resolve_mod_ident(conn, ident)?;
-    let m = db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))?;
+    let m = resolve_mod(conn, ident)?;
+    let id = m.id;
     let dep_count = db::count_deps_for_mod(conn, id)?;
 
     if !yes {
@@ -393,8 +398,8 @@ fn cmd_remove(conn: &Connection, ident: &str, yes: bool) -> anyhow::Result<()> {
 }
 
 fn cmd_enable(conn: &Connection, profile: &db::Profile, ident: &str) -> anyhow::Result<()> {
-    let id = db::resolve_mod_ident(conn, ident)?;
-    let m = db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))?;
+    let m = resolve_mod(conn, ident)?;
+    let id = m.id;
     let (enabled, _) = db::profile_mod_state(conn, profile.id, id)?;
     if enabled {
         log::warn(format!("'{}' ya esta activado.", m.folder_name));
@@ -414,8 +419,8 @@ fn cmd_disable(
     ident: &str,
     yes: bool,
 ) -> anyhow::Result<()> {
-    let id = db::resolve_mod_ident(conn, ident)?;
-    let m = db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))?;
+    let m = resolve_mod(conn, ident)?;
+    let id = m.id;
     let (enabled, _) = db::profile_mod_state(conn, profile.id, id)?;
     if !enabled {
         log::warn(format!("'{}' ya esta desactivado.", m.folder_name));
@@ -461,8 +466,8 @@ fn cmd_order(
     ident: &str,
     new_order: i64,
 ) -> anyhow::Result<()> {
-    let id = db::resolve_mod_ident(conn, ident)?;
-    let m = db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))?;
+    let m = resolve_mod(conn, ident)?;
+    let id = m.id;
     let (_, old_order) = db::profile_mod_state(conn, profile.id, id)?;
     db::set_mod_order(conn, profile.id, id, new_order)?;
     log::info(format!(
@@ -476,8 +481,8 @@ fn cmd_rename(conn: &Connection, ident: &str, new_name: &str, folder: bool) -> a
     if new_name.is_empty() {
         anyhow::bail!("El nombre no puede estar vacio.");
     }
-    let id = db::resolve_mod_ident(conn, ident)?;
-    let m = db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))?;
+    let m = resolve_mod(conn, ident)?;
+    let id = m.id;
 
     if folder {
         return cmd_rename_folder(conn, &m, new_name);
@@ -570,8 +575,8 @@ fn cmd_info(
     ident: &str,
     json: bool,
 ) -> anyhow::Result<()> {
-    let id = db::resolve_mod_ident(conn, ident)?;
-    let m = db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))?;
+    let m = resolve_mod(conn, ident)?;
+    let id = m.id;
     let (enabled, order) = db::profile_mod_state(conn, profile.id, id)?;
 
     let deps = db::get_dependencies_of(conn, profile.id, id)?;
@@ -675,17 +680,12 @@ fn cmd_dep_add(
     dep_ident: &str,
     optional: bool,
 ) -> anyhow::Result<()> {
-    let mod_id = db::resolve_mod_ident(conn, mod_ident)?;
-    let dep_id = db::resolve_mod_ident(conn, dep_ident)?;
+    let m = resolve_mod(conn, mod_ident)?;
+    let d = resolve_mod(conn, dep_ident)?;
+    let mod_folder = m.folder_name.clone();
+    let dep_folder = d.folder_name.clone();
 
-    let mod_folder = db::get_mod_by_id(conn, mod_id)?
-        .map(|m| m.folder_name)
-        .unwrap_or_default();
-    let dep_folder = db::get_mod_by_id(conn, dep_id)?
-        .map(|m| m.folder_name)
-        .unwrap_or_default();
-
-    db::add_dependency(conn, mod_id, dep_id, !optional)?;
+    db::add_dependency(conn, m.id, d.id, !optional)?;
     if optional {
         log::info(format!(
             "'{mod_folder}' ahora recomienda '{dep_folder}' (opcional)."
@@ -697,17 +697,12 @@ fn cmd_dep_add(
 }
 
 fn cmd_dep_rm(conn: &Connection, mod_ident: &str, dep_ident: &str) -> anyhow::Result<()> {
-    let mod_id = db::resolve_mod_ident(conn, mod_ident)?;
-    let dep_id = db::resolve_mod_ident(conn, dep_ident)?;
+    let m = resolve_mod(conn, mod_ident)?;
+    let d = resolve_mod(conn, dep_ident)?;
+    let mod_folder = m.folder_name.clone();
+    let dep_folder = d.folder_name.clone();
 
-    let mod_folder = db::get_mod_by_id(conn, mod_id)?
-        .map(|m| m.folder_name)
-        .unwrap_or_default();
-    let dep_folder = db::get_mod_by_id(conn, dep_id)?
-        .map(|m| m.folder_name)
-        .unwrap_or_default();
-
-    db::remove_dependency(conn, mod_id, dep_id)?;
+    db::remove_dependency(conn, m.id, d.id)?;
     log::info(format!(
         "Dependencia eliminada: '{mod_folder}' ya no depende de '{dep_folder}'."
     ));
