@@ -317,3 +317,22 @@ fn rename_writes_back_to_mod_toml() {
     let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
     assert_eq!(v["name"].as_str().unwrap(), "New Name");
 }
+
+#[test]
+fn human_output_commands_succeed() {
+    let t = TempDb::new("human");
+    t.run_ok(&["ctl", "add", "m1"]);
+    for args in [
+        &["ctl", "list"][..],
+        &["ctl", "list", "-v"][..],
+        &["ctl", "info", "m1"][..],
+        &["ctl", "info", "m1", "-v"][..],
+    ] {
+        let out = t.run(args);
+        assert!(
+            out.status.success(),
+            "{args:?} falló: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

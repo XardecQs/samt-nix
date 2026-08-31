@@ -1,8 +1,23 @@
+use comfy_table::{presets, Cell, ContentArrangement, Table};
 use gta_mo_core::db;
 use gta_mo_core::log;
 use owo_colors::OwoColorize;
 use rusqlite::Connection;
 use serde::Serialize;
+
+/// Renders a comfy-table with a clean preset, fitting the terminal width.
+fn render_table(headers: Vec<String>, rows: Vec<Vec<String>>) -> String {
+    let mut table = Table::new();
+    table.load_preset(presets::UTF8_FULL_CONDENSED);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    if !headers.is_empty() {
+        table.set_header(headers.into_iter().map(Cell::from).collect::<Vec<_>>());
+    }
+    for row in rows {
+        table.add_row(row.into_iter().map(Cell::from).collect::<Vec<_>>());
+    }
+    table.to_string()
+}
 
 #[derive(Serialize)]
 struct DepJson {
@@ -103,9 +118,13 @@ pub fn run(
             new_name,
             folder,
         } => cmd_rename(conn, ident, new_name, *folder),
-        super::CtlCommand::Info { ident, json } => {
+        super::CtlCommand::Info {
+            ident,
+            verbose,
+            json,
+        } => {
             let profile = active()?;
-            cmd_info(conn, &profile, ident, *json)
+            cmd_info(conn, &profile, ident, *verbose, *json)
         }
         super::CtlCommand::Dep { action } => match action {
             super::DepAction::Add {
@@ -451,80 +470,46 @@ fn cmd_list(
         return Ok(());
     }
 
-    println!(
-        "{:4} {:6} {:7} {:30} {}",
-        "ID".bold(),
-        "ACTIVO".bold(),
-        "ORDEN".bold(),
-        "CARPETA".bold(),
-        "NOMBRE".bold()
-    );
-    println!(
-        "{:4} {:6} {:7} {:30} ------------------------------",
-        "---", "------", "------", "------------------------------"
-    );
+    let mut headers = vec!["ID", "ACTIVO", "ORDEN", "CARPETA", "NOMBRE"];
+    if verbose {
+        headers.extend(["VERSIÓN", "AUTOR", "DEPS"]);
+    }
+    let headers: Vec<String> = headers.into_iter().map(String::from).collect();
 
+    let mut rows: Vec<Vec<String>> = Vec::new();
     for m in &mods {
         let status = if m.enabled {
             "SI".green().to_string()
         } else {
             "NO".red().to_string()
         };
-
         let (name, meta) = display_meta(conn, mods_dir.as_deref(), m.id, &m.folder_name, &m.name);
-        print!(
-            "{:<4} {:<6} {:<7} {:<30} {}",
-            m.id, status, m.load_order, m.folder_name, name
-        );
-        println!();
-
+        let mut row = vec![
+            m.id.to_string(),
+            status,
+            m.load_order.to_string(),
+            m.folder_name.clone(),
+            name,
+        ];
         if verbose {
-            let mut meta_parts: Vec<String> = Vec::new();
-            if let Some(v) = &meta.version {
-                meta_parts.push(format!("v{}", v.cyan()));
-            }
-            if !meta.author.is_empty() {
-                meta_parts.push(format!("por {}", meta.author.join(", ").magenta()));
-            }
-            if let Some(d) = &meta.description {
-                meta_parts.push(format!("\"{}\"", d.yellow()));
-            }
-            if !meta_parts.is_empty() {
-                println!("     {}", meta_parts.join(" "));
-            }
-            if let Some(id) = &meta.mod_id {
-                println!("     {} {}", "id:".cyan(), id.green());
-            }
-            if !meta.tags.is_empty() {
-                println!("     {} {}", "tags:".cyan(), meta.tags.join(", "));
-            }
-            if !meta.mount.is_empty() {
-                println!("     {} {}", "mount:".cyan(), meta.mount.join(", "));
-            }
-
+            row.push(meta.version.clone().unwrap_or_default());
+            row.push(meta.author.join(", "));
             let deps = db::get_dependencies_of(conn, profile.id, m.id)?;
-            if !deps.is_empty() {
-                let names: Vec<String> = deps
-                    .iter()
-                    .map(|(d, req)| {
-                        if *req {
-                            d.folder_name.clone()
-                        } else {
-                            format!("{} {}", d.folder_name, "(opcional)".cyan())
-                        }
-                    })
-                    .collect();
-                println!("     {} {}", "-> depende de:".cyan(), names.join(" "));
-            }
-
             let dependents = db::get_dependents_of(conn, profile.id, m.id)?;
-            if !dependents.is_empty() {
-                let names: Vec<&str> = dependents.iter().map(|d| d.folder_name.as_str()).collect();
-                println!("     {} {}", "<- requerido por:".yellow(), names.join(" "));
+            let mut dep_lines: Vec<String> = Vec::new();
+            for (d, req) in &deps {
+                let kind = if *req { "requerido" } else { "opcional" };
+                dep_lines.push(format!("-> {} ({kind})", d.folder_name));
             }
+            for d in &dependents {
+                dep_lines.push(format!("<- {}", d.folder_name));
+            }
+            row.push(dep_lines.join("\n"));
         }
+        rows.push(row);
     }
 
+    println!("{}", render_table(headers, rows));
     println!();
     log::info(format!("Total: {count} mod(s)"));
     Ok(())
@@ -782,6 +767,7 @@ fn cmd_info(
     conn: &Connection,
     profile: &db::Profile,
     ident: &str,
+    verbose: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let m = resolve_mod(conn, ident)?;
@@ -901,135 +887,257 @@ fn cmd_info(
     } else {
         "Desactivado".red().to_string()
     };
-
-    println!();
-    println!("  {}       {}", "ID:".bold(), m.id);
-    println!("  {}  {}", "Carpeta:".bold(), m.folder_name);
-    println!("  {}   {}", "Nombre:".bold(), name);
-    if let Some(id) = &meta.mod_id {
-        println!("  {}      {}", "Mod ID:".bold(), id.green());
-    }
-    if let Some(v) = &meta.version {
-        println!("  {}      {}", "Versión:".bold(), v.cyan());
-    }
-    if !meta.author.is_empty() {
-        println!(
-            "  {}    {}",
-            "Autor:".bold(),
-            meta.author.join(", ").magenta()
-        );
-    }
-    if let Some(u) = &meta.url {
-        println!("  {}       {}", "URL:".bold(), u.blue().underline());
-    }
-    if let Some(d) = &meta.description {
-        println!("  {} {}", "Descripción:".bold(), d.yellow());
-    }
-    if let Some(c) = &meta.cover {
-        println!("  {}  {}", "Carátula:".bold(), c);
-    }
-    if !meta.tags.is_empty() {
-        println!("  {}     {}", "Tags:".bold(), meta.tags.join(", "));
-    }
-    if !meta.mount.is_empty() {
-        println!("  {}     {}", "Mount:".bold(), meta.mount.join(", "));
-    }
-    if !guides.is_empty() {
-        println!("  {}     {}", "Guías:".bold(), guides.join(", "));
-    }
     let kind = if meta.is_pack() {
         format!("pack ({} componentes)", meta.components.len())
     } else {
         "mod".to_string()
     };
-    println!("  {}   {}", "Tipo:".bold(), kind.magenta());
-    if !meta.components.is_empty() {
-        println!("  {}", "Componentes:".bold());
-        for c in &meta.components {
-            let mut parts: Vec<String> = Vec::new();
-            if let Some(v) = &c.version {
-                parts.push(format!("v{}", v.cyan()));
-            }
-            if let Some(a) = &c.author {
-                parts.push(format!("por {}", a.yellow()));
-            }
-            if let Some(u) = &c.url {
-                parts.push(u.blue().underline().to_string());
-            }
-            let mut line = format!(
-                "    - {}",
-                c.name.as_deref().unwrap_or("(sin nombre)").bold()
-            );
-            if let Some(p) = &c.path {
-                line.push_str(&format!(" [{}]", p.dimmed()));
-            }
-            if !parts.is_empty() {
-                line.push_str(&format!(" — {}", parts.join(" ")));
-            }
-            println!("{line}");
-        }
-    }
-    println!("  {}   {}", "Estado:".bold(), status);
-    println!("  {}    {}", "Orden:".bold(), order);
-    println!("  {}", "Perfiles:".bold());
-    for (p, enabled) in &profiles {
-        let mark = if p.is_active {
-            " (activo)".cyan().to_string()
-        } else {
-            String::new()
-        };
-        let state = if *enabled {
-            "SI".green().to_string()
-        } else {
-            "NO".red().to_string()
-        };
-        println!("    {:<16} [{}]{}", p.name, state, mark);
-    }
-    println!();
 
-    if deps.is_empty() {
-        println!("  {} ninguna", "Dependencias:".cyan());
-    } else {
+    if verbose {
+        println!();
+        println!("  {}       {}", "ID:".bold(), m.id);
+        println!("  {}  {}", "Carpeta:".bold(), m.folder_name);
+        println!("  {}   {}", "Nombre:".bold(), name);
+        if let Some(id) = &meta.mod_id {
+            println!("  {}      {}", "Mod ID:".bold(), id.green());
+        }
+        if let Some(v) = &meta.version {
+            println!("  {}      {}", "Versión:".bold(), v.cyan());
+        }
+        if !meta.author.is_empty() {
+            println!(
+                "  {}    {}",
+                "Autor:".bold(),
+                meta.author.join(", ").magenta()
+            );
+        }
+        if let Some(u) = &meta.url {
+            println!("  {}       {}", "URL:".bold(), u.blue().underline());
+        }
+        if let Some(d) = &meta.description {
+            println!("  {} {}", "Descripción:".bold(), d.yellow());
+        }
+        if let Some(c) = &meta.cover {
+            println!("  {}  {}", "Carátula:".bold(), c);
+        }
+        if !meta.tags.is_empty() {
+            println!("  {}     {}", "Tags:".bold(), meta.tags.join(", "));
+        }
+        if !meta.mount.is_empty() {
+            println!("  {}     {}", "Mount:".bold(), meta.mount.join(", "));
+        }
+        println!("  {}   {}", "Tipo:".bold(), kind.magenta());
+        println!("  {}   {}", "Estado:".bold(), status);
+        println!("  {}    {}", "Orden:".bold(), order);
+
+        if !guides.is_empty() {
+            println!("\n  {}", "Guías:".bold());
+            println!(
+                "{}",
+                render_table(
+                    vec!["Guías".to_string()],
+                    guides.iter().map(|g| vec![g.clone()]).collect(),
+                )
+            );
+        }
+
+        if !meta.components.is_empty() {
+            println!("\n  {}", "Componentes:".bold());
+            let rows = meta
+                .components
+                .iter()
+                .map(|c| {
+                    vec![
+                        c.name.clone().unwrap_or_default(),
+                        c.version
+                            .clone()
+                            .map(|v| format!("v{v}"))
+                            .unwrap_or_default(),
+                        c.author.clone().unwrap_or_default(),
+                        c.url.clone().unwrap_or_default(),
+                        c.path.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            println!(
+                "{}",
+                render_table(
+                    vec![
+                        "Componente".to_string(),
+                        "Versión".to_string(),
+                        "Autor".to_string(),
+                        "URL".to_string(),
+                        "Path".to_string(),
+                    ],
+                    rows,
+                )
+            );
+        }
+
+        println!("\n  {}", "Perfiles:".bold());
+        let rows = profiles
+            .iter()
+            .map(|(p, enabled)| {
+                vec![
+                    format!("{}{}", p.name, if p.is_active { " (activo)" } else { "" }),
+                    if *enabled {
+                        "SI".green().to_string()
+                    } else {
+                        "NO".red().to_string()
+                    },
+                ]
+            })
+            .collect();
         println!(
-            "  {} ({} depende de):",
-            "Dependencias".cyan(),
-            m.folder_name
+            "{}",
+            render_table(vec!["Perfil".to_string(), "Estado".to_string()], rows)
         );
-        for (d, req) in &deps {
-            let dstatus = if d.enabled {
-                "SI".green().to_string()
-            } else {
-                "NO".red().to_string()
-            };
-            let dkind = if *req {
-                "requerido".cyan().to_string()
-            } else {
-                "opcional".yellow().to_string()
-            };
-            println!(
-                "    [{}] {} ({}) [activo: {}] [{}]",
-                d.id, d.folder_name, d.name, dstatus, dkind
-            );
-        }
-    }
-    println!();
 
-    if dependents.is_empty() {
-        println!("  {} nadie", "Requerido por:".yellow());
-    } else {
-        println!("  {}:", "Requerido por".yellow());
-        for d in &dependents {
-            let rstatus = if d.enabled {
-                "SI".green().to_string()
-            } else {
-                "NO".red().to_string()
-            };
+        if deps.is_empty() {
+            println!("\n  {} ninguna", "Dependencias:".cyan());
+        } else {
+            println!("\n  {}:", "Dependencias".cyan());
+            let rows = deps
+                .iter()
+                .map(|(d, req)| {
+                    vec![
+                        d.id.to_string(),
+                        d.folder_name.clone(),
+                        d.name.clone(),
+                        if d.enabled {
+                            "SI".green().to_string()
+                        } else {
+                            "NO".red().to_string()
+                        },
+                        if *req {
+                            "requerido".cyan().to_string()
+                        } else {
+                            "opcional".yellow().to_string()
+                        },
+                    ]
+                })
+                .collect();
             println!(
-                "    [{}] {} ({}) [activo: {}]",
-                d.id, d.folder_name, d.name, rstatus
+                "{}",
+                render_table(
+                    vec![
+                        "ID".to_string(),
+                        "Mod".to_string(),
+                        "Nombre".to_string(),
+                        "Activo".to_string(),
+                        "Tipo".to_string(),
+                    ],
+                    rows,
+                )
             );
         }
+
+        if dependents.is_empty() {
+            println!("\n  {} nadie", "Requerido por:".yellow());
+        } else {
+            println!("\n  {}:", "Requerido por".yellow());
+            let rows = dependents
+                .iter()
+                .map(|d| {
+                    vec![
+                        d.id.to_string(),
+                        d.folder_name.clone(),
+                        d.name.clone(),
+                        if d.enabled {
+                            "SI".green().to_string()
+                        } else {
+                            "NO".red().to_string()
+                        },
+                    ]
+                })
+                .collect();
+            println!(
+                "{}",
+                render_table(
+                    vec![
+                        "ID".to_string(),
+                        "Mod".to_string(),
+                        "Nombre".to_string(),
+                        "Activo".to_string(),
+                    ],
+                    rows,
+                )
+            );
+        }
+        println!();
+        return Ok(());
     }
+
+    // Compact summary (2-column table)
+    let mut rows: Vec<(String, String)> = Vec::new();
+    rows.push(("Nombre".to_string(), name.clone()));
+    rows.push(("Tipo".to_string(), kind.clone()));
+    if let Some(id) = &meta.mod_id {
+        rows.push(("Mod ID".to_string(), id.green().to_string()));
+    }
+    if let Some(v) = &meta.version {
+        rows.push(("Versión".to_string(), v.cyan().to_string()));
+    }
+    if !meta.author.is_empty() {
+        rows.push((
+            "Autor".to_string(),
+            meta.author.join(", ").magenta().to_string(),
+        ));
+    }
+    rows.push((
+        "Estado".to_string(),
+        format!(
+            "{} · Orden {}",
+            if enabled {
+                "Activado".green().to_string()
+            } else {
+                "Desactivado".red().to_string()
+            },
+            order
+        ),
+    ));
+    rows.push(("Perfil".to_string(), profile.name.clone()));
+    if !guides.is_empty() {
+        rows.push((
+            "Guías".to_string(),
+            format!("{} archivos (usa -v para listar)", guides.len()),
+        ));
+    }
+    if !meta.components.is_empty() {
+        let names: Vec<String> = meta
+            .components
+            .iter()
+            .filter_map(|c| c.name.clone())
+            .collect();
+        let preview = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        let shown = if names.len() > 3 {
+            format!("{preview}, …")
+        } else {
+            preview
+        };
+        rows.push((
+            "Componentes".to_string(),
+            format!("{} ({shown})", meta.components.len()),
+        ));
+    }
+    if !deps.is_empty() {
+        let names = deps.iter().map(|(d, _)| d.name.clone()).collect::<Vec<_>>();
+        rows.push(("Depende de".to_string(), names.join(", ")));
+    }
+    if !dependents.is_empty() {
+        let names: Vec<String> = dependents.iter().map(|d| d.name.clone()).take(3).collect();
+        rows.push((
+            "Requerido por".to_string(),
+            format!("{}, … ({} mods)", names.join(", "), dependents.len()),
+        ));
+    }
+
+    let table_rows: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|(k, v)| vec![k.bold().to_string(), v])
+        .collect();
+    println!();
+    println!("{}", render_table(Vec::new(), table_rows));
     println!();
     Ok(())
 }

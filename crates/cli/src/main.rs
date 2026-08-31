@@ -126,6 +126,8 @@ pub enum CtlCommand {
     #[command(about = "Show detailed mod info")]
     Info {
         ident: String,
+        #[arg(short, long, help = "Show the full output (lists, components, guides)")]
+        verbose: bool,
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
