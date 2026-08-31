@@ -225,15 +225,56 @@ fn info_reads_edited_mod_toml_without_launch() {
     t.run_ok(&["ctl", "init", "d3d9"]);
     std::fs::write(
         game_root.join("mods/d3d9/mod.toml"),
-        "name = \"DXVK - D3D9.dll\"\nversion = \"3.1\"\nauthor = \"doitsujin\"\nmount = [\"content\"]\n",
+        "id = \"doitsujin:dxvk-d3d9\"\nname = \"DXVK - D3D9.dll\"\nversion = \"3.1\"\nauthor = [\"doitsujin\", \"xardec\"]\nmount = [\"content\"]\ntags = [\"essential\"]\n",
     )
     .unwrap();
 
     let v = json(&t.run_ok(&["ctl", "info", "d3d9", "--json"]));
     assert_eq!(v["name"].as_str().unwrap(), "DXVK - D3D9.dll");
+    assert_eq!(v["mod_id"].as_str().unwrap(), "doitsujin:dxvk-d3d9");
     assert_eq!(v["version"].as_str().unwrap(), "3.1");
-    assert_eq!(v["author"].as_str().unwrap(), "doitsujin");
+    assert_eq!(v["author"][0].as_str().unwrap(), "doitsujin");
+    assert_eq!(v["author"][1].as_str().unwrap(), "xardec");
     assert_eq!(v["mount"][0].as_str().unwrap(), "content");
+    assert_eq!(v["tags"][0].as_str().unwrap(), "essential");
+}
+
+#[test]
+fn info_lists_profiles_with_enabled_state() {
+    let t = TempDb::new("profilesinfo");
+    t.run_ok(&["ctl", "add", "m1"]);
+    t.run_ok(&["ctl", "enable", "m1"]);
+    t.run_ok(&["ctl", "profile", "create", "Second"]);
+
+    let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    let profiles = v["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2);
+    let by_name: Vec<(&str, bool)> = profiles
+        .iter()
+        .map(|p| (p["name"].as_str().unwrap(), p["enabled"].as_bool().unwrap()))
+        .collect();
+    assert!(by_name.contains(&("default", true)));
+    assert!(by_name.contains(&("Second", false)));
+}
+
+#[test]
+fn dep_add_writes_back_to_mod_toml() {
+    let t = TempDb::new("depwrite");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "m1"]);
+    t.run_ok(&["ctl", "init", "m2"]);
+    t.run_ok(&["ctl", "dep", "add", "m1", "m2", "--optional"]);
+
+    let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    assert_eq!(v["dependencies"][0]["folder"].as_str().unwrap(), "m2");
+    assert!(!v["dependencies"][0]["required"].as_bool().unwrap());
+
+    let content = std::fs::read_to_string(game_root.join("mods/m1/mod.toml")).unwrap();
+    assert!(content.contains("optional"));
+    assert!(content.contains("m2"));
 }
 
 #[test]

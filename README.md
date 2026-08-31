@@ -151,11 +151,13 @@ can be generated per-mod with `gta-mo ctl init <folder>`:
 
 ```toml
 # GTA Mod Organizer manifest
-name = "Nombre visible"          # si falta, se usa el nombre de la carpeta
+id = "xardec:hdcars"              # opcional, ESTABLE (autor:slug)
+name = "Nombre visible"           # si falta, se usa el nombre de la carpeta
 version = "1.2.0"
-author = "Autor"
+author = ["Autor1", "Autor2"]     # string o lista
 url = "https://github.com/..."
 description = "Descripción larga..."
+tags = ["essential", "bugfix"]    # opcional, para organizar/filtrar
 
 cover = "cover.png"                # ruta relativa dentro del mod
 guides = ["guides/instalacion.md"] # lista de archivos de guía
@@ -163,21 +165,33 @@ guides = ["guides/instalacion.md"] # lista de archivos de guía
 # Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
 # Sin esta clave se monta la carpeta entera (comportamiento por defecto).
 mount = ["content"]
+
+# Dependencias (referencias por id autor:slug o por nombre de carpeta)
+[dependencies]
+required = ["xardec:asi-loader"]  # sin esto el mod no funciona
+optional = []
 ```
 
-- All fields are optional. Each `mount` entry is a folder treated as the
-  **game root**: its CONTENTS are laid over the game. With `mount = ["content"]`,
-  `content/d3d9.dll` lands on `<game root>/d3d9.dll` and `content/models/*` on
-  `<game root>/models/*`. This is handy for mods with many loose files (e.g.
-  Essentials_Pack): move them into a `content/` subfolder and list it. With no
-  `mount`, the whole folder is treated as the game root, so legacy mods keep
-  working untouched. Entries are relative paths (no `..`, no absolute paths).
+- All fields are optional. `author` accepts a single string or a list. The
+  `id` is a **stable** `author:slug` identifier (lowercase) that survives
+  folder/display renames and is used by `[dependencies]` (a folder name works
+  as a legacy fallback reference).
+- Each `mount` entry is a folder treated as the **game root**: its CONTENTS
+  are laid over the game. With `mount = ["content"]`, `content/d3d9.dll` lands
+  on `<game root>/d3d9.dll` and `content/models/*` on `<game root>/models/*`.
+  This is handy for mods with many loose files (e.g. Essentials_Pack): move
+  them into a `content/` subfolder and list it. With no `mount`, the whole
+  folder is treated as the game root, so legacy mods keep working untouched.
+  Entries are relative paths (no `..`, no absolute paths).
 - The manifest is the canonical source of metadata: `ctl info`, `ctl list`
   (and their `--json` output) read `mod.toml` directly whenever the mods dir is
   known, so editing the file shows up immediately. The database caches the
-  fields as a fallback for config-less `ctl` use. `ctl rename` writes the new
-  name back into `mod.toml` when one exists. Covers and guides stay as files in
-  the mod folder; rendering them in the GUI is planned for a future GUI rewrite.
+  fields as a fallback for config-less `ctl` use. `discover` (on `launch`)
+  imports `id`, `tags` and `[dependencies]` into the database, replacing the
+  dependency rows of manifest mods. `ctl rename` writes the new name back into
+  `mod.toml`, and `ctl dep add/remove` edits the `[dependencies]` section too.
+  Covers and guides stay as files in the mod folder; rendering them in the GUI
+  is planned for a future GUI rewrite.
 
 ## CLI
 

@@ -31,9 +31,11 @@ struct ModJson {
     enabled: bool,
     order: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    version: Option<String>,
+    mod_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    author: Option<String>,
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    author: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -44,6 +46,8 @@ struct ModJson {
     mount: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     guides: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     deps: Vec<DepJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -134,9 +138,16 @@ fn display_meta(
     db_name: &str,
 ) -> (String, db::ModMetaCache) {
     if let Some(mods_dir) = mods_dir {
-        if let Ok(Some(meta)) = gta_mo_core::meta::read_mod_meta(mods_dir, folder) {
-            let name = meta.name.clone().unwrap_or_else(|| db_name.to_string());
-            return (name, db::meta_cache_from_meta(&meta));
+        match gta_mo_core::meta::read_mod_meta(mods_dir, folder) {
+            Ok(Some(meta)) => {
+                let name = meta.name.clone().unwrap_or_else(|| db_name.to_string());
+                return (name, db::meta_cache_from_meta(&meta));
+            }
+            Ok(None) => {}
+            Err(e) => log::warn(format!(
+                "{}: {e}",
+                mods_dir.join(folder).join("mod.toml").display()
+            )),
         }
     }
     (
@@ -155,11 +166,13 @@ fn mods_dir_from_config() -> Option<std::path::PathBuf> {
 const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # Todos los campos son opcionales. Descomenta y rellena los que quieras.
 
+# id = "autor:slug"            # id estable (autor + nombre, ambos en minusculas)
 # name = "NOMBRE"
 # version = "1.0.0"
-# author = "AUTOR"
+# author = ["AUTOR"]           # string o lista
 # url = "https://..."
 # description = "Descripción del mod."
+# tags = ["tag1", "tag2"]      # para organizar/filtrar
 
 # Carátula y guías (rutas relativas dentro de esta carpeta)
 # cover = "cover.png"
@@ -168,6 +181,11 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
 # Sin esta clave se monta la carpeta entera (comportamiento por defecto).
 # mount = ["content"]
+
+# Dependencias (referencias por id autor:slug o por carpeta)
+# [dependencies]
+# required = ["otro:mod"]      # sin esto el mod no funciona
+# optional = []
 "#;
 
 fn cmd_init(conn: &Connection, folder: &str) -> anyhow::Result<()> {
@@ -371,6 +389,7 @@ fn cmd_list(
                 name,
                 enabled: m.enabled,
                 order: m.load_order,
+                mod_id: meta.mod_id,
                 version: meta.version,
                 author: meta.author,
                 url: meta.url,
@@ -378,6 +397,7 @@ fn cmd_list(
                 cover: meta.cover,
                 mount: meta.mount,
                 guides: meta.guides,
+                tags: meta.tags,
                 deps,
                 dependents,
             });
@@ -424,14 +444,20 @@ fn cmd_list(
             if let Some(v) = &meta.version {
                 meta_parts.push(format!("v{}", v.cyan()));
             }
-            if let Some(a) = &meta.author {
-                meta_parts.push(format!("por {}", a.magenta()));
+            if !meta.author.is_empty() {
+                meta_parts.push(format!("por {}", meta.author.join(", ").magenta()));
             }
             if let Some(d) = &meta.description {
                 meta_parts.push(format!("\"{}\"", d.yellow()));
             }
             if !meta_parts.is_empty() {
                 println!("     {}", meta_parts.join(" "));
+            }
+            if let Some(id) = &meta.mod_id {
+                println!("     {} {}", "id:".cyan(), id.green());
+            }
+            if !meta.tags.is_empty() {
+                println!("     {} {}", "tags:".cyan(), meta.tags.join(", "));
             }
             if !meta.mount.is_empty() {
                 println!("     {} {}", "mount:".cyan(), meta.mount.join(", "));
@@ -727,6 +753,7 @@ fn cmd_info(
     let dependents = db::get_dependents_of(conn, profile.id, id)?;
     let mods_dir = mods_dir_from_config();
     let (name, meta) = display_meta(conn, mods_dir.as_deref(), id, &m.folder_name, &m.name);
+    let profiles = db::mod_enabled_in_profiles(conn, id)?;
 
     if json {
         #[derive(Serialize)]
@@ -736,22 +763,43 @@ fn cmd_info(
             name: String,
             enabled: bool,
             order: i64,
+            mod_id: Option<String>,
             version: Option<String>,
-            author: Option<String>,
+            author: Vec<String>,
             url: Option<String>,
             description: Option<String>,
             cover: Option<String>,
             mount: Vec<String>,
             guides: Vec<String>,
+            tags: Vec<String>,
             dependencies: Vec<DepJson>,
             dependents: Vec<DepJson>,
+            profiles: Vec<ProfileStateJson>,
         }
+
+        #[derive(Serialize)]
+        struct ProfileStateJson {
+            name: String,
+            slug: String,
+            enabled: bool,
+        }
+
+        let profiles_json: Vec<ProfileStateJson> = profiles
+            .iter()
+            .map(|(p, enabled)| ProfileStateJson {
+                name: p.name.clone(),
+                slug: p.slug.clone(),
+                enabled: *enabled,
+            })
+            .collect();
+
         let out = InfoJson {
             id: m.id,
             folder: m.folder_name,
             name,
             enabled,
             order,
+            mod_id: meta.mod_id,
             version: meta.version,
             author: meta.author,
             url: meta.url,
@@ -759,6 +807,7 @@ fn cmd_info(
             cover: meta.cover,
             mount: meta.mount,
             guides: meta.guides,
+            tags: meta.tags,
             dependencies: deps
                 .iter()
                 .map(|(d, req)| DepJson::from_entry(d, *req))
@@ -767,6 +816,7 @@ fn cmd_info(
                 .iter()
                 .map(|d| DepJson::from_entry(d, true))
                 .collect(),
+            profiles: profiles_json,
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -782,11 +832,18 @@ fn cmd_info(
     println!("  {}       {}", "ID:".bold(), m.id);
     println!("  {}  {}", "Carpeta:".bold(), m.folder_name);
     println!("  {}   {}", "Nombre:".bold(), name);
+    if let Some(id) = &meta.mod_id {
+        println!("  {}      {}", "Mod ID:".bold(), id.green());
+    }
     if let Some(v) = &meta.version {
         println!("  {}      {}", "Versión:".bold(), v.cyan());
     }
-    if let Some(a) = &meta.author {
-        println!("  {}    {}", "Autor:".bold(), a.magenta());
+    if !meta.author.is_empty() {
+        println!(
+            "  {}    {}",
+            "Autor:".bold(),
+            meta.author.join(", ").magenta()
+        );
     }
     if let Some(u) = &meta.url {
         println!("  {}       {}", "URL:".bold(), u.blue().underline());
@@ -797,6 +854,9 @@ fn cmd_info(
     if let Some(c) = &meta.cover {
         println!("  {}  {}", "Carátula:".bold(), c);
     }
+    if !meta.tags.is_empty() {
+        println!("  {}     {}", "Tags:".bold(), meta.tags.join(", "));
+    }
     if !meta.mount.is_empty() {
         println!("  {}     {}", "Mount:".bold(), meta.mount.join(", "));
     }
@@ -805,7 +865,20 @@ fn cmd_info(
     }
     println!("  {}   {}", "Estado:".bold(), status);
     println!("  {}    {}", "Orden:".bold(), order);
-    println!("  {}   {}", "Perfil:".bold(), profile.name);
+    println!("  {}", "Perfiles:".bold());
+    for (p, enabled) in &profiles {
+        let mark = if p.is_active {
+            " (activo)".cyan().to_string()
+        } else {
+            String::new()
+        };
+        let state = if *enabled {
+            "SI".green().to_string()
+        } else {
+            "NO".red().to_string()
+        };
+        println!("    {:<16} [{}]{}", p.name, state, mark);
+    }
     println!();
 
     if deps.is_empty() {
@@ -867,6 +940,8 @@ fn cmd_dep_add(
     let dep_folder = d.folder_name.clone();
 
     db::add_dependency(conn, m.id, d.id, !optional)?;
+    dep_writeback(conn, &m, &d, optional, true)?;
+
     if optional {
         log::info(format!(
             "'{mod_folder}' ahora recomienda '{dep_folder}' (opcional)."
@@ -884,8 +959,45 @@ fn cmd_dep_rm(conn: &Connection, mod_ident: &str, dep_ident: &str) -> anyhow::Re
     let dep_folder = d.folder_name.clone();
 
     db::remove_dependency(conn, m.id, d.id)?;
+    dep_writeback(conn, &m, &d, false, false)?;
+
     log::info(format!(
         "Dependencia eliminada: '{mod_folder}' ya no depende de '{dep_folder}'."
     ));
+    Ok(())
+}
+
+/// If the mod has a manifest, mirrors a DB dependency change into its
+/// `[dependencies]` section, referencing the dependency by its stable id when
+/// it has one, otherwise by folder name.
+fn dep_writeback(
+    conn: &Connection,
+    m: &db::ModIdentity,
+    d: &db::ModIdentity,
+    optional: bool,
+    add: bool,
+) -> anyhow::Result<()> {
+    let Ok(cfg) = gta_mo_core::config::load_config() else {
+        return Ok(());
+    };
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+    if !paths
+        .mods_dir
+        .join(&m.folder_name)
+        .join("mod.toml")
+        .exists()
+    {
+        return Ok(());
+    }
+    let dep_ref = db::load_mod_meta(conn, d.id)?
+        .mod_id
+        .unwrap_or_else(|| d.folder_name.clone());
+    gta_mo_core::meta::set_mod_dependency(
+        &paths.mods_dir,
+        &m.folder_name,
+        &dep_ref,
+        optional,
+        add,
+    )?;
     Ok(())
 }

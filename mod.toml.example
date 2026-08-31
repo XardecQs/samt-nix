@@ -1,14 +1,16 @@
 # GTA Mod Organizer manifest
 #
 # Copy this file as `mod.toml` inside a mod folder under `mods/` and fill it in.
-# All fields are optional; `mount` is the only one with functional impact.
-# You can also generate it per-mod with: gta-mo ctl init <folder>
+# All fields are optional; `mount` and `[dependencies]` are the only ones with
+# functional impact. You can also generate it per-mod with: gta-mo ctl init <folder>
 
-# name = "Nombre visible"       # si falta, se usa el nombre de la carpeta
+# id = "autor:slug"        # id estable (autor + nombre, ambos en minusculas)
+# name = "Nombre visible"  # si falta, se usa el nombre de la carpeta
 # version = "1.0.0"
-# author = "Autor"
+# author = ["Autor"]       # string o lista
 # url = "https://github.com/..."
 # description = "Descripción del mod."
+# tags = ["tag1", "tag2"]  # para organizar/filtrar
 
 # Carátula y guías (rutas relativas dentro de esta carpeta)
 # cover = "cover.png"
@@ -20,3 +22,8 @@
 # <raíz>/models/*. Útil para mods con muchos archivos sueltos (mételos en una
 # carpeta content/ y lista esa). Sin esta clave se monta la carpeta entera.
 # mount = ["content"]
+
+# Dependencias: referencias por id (autor:slug) o por nombre de carpeta.
+# [dependencies]
+# required = ["otro:mod"]  # sin esto el mod no funciona
+# optional = []

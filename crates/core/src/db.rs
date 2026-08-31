@@ -23,13 +23,16 @@ pub struct ModIdentity {
 /// Cached mod metadata, populated from `mod.toml` on every `discover`.
 #[derive(Debug, Clone, Default)]
 pub struct ModMetaCache {
+    /// Stable `author:slug` identifier.
+    pub mod_id: Option<String>,
     pub version: Option<String>,
-    pub author: Option<String>,
+    pub author: Vec<String>,
     pub url: Option<String>,
     pub description: Option<String>,
     pub cover: Option<String>,
     pub mount: Vec<String>,
     pub guides: Vec<String>,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +277,24 @@ pub fn profile_mod_count(conn: &Connection, profile_id: i64) -> anyhow::Result<(
     Ok((total, enabled))
 }
 
+/// Every profile and whether `mod_id` is enabled in it (for `ctl info`).
+pub fn mod_enabled_in_profiles(
+    conn: &Connection,
+    mod_id: i64,
+) -> anyhow::Result<Vec<(Profile, bool)>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.name, p.slug, p.is_active, p.created_at,
+                COALESCE(pm.enabled, 0)
+         FROM profiles p
+         LEFT JOIN profile_mods pm ON pm.profile_id = p.id AND pm.mod_id = ?1
+         ORDER BY p.id",
+    )?;
+    let rows = stmt.query_map(params![mod_id], |row| {
+        Ok((row_to_profile(row)?, row.get::<_, i64>(5)? != 0))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 pub fn ensure_db_dir(db_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -289,7 +310,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -304,11 +325,40 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.pragma_update(None, "user_version", 2)?;
     }
 
+    if version < 3 {
+        migrate_to_v3(conn)?;
+        conn.pragma_update(None, "user_version", 3)?;
+    }
+
     debug_assert!(
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0)
             == SCHEMA_VERSION
     );
+    Ok(())
+}
+
+/// Adds the stable `mod_id` (author:slug) and `tags` columns plus a unique
+/// (nullable) index on `mod_id`. Introspection-based and idempotent.
+fn migrate_to_v3(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    for (name, sql) in [
+        ("mod_id", "ALTER TABLE mods ADD COLUMN mod_id TEXT"),
+        ("tags", "ALTER TABLE mods ADD COLUMN tags TEXT"),
+    ] {
+        if !cols.iter().any(|c| c.as_str() == name) {
+            log::info(format!("Migrando schema: {sql}"));
+            conn.execute(sql, [])?;
+        }
+    }
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mods_mod_id ON mods(mod_id)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -768,15 +818,38 @@ fn json_list(v: &Option<Vec<String>>) -> Option<String> {
         .map(|l| serde_json::to_string(l).unwrap_or_default())
 }
 
+fn json_vec(v: &[String]) -> Option<String> {
+    if v.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(v).unwrap_or_default())
+    }
+}
+
 fn parse_json_list(raw: Option<String>) -> Vec<String> {
     raw.and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// Parses the cached author column, which may be a JSON list (new format) or a
+/// legacy plain string.
+fn parse_authors(raw: Option<String>) -> Vec<String> {
+    let Some(s) = raw else {
+        return vec![];
+    };
+    if s.trim().is_empty() {
+        return vec![];
+    }
+    serde_json::from_str::<Vec<String>>(&s)
+        .or_else(|_| serde_json::from_str::<String>(&s).map(|one| vec![one]))
+        .unwrap_or_else(|_| vec![s])
 }
 
 /// Builds a cache entry straight from a `mod.toml` manifest (file wins over the
 /// database cache when displaying a mod).
 pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
     ModMetaCache {
+        mod_id: meta.id.clone(),
         version: meta.version.clone(),
         author: meta.author.clone(),
         url: meta.url.clone(),
@@ -784,23 +857,27 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
         cover: meta.cover.clone(),
         mount: meta.mount.clone().unwrap_or_default(),
         guides: meta.guides.clone().unwrap_or_default(),
+        tags: meta.tags.clone().unwrap_or_default(),
     }
 }
 
 /// Loads the cached metadata for a mod (empty default if none was discovered).
 pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache> {
     let mut stmt = conn.prepare(
-        "SELECT version, author, url, description, cover, mount, guides FROM mods WHERE id = ?1",
+        "SELECT mod_id, version, author, url, description, cover, mount, guides, tags
+         FROM mods WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
         Ok(ModMetaCache {
-            version: row.get(0)?,
-            author: row.get(1)?,
-            url: row.get(2)?,
-            description: row.get(3)?,
-            cover: row.get(4)?,
-            mount: parse_json_list(row.get(5)?),
-            guides: parse_json_list(row.get(6)?),
+            mod_id: row.get(0)?,
+            version: row.get(1)?,
+            author: parse_authors(row.get(2)?),
+            url: row.get(3)?,
+            description: row.get(4)?,
+            cover: row.get(5)?,
+            mount: parse_json_list(row.get(6)?),
+            guides: parse_json_list(row.get(7)?),
+            tags: parse_json_list(row.get(8)?),
         })
     })?;
     Ok(rows.next().transpose()?.unwrap_or_default())
@@ -813,16 +890,18 @@ pub fn update_mod_meta(
     meta: &Option<crate::meta::ModMeta>,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "UPDATE mods SET version = ?1, author = ?2, url = ?3, description = ?4,
-         cover = ?5, mount = ?6, guides = ?7 WHERE id = ?8",
+        "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
+         cover = ?6, mount = ?7, guides = ?8, tags = ?9 WHERE id = ?10",
         params![
+            meta.as_ref().and_then(|m| m.id.clone()),
             meta.as_ref().and_then(|m| m.version.clone()),
-            meta.as_ref().and_then(|m| m.author.clone()),
+            meta.as_ref().and_then(|m| json_vec(&m.author)),
             meta.as_ref().and_then(|m| m.url.clone()),
             meta.as_ref().and_then(|m| m.description.clone()),
             meta.as_ref().and_then(|m| m.cover.clone()),
             json_list(&meta.as_ref().and_then(|m| m.mount.clone())),
             json_list(&meta.as_ref().and_then(|m| m.guides.clone())),
+            json_list(&meta.as_ref().and_then(|m| m.tags.clone())),
             id,
         ],
     )?;
@@ -952,6 +1031,119 @@ pub fn count_deps_for_mod(conn: &Connection, mod_id: i64) -> anyhow::Result<i64>
     Ok(count)
 }
 
+/// Resolves a dependency reference from a manifest: first by stable `mod_id`
+/// (`author:slug`), then by folder name (legacy). `None` if not found.
+fn resolve_dep_ref(conn: &Connection, reference: &str) -> Option<i64> {
+    if crate::meta::valid_mod_id(reference) {
+        conn.query_row(
+            "SELECT id FROM mods WHERE mod_id = ?1",
+            params![reference],
+            |row| row.get(0),
+        )
+        .ok()
+    } else {
+        get_mod_by_folder(conn, reference)
+            .ok()
+            .flatten()
+            .map(|m| m.id)
+    }
+}
+
+/// Replaces a manifest mod's dependency rows in `mod_dependencies` with the
+/// `[dependencies]` section of its `mod.toml`. Mods without a manifest keep
+/// their manually managed DB dependencies untouched.
+fn sync_mod_dependencies(
+    conn: &Connection,
+    mod_id: i64,
+    meta: &Option<crate::meta::ModMeta>,
+) -> anyhow::Result<()> {
+    let Some(meta) = meta else {
+        return Ok(());
+    };
+    let Some(deps) = &meta.dependencies else {
+        return Ok(());
+    };
+
+    let mut required: Vec<i64> = Vec::new();
+    let mut optional: Vec<i64> = Vec::new();
+    for (reference, is_optional) in deps
+        .required
+        .iter()
+        .map(|r| (r, false))
+        .chain(deps.optional.iter().map(|r| (r, true)))
+    {
+        match resolve_dep_ref(conn, reference) {
+            Some(dep_id) if dep_id != mod_id => {
+                if is_optional {
+                    optional.push(dep_id);
+                } else {
+                    required.push(dep_id);
+                }
+            }
+            Some(_) => log::warn(format!(
+                "    [!] Dependencia cíclica ignorada: un mod no puede depender de sí mismo ('{reference}')"
+            )),
+            None => log::warn(format!(
+                "    [!] Dependencia no resuelta: '{reference}' (mod no instalado o referencia inválida)"
+            )),
+        }
+    }
+
+    conn.execute(
+        "DELETE FROM mod_dependencies WHERE mod_id = ?1",
+        params![mod_id],
+    )?;
+    for dep_id in required {
+        conn.execute(
+            "INSERT OR IGNORE INTO mod_dependencies (mod_id, dependency_id, required)
+             VALUES (?1, ?2, 1)",
+            params![mod_id, dep_id],
+        )?;
+    }
+    for dep_id in optional {
+        conn.execute(
+            "INSERT OR IGNORE INTO mod_dependencies (mod_id, dependency_id, required)
+             VALUES (?1, ?2, 0)",
+            params![mod_id, dep_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Validates the stable id (format + uniqueness) for a mod, returning a copy
+/// of the manifest with an invalid or duplicated id cleared.
+fn validate_meta_id(
+    conn: &Connection,
+    mod_id: i64,
+    folder: &str,
+    meta: &Option<crate::meta::ModMeta>,
+) -> Option<crate::meta::ModMeta> {
+    let mut meta = meta.clone();
+    if let Some(id) = meta.as_ref().and_then(|m| m.id.clone()) {
+        if !crate::meta::valid_mod_id(&id) {
+            log::warn(format!(
+                "    [!] {folder}: id '{id}' inválido (formato autor:slug); se ignora"
+            ));
+            meta.as_mut().unwrap().id = None;
+        } else {
+            let taken: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM mods WHERE mod_id = ?1 AND id != ?2",
+                    params![id, mod_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if taken > 0 {
+                log::warn(format!(
+                    "    [!] {folder}: id '{id}' ya lo usa otro mod; se ignora"
+                ));
+                meta.as_mut().unwrap().id = None;
+            }
+        }
+    }
+    meta
+}
+
 pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usize, usize)> {
     if !mods_dir.exists() {
         std::fs::create_dir_all(mods_dir)?;
@@ -985,6 +1177,9 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
         .map(|m| (m.folder_name.as_str(), m))
         .collect();
 
+    let mut metas: Vec<Option<crate::meta::ModMeta>> = Vec::with_capacity(disk_folders.len());
+
+    // Phase 1: register mods and store their metadata (id, tags, mount...).
     for folder in &disk_folders {
         let meta = match crate::meta::read_mod_meta(mods_dir, folder) {
             Ok(meta) => meta,
@@ -1020,9 +1215,6 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
                 Ok(_id) => {
                     log::info(format!("    [+] Nuevo: {folder} -> '{display_name}'"));
                     new_count += 1;
-                    if let Some(m) = get_mod_by_folder(conn, folder)? {
-                        update_mod_meta(conn, m.id, &meta)?;
-                    }
                 }
                 Err(e) => {
                     log::warn(format!("    [!] Error al insertar: {folder}: {e}"));
@@ -1032,7 +1224,22 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
             if let Some(name) = meta.as_ref().and_then(|m| m.name.clone()) {
                 set_mod_name(conn, m.id, &name)?;
             }
-            update_mod_meta(conn, m.id, &meta)?;
+        }
+
+        if let Some(m) = get_mod_by_folder(conn, folder)? {
+            let validated = validate_meta_id(conn, m.id, folder, &meta);
+            update_mod_meta(conn, m.id, &validated)?;
+            metas.push(Some(validated.unwrap_or_default()));
+        } else {
+            metas.push(meta);
+        }
+    }
+
+    // Phase 2: sync `[dependencies]` once every mod is registered, so a
+    // reference to a mod discovered later in the same pass still resolves.
+    for (folder, meta) in disk_folders.iter().zip(metas.iter()) {
+        if let Some(m) = get_mod_by_folder(conn, folder)? {
+            sync_mod_dependencies(conn, m.id, meta)?;
         }
     }
 
@@ -1255,6 +1462,8 @@ mod tests {
             "cover",
             "mount",
             "guides",
+            "mod_id",
+            "tags",
         ] {
             assert!(cols.contains(&c.to_string()), "falta columna {c}");
         }
@@ -1272,7 +1481,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("MyMod/models")).unwrap();
         std::fs::write(
             dir.join("MyMod/mod.toml"),
-            "name = \"My Mod\"\nversion = \"2.0\"\nauthor = \"Author\"\nmount = [\"models\"]\n",
+            "id = \"xardec:my-mod\"\nname = \"My Mod\"\nversion = \"2.0\"\nauthor = [\"Author\", \"Co\"]\nmount = [\"models\"]\ntags = [\"essential\"]\n",
         )
         .unwrap();
 
@@ -1282,9 +1491,11 @@ mod tests {
         let m = get_mod_by_folder(&conn, "MyMod").unwrap().unwrap();
         assert_eq!(m.name, "My Mod");
         let meta = load_mod_meta(&conn, m.id).unwrap();
+        assert_eq!(meta.mod_id.as_deref(), Some("xardec:my-mod"));
         assert_eq!(meta.version.as_deref(), Some("2.0"));
-        assert_eq!(meta.author.as_deref(), Some("Author"));
+        assert_eq!(meta.author, vec!["Author", "Co"]);
         assert_eq!(meta.mount, vec!["models".to_string()]);
+        assert_eq!(meta.tags, vec!["essential".to_string()]);
 
         // re-discover refreshes metadata and the name from the manifest
         let _ = std::fs::remove_dir_all(&dir);
@@ -1297,11 +1508,69 @@ mod tests {
         discover_mods(&conn, &dir).unwrap();
         let meta = load_mod_meta(&conn, m.id).unwrap();
         assert_eq!(meta.version.as_deref(), Some("2.1"));
+        assert!(meta.mod_id.is_none(), "id borrado del manifest se limpia");
         assert_eq!(
             get_mod_by_folder(&conn, "MyMod").unwrap().unwrap().name,
             "Renamed Mod"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_syncs_manifest_dependencies() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("gta-mo-deps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ModA")).unwrap();
+        std::fs::create_dir_all(dir.join("ModB")).unwrap();
+        std::fs::write(
+            dir.join("ModA/mod.toml"),
+            "id = \"x:mod-a\"\n[dependencies]\nrequired = [\"x:mod-b\"]\noptional = [\"x:mod-b\", \"no-existe\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("ModB/mod.toml"), "id = \"x:mod-b\"\n").unwrap();
+
+        discover_mods(&conn, &dir).unwrap();
+
+        let a = get_mod_by_folder(&conn, "ModA").unwrap().unwrap();
+        let b = get_mod_by_folder(&conn, "ModB").unwrap().unwrap();
+        let deps = load_dependencies(&conn).unwrap();
+        let refs = deps.get(&a.id).unwrap();
+        // required once (optional duplicate ignored), optional dropped
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].id, b.id);
+        assert!(refs[0].required);
+
+        // removing [dependencies] from the manifest leaves DB deps alone
+        std::fs::write(dir.join("ModA/mod.toml"), "id = \"x:mod-a\"\n").unwrap();
+        discover_mods(&conn, &dir).unwrap();
+        let deps = load_dependencies(&conn).unwrap();
+        assert!(
+            deps.contains_key(&a.id),
+            "sin [dependencies] no se tocan las deps"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mod_enabled_in_profiles_lists_all_profiles() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
+        create_profile(&conn, "Second").unwrap();
+
+        let default = active_profile(&conn).unwrap();
+        set_mod_enabled(&conn, default.id, 1, true).unwrap();
+
+        let states = mod_enabled_in_profiles(&conn, 1).unwrap();
+        assert_eq!(states.len(), 2);
+        let by_name: Vec<(&str, bool)> =
+            states.iter().map(|(p, e)| (p.name.as_str(), *e)).collect();
+        assert!(by_name.contains(&("default", true)));
+        assert!(by_name.contains(&("Second", false)));
     }
 }

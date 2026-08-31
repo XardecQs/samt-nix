@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::path::{Path, PathBuf};
 
 /// Metadata manifest (`mod.toml`) read from inside each mod folder.
@@ -7,16 +7,69 @@ use std::path::{Path, PathBuf};
 /// database caches the key fields on every `discover`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModMeta {
+    /// Stable `author:slug` identifier (optional).
+    pub id: Option<String>,
     pub name: Option<String>,
     pub version: Option<String>,
-    pub author: Option<String>,
+    /// Accepts a single string or a list: `author = "x"` / `author = ["x", "y"]`.
+    #[serde(default, deserialize_with = "de_author_list")]
+    pub author: Vec<String>,
     pub url: Option<String>,
     pub description: Option<String>,
     pub cover: Option<String>,
     pub guides: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
     /// Subdirectories (relative to the mod folder) to overlay onto the game
     /// root. Absent or empty means "mount the whole folder" (legacy behavior).
     pub mount: Option<Vec<String>>,
+    #[serde(default)]
+    pub dependencies: Option<ModDeps>,
+}
+
+/// `[dependencies]` section of a manifest. Entries reference a mod by its
+/// `id` (`author:slug`) or, as a fallback, by its folder name.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ModDeps {
+    #[serde(default)]
+    pub required: Vec<String>,
+    #[serde(default)]
+    pub optional: Vec<String>,
+}
+
+fn de_author_list<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(d)? {
+        None => vec![],
+        Some(OneOrMany::One(s)) => vec![s],
+        Some(OneOrMany::Many(v)) => v,
+    })
+}
+
+/// A stable mod id must be `author:slug`, both parts lowercase
+/// `[a-z0-9_-]` (non-empty).
+pub fn valid_mod_id(id: &str) -> bool {
+    let Some((author, slug)) = id.split_once(':') else {
+        return false;
+    };
+    let ok_part = |p: &str| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    };
+    ok_part(author) && ok_part(slug)
+}
+
+/// A tag is a lowercase `[a-z0-9_-]` word.
+pub fn valid_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
 /// Reads `mod.toml` from `mods_dir/<folder>`. Returns `None` when there is no
@@ -74,6 +127,48 @@ pub fn set_meta_name(mods_dir: &Path, folder: &str, name: &str) -> anyhow::Resul
     Ok(())
 }
 
+/// Adds/removes `dep_ref` from the `[dependencies]` section of a `mod.toml`
+/// (creating the table/array if needed, keeping comments and other fields).
+/// No-op when the mod has no manifest.
+pub fn set_mod_dependency(
+    mods_dir: &Path,
+    folder: &str,
+    dep_ref: &str,
+    optional: bool,
+    add: bool,
+) -> anyhow::Result<()> {
+    let path = mods_dir.join(folder).join("mod.toml");
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut doc: toml_edit::DocumentMut = content.parse()?;
+    if !doc.contains_key("dependencies") {
+        doc.insert(
+            "dependencies",
+            toml_edit::Item::Table(toml_edit::Table::new()),
+        );
+    }
+    let deps = doc["dependencies"].as_table_mut().unwrap();
+    let key = if optional { "optional" } else { "required" };
+    if !deps.contains_key(key) {
+        deps.insert(
+            key,
+            toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
+        );
+    }
+    let arr = deps[key].as_array_mut().unwrap();
+    if add {
+        if !arr.iter().any(|v| v.as_str() == Some(dep_ref)) {
+            arr.push(dep_ref.to_string());
+        }
+    } else {
+        arr.retain(|v| v.as_str() != Some(dep_ref));
+    }
+    std::fs::write(&path, doc.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,23 +188,107 @@ mod tests {
         fs::write(
             dir.join("MyMod/mod.toml"),
             r#"
+id = "xardec:my-mod"
 name = "My Mod"
 version = "1.2.0"
-author = "Author"
+author = ["Author", "Coauthor"]
 url = "https://example.org"
 description = "Desc."
 cover = "cover.png"
 guides = ["guide.md"]
+tags = ["essential", "bugfix"]
 mount = ["models"]
+
+[dependencies]
+required = ["xardec:asi-loader"]
+optional = ["xardec:extra"]
 "#,
         )
         .unwrap();
 
         let meta = read_mod_meta(&dir, "MyMod").unwrap().unwrap();
+        assert_eq!(meta.id.as_deref(), Some("xardec:my-mod"));
         assert_eq!(meta.name.as_deref(), Some("My Mod"));
         assert_eq!(meta.version.as_deref(), Some("1.2.0"));
-        assert_eq!(meta.author.as_deref(), Some("Author"));
+        assert_eq!(meta.author, vec!["Author", "Coauthor"]);
+        assert_eq!(
+            meta.tags.as_deref(),
+            Some(&["essential".to_string(), "bugfix".to_string()][..])
+        );
         assert_eq!(meta.mount.as_deref(), Some(&["models".to_string()][..]));
+        let deps = meta.dependencies.unwrap();
+        assert_eq!(deps.required, vec!["xardec:asi-loader"]);
+        assert_eq!(deps.optional, vec!["xardec:extra"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn author_accepts_string_or_list() {
+        let dir = tmp_mods_dir("author");
+        fs::create_dir_all(dir.join("A")).unwrap();
+        fs::create_dir_all(dir.join("B")).unwrap();
+        fs::write(dir.join("A/mod.toml"), "author = \"solo\"\n").unwrap();
+        fs::write(dir.join("B/mod.toml"), "author = [\"a\", \"b\"]\n").unwrap();
+        assert_eq!(
+            read_mod_meta(&dir, "A").unwrap().unwrap().author,
+            vec!["solo"]
+        );
+        assert_eq!(
+            read_mod_meta(&dir, "B").unwrap().unwrap().author,
+            vec!["a", "b"]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mod_id_and_tag_validation() {
+        assert!(valid_mod_id("xardec:hdcars"));
+        assert!(valid_mod_id("doitsujin:dxvk-d3d9"));
+        assert!(!valid_mod_id("hdcars"));
+        assert!(!valid_mod_id(":hdcars"));
+        assert!(!valid_mod_id("xardec:"));
+        assert!(!valid_mod_id("Xardec:hdcars"));
+        assert!(!valid_mod_id("xardec:hdcars/hmm"));
+
+        assert!(valid_tag("essential"));
+        assert!(valid_tag("bug-fix"));
+        assert!(!valid_tag(""));
+        assert!(!valid_tag("Essential"));
+        assert!(!valid_tag("a b"));
+    }
+
+    #[test]
+    fn set_mod_dependency_edits_the_table() {
+        let dir = tmp_mods_dir("dep");
+        fs::create_dir_all(dir.join("M")).unwrap();
+        fs::write(
+            dir.join("M/mod.toml"),
+            "# comment\nname = \"M\"\n[dependencies]\nrequired = [\"a:mod\"]\n",
+        )
+        .unwrap();
+
+        set_mod_dependency(&dir, "M", "b:mod", false, true).unwrap();
+        set_mod_dependency(&dir, "M", "c:opt", true, true).unwrap();
+        set_mod_dependency(&dir, "M", "a:mod", false, false).unwrap();
+
+        let content = fs::read_to_string(dir.join("M/mod.toml")).unwrap();
+        assert!(content.contains("# comment"));
+        let deps = read_mod_meta(&dir, "M")
+            .unwrap()
+            .unwrap()
+            .dependencies
+            .unwrap();
+        assert_eq!(deps.required, vec!["b:mod"]);
+        assert_eq!(deps.optional, vec!["c:opt"]);
+
+        // adding twice does not duplicate
+        set_mod_dependency(&dir, "M", "b:mod", false, true).unwrap();
+        let deps = read_mod_meta(&dir, "M")
+            .unwrap()
+            .unwrap()
+            .dependencies
+            .unwrap();
+        assert_eq!(deps.required, vec!["b:mod"]);
         let _ = fs::remove_dir_all(&dir);
     }
 
