@@ -163,6 +163,37 @@ fn mods_dir_from_config() -> Option<std::path::PathBuf> {
         .map(|cfg| gta_mo_core::config::RuntimePaths::from_config(&cfg).mods_dir)
 }
 
+/// Expands `guides` entries that point to a directory into their files, so a
+/// manifest can use `guides = ["guides"]` to include a whole folder.
+fn expand_guides(mods_dir: &std::path::Path, folder: &str, guides: Vec<String>) -> Vec<String> {
+    let mod_dir = mods_dir.join(folder);
+    let mut out = Vec::new();
+    for g in guides {
+        let p = mod_dir.join(&g);
+        if p.is_dir() {
+            let mut files: Vec<String> = std::fs::read_dir(&p)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    format!("{}/{}", g.trim_end_matches('/'), name)
+                })
+                .collect();
+            files.sort();
+            if files.is_empty() {
+                out.push(g);
+            } else {
+                out.extend(files);
+            }
+        } else {
+            out.push(g);
+        }
+    }
+    out
+}
+
 const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # Todos los campos son opcionales. Descomenta y rellena los que quieras.
 
@@ -186,6 +217,14 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # [dependencies]
 # required = ["otro:mod"]      # sin esto el mod no funciona
 # optional = []
+
+# Si es un pack de mods, lista sus componentes (solo metadata)
+# [[components]]
+# name = "Componente"
+# version = "1.0.0"
+# author = "Autor"
+# url = "https://..."
+# path = "content/carpeta-del-componente"
 "#;
 
 fn cmd_init(conn: &Connection, folder: &str) -> anyhow::Result<()> {
@@ -753,6 +792,10 @@ fn cmd_info(
     let dependents = db::get_dependents_of(conn, profile.id, id)?;
     let mods_dir = mods_dir_from_config();
     let (name, meta) = display_meta(conn, mods_dir.as_deref(), id, &m.folder_name, &m.name);
+    let guides = match mods_dir.as_deref() {
+        Some(dir) => expand_guides(dir, &m.folder_name, meta.guides.clone()),
+        None => meta.guides.clone(),
+    };
     let profiles = db::mod_enabled_in_profiles(conn, id)?;
 
     if json {
@@ -772,9 +815,25 @@ fn cmd_info(
             mount: Vec<String>,
             guides: Vec<String>,
             tags: Vec<String>,
+            pack: bool,
+            components: Vec<ComponentJson>,
             dependencies: Vec<DepJson>,
             dependents: Vec<DepJson>,
             profiles: Vec<ProfileStateJson>,
+        }
+
+        #[derive(Serialize)]
+        struct ComponentJson {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            version: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            author: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            url: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            path: Option<String>,
         }
 
         #[derive(Serialize)]
@@ -783,6 +842,19 @@ fn cmd_info(
             slug: String,
             enabled: bool,
         }
+
+        let pack = meta.is_pack();
+        let components_json: Vec<ComponentJson> = meta
+            .components
+            .iter()
+            .map(|c| ComponentJson {
+                name: c.name.clone(),
+                version: c.version.clone(),
+                author: c.author.clone(),
+                url: c.url.clone(),
+                path: c.path.clone(),
+            })
+            .collect();
 
         let profiles_json: Vec<ProfileStateJson> = profiles
             .iter()
@@ -806,8 +878,10 @@ fn cmd_info(
             description: meta.description,
             cover: meta.cover,
             mount: meta.mount,
-            guides: meta.guides,
+            guides,
             tags: meta.tags,
+            pack,
+            components: components_json,
             dependencies: deps
                 .iter()
                 .map(|(d, req)| DepJson::from_entry(d, *req))
@@ -860,8 +934,40 @@ fn cmd_info(
     if !meta.mount.is_empty() {
         println!("  {}     {}", "Mount:".bold(), meta.mount.join(", "));
     }
-    if !meta.guides.is_empty() {
-        println!("  {}     {}", "Guías:".bold(), meta.guides.join(", "));
+    if !guides.is_empty() {
+        println!("  {}     {}", "Guías:".bold(), guides.join(", "));
+    }
+    let kind = if meta.is_pack() {
+        format!("pack ({} componentes)", meta.components.len())
+    } else {
+        "mod".to_string()
+    };
+    println!("  {}   {}", "Tipo:".bold(), kind.magenta());
+    if !meta.components.is_empty() {
+        println!("  {}", "Componentes:".bold());
+        for c in &meta.components {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(v) = &c.version {
+                parts.push(format!("v{}", v.cyan()));
+            }
+            if let Some(a) = &c.author {
+                parts.push(format!("por {}", a.yellow()));
+            }
+            if let Some(u) = &c.url {
+                parts.push(u.blue().underline().to_string());
+            }
+            let mut line = format!(
+                "    - {}",
+                c.name.as_deref().unwrap_or("(sin nombre)").bold()
+            );
+            if let Some(p) = &c.path {
+                line.push_str(&format!(" [{}]", p.dimmed()));
+            }
+            if !parts.is_empty() {
+                line.push_str(&format!(" — {}", parts.join(" ")));
+            }
+            println!("{line}");
+        }
     }
     println!("  {}   {}", "Estado:".bold(), status);
     println!("  {}    {}", "Orden:".bold(), order);

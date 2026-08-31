@@ -170,12 +170,24 @@ mount = ["content"]
 [dependencies]
 required = ["xardec:asi-loader"]  # sin esto el mod no funciona
 optional = []
+
+# Si es un pack de mods, lista sus componentes (solo metadata)
+[[components]]
+name = "SilentPatch"
+version = "1.0.1"
+author = "Silent"
+url = "http://mixmods.com.br/2015/03/SilentPatch.html"
+path = "content/modloader/_ESSENTIALS/SilentPatch"
 ```
 
 - All fields are optional. `author` accepts a single string or a list. The
   `id` is a **stable** `author:slug` identifier (lowercase) that survives
   folder/display renames and is used by `[dependencies]` (a folder name works
   as a legacy fallback reference).
+- A manifest with `[[components]]` is treated as a **pack**: `ctl info` shows
+  the component list and flags it (`pack: true` in `--json`). `guides` entries
+  may point to a directory (`guides = ["guides"]`) — `ctl info` expands it to
+  its files.
 - Each `mount` entry is a folder treated as the **game root**: its CONTENTS
   are laid over the game. With `mount = ["content"]`, `content/d3d9.dll` lands
   on `<game root>/d3d9.dll` and `content/models/*` on `<game root>/models/*`.
@@ -183,6 +195,17 @@ optional = []
   them into a `content/` subfolder and list it. With no `mount`, the whole
   folder is treated as the game root, so legacy mods keep working untouched.
   Entries are relative paths (no `..`, no absolute paths).
+
+**Recommended pack layout** (keeps the game dir clean):
+
+```
+Essentials_Pack/
+├── mod.toml        # mount = ["content"], guides = ["guides"], cover, [[components]]
+├── cover.png
+├── content/        # only this is mounted onto the game
+└── guides/         # readmes, changelogs, licenses
+```
+
 - The manifest is the canonical source of metadata: `ctl info`, `ctl list`
   (and their `--json` output) read `mod.toml` directly whenever the mods dir is
   known, so editing the file shows up immediately. The database caches the

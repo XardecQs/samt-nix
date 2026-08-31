@@ -278,6 +278,29 @@ fn dep_add_writes_back_to_mod_toml() {
 }
 
 #[test]
+fn info_shows_pack_components_and_expands_guides() {
+    let t = TempDb::new("packinfo");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "pack"]);
+    std::fs::create_dir_all(game_root.join("mods/pack/guides")).unwrap();
+    std::fs::write(game_root.join("mods/pack/guides/readme.txt"), "hi").unwrap();
+    std::fs::write(
+        game_root.join("mods/pack/mod.toml"),
+        "name = \"Pack\"\nguides = [\"guides\"]\n[[components]]\nname = \"SilentPatch\"\nversion = \"1.0.1\"\n",
+    )
+    .unwrap();
+
+    let v = json(&t.run_ok(&["ctl", "info", "pack", "--json"]));
+    assert!(v["pack"].as_bool().unwrap(), "pack con componentes");
+    assert_eq!(v["components"][0]["name"].as_str().unwrap(), "SilentPatch");
+    assert_eq!(v["components"][0]["version"].as_str().unwrap(), "1.0.1");
+    assert_eq!(v["guides"][0].as_str().unwrap(), "guides/readme.txt");
+}
+
+#[test]
 fn rename_writes_back_to_mod_toml() {
     let t = TempDb::new("rename");
     let game_root = t.dir.join("game");

@@ -33,6 +33,15 @@ pub struct ModMetaCache {
     pub mount: Vec<String>,
     pub guides: Vec<String>,
     pub tags: Vec<String>,
+    /// Bundled components of a composite pack.
+    pub components: Vec<crate::meta::MetaComponent>,
+}
+
+impl ModMetaCache {
+    /// True when the mod is a composite pack (has bundled components).
+    pub fn is_pack(&self) -> bool {
+        !self.components.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -310,7 +319,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -330,11 +339,30 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.pragma_update(None, "user_version", 3)?;
     }
 
+    if version < 4 {
+        migrate_to_v4(conn)?;
+        conn.pragma_update(None, "user_version", 4)?;
+    }
+
     debug_assert!(
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0)
             == SCHEMA_VERSION
     );
+    Ok(())
+}
+
+/// Adds the `components` cache column (JSON list of bundled components).
+/// Introspection-based and idempotent.
+fn migrate_to_v4(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if !cols.iter().any(|c| c.as_str() == "components") {
+        log::info("Migrando schema: ALTER TABLE mods ADD COLUMN components TEXT");
+        conn.execute("ALTER TABLE mods ADD COLUMN components TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -831,6 +859,19 @@ fn parse_json_list(raw: Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn parse_components(raw: Option<String>) -> Vec<crate::meta::MetaComponent> {
+    raw.and_then(|s| serde_json::from_str::<Vec<crate::meta::MetaComponent>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn json_components(v: &[crate::meta::MetaComponent]) -> Option<String> {
+    if v.is_empty() {
+        None
+    } else {
+        serde_json::to_string(v).ok()
+    }
+}
+
 /// Parses the cached author column, which may be a JSON list (new format) or a
 /// legacy plain string.
 fn parse_authors(raw: Option<String>) -> Vec<String> {
@@ -858,13 +899,14 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
         mount: meta.mount.clone().unwrap_or_default(),
         guides: meta.guides.clone().unwrap_or_default(),
         tags: meta.tags.clone().unwrap_or_default(),
+        components: meta.components.clone().unwrap_or_default(),
     }
 }
 
 /// Loads the cached metadata for a mod (empty default if none was discovered).
 pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache> {
     let mut stmt = conn.prepare(
-        "SELECT mod_id, version, author, url, description, cover, mount, guides, tags
+        "SELECT mod_id, version, author, url, description, cover, mount, guides, tags, components
          FROM mods WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
@@ -878,6 +920,7 @@ pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache>
             mount: parse_json_list(row.get(6)?),
             guides: parse_json_list(row.get(7)?),
             tags: parse_json_list(row.get(8)?),
+            components: parse_components(row.get(9)?),
         })
     })?;
     Ok(rows.next().transpose()?.unwrap_or_default())
@@ -891,7 +934,7 @@ pub fn update_mod_meta(
 ) -> anyhow::Result<()> {
     conn.execute(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
-         cover = ?6, mount = ?7, guides = ?8, tags = ?9 WHERE id = ?10",
+         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10 WHERE id = ?11",
         params![
             meta.as_ref().and_then(|m| m.id.clone()),
             meta.as_ref().and_then(|m| m.version.clone()),
@@ -902,6 +945,8 @@ pub fn update_mod_meta(
             json_list(&meta.as_ref().and_then(|m| m.mount.clone())),
             json_list(&meta.as_ref().and_then(|m| m.guides.clone())),
             json_list(&meta.as_ref().and_then(|m| m.tags.clone())),
+            meta.as_ref()
+                .and_then(|m| json_components(m.components.as_deref().unwrap_or(&[]))),
             id,
         ],
     )?;
@@ -1203,6 +1248,24 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
                     }
                 }
             }
+            if let Some(components) = &m.components {
+                for c in components {
+                    if c.name.as_deref().unwrap_or("").trim().is_empty() {
+                        log::warn(format!(
+                            "    [!] {folder}: componente sin nombre; se ignora"
+                        ));
+                    }
+                    if let Some(p) = &c.path {
+                        if !crate::meta::valid_mount_entry(p) {
+                            log::warn(format!(
+                                "    [!] {folder}: componente '{}' con path inválido '{}'",
+                                c.name.as_deref().unwrap_or("?"),
+                                p
+                            ));
+                        }
+                    }
+                }
+            }
         }
 
         if !db_folders_set.contains(folder) {
@@ -1464,6 +1527,7 @@ mod tests {
             "guides",
             "mod_id",
             "tags",
+            "components",
         ] {
             assert!(cols.contains(&c.to_string()), "falta columna {c}");
         }
@@ -1553,6 +1617,30 @@ mod tests {
             "sin [dependencies] no se tocan las deps"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_stores_components_cache() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("gta-mo-comps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Pack")).unwrap();
+        std::fs::write(
+            dir.join("Pack/mod.toml"),
+            "name = \"Pack\"\n[[components]]\nname = \"A\"\nversion = \"1.0\"\nurl = \"http://a\"\n",
+        )
+        .unwrap();
+
+        discover_mods(&conn, &dir).unwrap();
+        let m = get_mod_by_folder(&conn, "Pack").unwrap().unwrap();
+        let meta = load_mod_meta(&conn, m.id).unwrap();
+        assert!(meta.is_pack());
+        assert_eq!(meta.components.len(), 1);
+        assert_eq!(meta.components[0].name.as_deref(), Some("A"));
+        assert_eq!(meta.components[0].url.as_deref(), Some("http://a"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Metadata manifest (`mod.toml`) read from inside each mod folder.
@@ -24,6 +24,30 @@ pub struct ModMeta {
     pub mount: Option<Vec<String>>,
     #[serde(default)]
     pub dependencies: Option<ModDeps>,
+    /// Bundled sub-mods of a composite pack (metadata only).
+    #[serde(default)]
+    pub components: Option<Vec<MetaComponent>>,
+}
+
+/// One bundled component of a composite pack.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MetaComponent {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub author: Option<String>,
+    pub url: Option<String>,
+    /// Optional relative path to the component inside the mod folder.
+    pub path: Option<String>,
+}
+
+impl ModMeta {
+    /// A manifest with `[[components]]` is a composite pack.
+    pub fn is_pack(&self) -> bool {
+        self.components
+            .as_ref()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false)
+    }
 }
 
 /// `[dependencies]` section of a manifest. Entries reference a mod by its
@@ -255,6 +279,33 @@ optional = ["xardec:extra"]
         assert!(!valid_tag(""));
         assert!(!valid_tag("Essential"));
         assert!(!valid_tag("a b"));
+    }
+
+    #[test]
+    fn parses_components_and_flags_pack() {
+        let dir = tmp_mods_dir("comp");
+        fs::create_dir_all(dir.join("P")).unwrap();
+        fs::create_dir_all(dir.join("S")).unwrap();
+        fs::write(
+            dir.join("P/mod.toml"),
+            "id = \"mix:pack\"\n[[components]]\nname = \"SilentPatch\"\nversion = \"1.0.1\"\nauthor = \"Silent\"\nurl = \"http://x/\"\npath = \"content/silentpatch\"\n",
+        )
+        .unwrap();
+        fs::write(dir.join("S/mod.toml"), "name = \"Simple\"\n").unwrap();
+
+        let p = read_mod_meta(&dir, "P").unwrap().unwrap();
+        assert!(p.is_pack());
+        let comps = p.components.unwrap();
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0].name.as_deref(), Some("SilentPatch"));
+        assert_eq!(comps[0].version.as_deref(), Some("1.0.1"));
+        assert_eq!(comps[0].author.as_deref(), Some("Silent"));
+        assert_eq!(comps[0].url.as_deref(), Some("http://x/"));
+        assert_eq!(comps[0].path.as_deref(), Some("content/silentpatch"));
+
+        let s = read_mod_meta(&dir, "S").unwrap().unwrap();
+        assert!(!s.is_pack());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

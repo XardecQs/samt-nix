@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS mods (
     mount TEXT,
     guides TEXT,
     tags TEXT,
+    components TEXT,
     CHECK(
         length(folder_name) > 0
         AND folder_name NOT LIKE '%|%'

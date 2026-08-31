@@ -27,3 +27,12 @@
 # [dependencies]
 # required = ["otro:mod"]  # sin esto el mod no funciona
 # optional = []
+
+# Si es un pack de mods, lista sus componentes (solo metadata).
+# guides también acepta carpetas: guides = ["guides"] lista su contenido.
+# [[components]]
+# name = "Componente"
+# version = "1.0.0"
+# author = "Autor"
+# url = "https://..."
+# path = "content/carpeta-del-componente"
