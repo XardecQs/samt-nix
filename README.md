@@ -160,21 +160,24 @@ description = "Descripción larga..."
 cover = "cover.png"                # ruta relativa dentro del mod
 guides = ["guides/instalacion.md"] # lista de archivos de guía
 
-# Subdirectorios que se montan sobre la raíz del juego.
+# Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
 # Sin esta clave se monta la carpeta entera (comportamiento por defecto).
-mount = ["models", "data"]
+mount = ["content"]
 ```
 
-- All fields are optional. `mount` entries are relative paths (no `..`, no
-  absolute paths); each one becomes its own overlay layer. With no `mount`,
-  the whole folder is mounted, so legacy mods keep working untouched.
-- The manifest is the canonical source of metadata; the database caches the
-  fields (version, author, url, description, cover, mount, guides) on every
-  `discover` so `ctl` and the GUI work without reading files. Existing mods'
-  display names are never overwritten by `discover` (use `ctl rename`).
-- The metadata shows up in `ctl list -v`, `ctl info`, and the `--json` output
-  of both. Covers and guides stay as files in the mod folder; rendering them
-  in the GUI is planned for a future GUI rewrite.
+- All fields are optional. Each `mount` entry is a folder treated as the
+  **game root**: its CONTENTS are laid over the game. With `mount = ["content"]`,
+  `content/d3d9.dll` lands on `<game root>/d3d9.dll` and `content/models/*` on
+  `<game root>/models/*`. This is handy for mods with many loose files (e.g.
+  Essentials_Pack): move them into a `content/` subfolder and list it. With no
+  `mount`, the whole folder is treated as the game root, so legacy mods keep
+  working untouched. Entries are relative paths (no `..`, no absolute paths).
+- The manifest is the canonical source of metadata: `ctl info`, `ctl list`
+  (and their `--json` output) read `mod.toml` directly whenever the mods dir is
+  known, so editing the file shows up immediately. The database caches the
+  fields as a fallback for config-less `ctl` use. `ctl rename` writes the new
+  name back into `mod.toml` when one exists. Covers and guides stay as files in
+  the mod folder; rendering them in the GUI is planned for a future GUI rewrite.
 
 ## CLI
 
@@ -183,7 +186,7 @@ gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [-
 gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/mount namespace (for Steam)
 gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
 gta-mo ctl add <folder> [--name <name>]
-gta-mo ctl init <folder>                    # generate a mod.toml metadata template
+gta-mo ctl init <folder>                    # create folder + mod.toml template and register the mod
 gta-mo ctl remove <id|folder>
 gta-mo ctl enable <id|folder> [--profile <name>]
 gta-mo ctl disable <id|folder> [--profile <name>]

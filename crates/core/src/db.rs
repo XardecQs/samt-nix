@@ -773,6 +773,20 @@ fn parse_json_list(raw: Option<String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Builds a cache entry straight from a `mod.toml` manifest (file wins over the
+/// database cache when displaying a mod).
+pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
+    ModMetaCache {
+        version: meta.version.clone(),
+        author: meta.author.clone(),
+        url: meta.url.clone(),
+        description: meta.description.clone(),
+        cover: meta.cover.clone(),
+        mount: meta.mount.clone().unwrap_or_default(),
+        guides: meta.guides.clone().unwrap_or_default(),
+    }
+}
+
 /// Loads the cached metadata for a mod (empty default if none was discovered).
 pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache> {
     let mut stmt = conn.prepare(
@@ -1015,6 +1029,9 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
                 }
             }
         } else if let Some(m) = mods_by_folder.get(folder.as_str()) {
+            if let Some(name) = meta.as_ref().and_then(|m| m.name.clone()) {
+                set_mod_name(conn, m.id, &name)?;
+            }
             update_mod_meta(conn, m.id, &meta)?;
         }
     }
@@ -1269,16 +1286,20 @@ mod tests {
         assert_eq!(meta.author.as_deref(), Some("Author"));
         assert_eq!(meta.mount, vec!["models".to_string()]);
 
-        // re-discover refreshes and keeps the display name
+        // re-discover refreshes metadata and the name from the manifest
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("MyMod/models")).unwrap();
-        std::fs::write(dir.join("MyMod/mod.toml"), "version = \"2.1\"\n").unwrap();
+        std::fs::write(
+            dir.join("MyMod/mod.toml"),
+            "name = \"Renamed Mod\"\nversion = \"2.1\"\n",
+        )
+        .unwrap();
         discover_mods(&conn, &dir).unwrap();
         let meta = load_mod_meta(&conn, m.id).unwrap();
         assert_eq!(meta.version.as_deref(), Some("2.1"));
         assert_eq!(
             get_mod_by_folder(&conn, "MyMod").unwrap().unwrap().name,
-            "My Mod"
+            "Renamed Mod"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

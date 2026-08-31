@@ -41,8 +41,12 @@ pub fn valid_mount_entry(entry: &str) -> bool {
             .all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
-/// Resolves the overlay layer(s) that a mod contributes: the `mount` list from
-/// `mod.toml`, or the whole folder when there is no mount list.
+/// Resolves the overlay layer(s) that a mod contributes.
+///
+/// Each `mount` entry names a folder that is treated as the *game root*: its
+/// CONTENTS are laid over the game (e.g. `mount = ["content"]` maps
+/// `content/d3d9.dll` to `<game root>/d3d9.dll`). When there is no mount list
+/// the whole mod folder is treated as the game root (legacy behavior).
 pub fn mod_layers(mods_dir: &Path, folder: &str) -> Vec<PathBuf> {
     let base = mods_dir.join(folder);
     if let Ok(Some(meta)) = read_mod_meta(mods_dir, folder) {
@@ -54,6 +58,20 @@ pub fn mod_layers(mods_dir: &Path, folder: &str) -> Vec<PathBuf> {
         }
     }
     vec![base]
+}
+
+/// Rewrites the `name` field of a `mod.toml` (keeping comments and the rest of
+/// the file intact). No-op when the mod has no manifest.
+pub fn set_meta_name(mods_dir: &Path, folder: &str, name: &str) -> anyhow::Result<()> {
+    let path = mods_dir.join(folder).join("mod.toml");
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut doc: toml_edit::DocumentMut = content.parse()?;
+    doc["name"] = toml_edit::value(name);
+    std::fs::write(&path, doc.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -148,6 +166,27 @@ mount = ["models"]
         fs::create_dir_all(dir.join("M")).unwrap();
         fs::write(dir.join("M/mod.toml"), "mount = [\"../..\", \"/abs\"]\n").unwrap();
         assert_eq!(mod_layers(&dir, "M"), vec![dir.join("M")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_meta_name_keeps_comments_and_other_fields() {
+        let dir = tmp_mods_dir("rename");
+        fs::create_dir_all(dir.join("M")).unwrap();
+        fs::write(
+            dir.join("M/mod.toml"),
+            "# comment\nname = \"Old\"\nversion = \"1.0\"\n",
+        )
+        .unwrap();
+
+        set_meta_name(&dir, "M", "New Name").unwrap();
+        let content = fs::read_to_string(dir.join("M/mod.toml")).unwrap();
+        assert!(content.contains("# comment"));
+        assert!(content.contains("name = \"New Name\""));
+        assert!(content.contains("version = \"1.0\""));
+
+        // no manifest -> no-op
+        set_meta_name(&dir, "NoSuchMod", "x").unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -123,22 +123,51 @@ fn resolve_mod(conn: &Connection, ident: &str) -> anyhow::Result<db::ModIdentity
     db::get_mod_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Mod no encontrado"))
 }
 
-const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
-# Todos los campos son opcionales. Rellena los que quieras.
+/// Display metadata for a mod: the `mod.toml` manifest wins when the mods dir
+/// is known; otherwise the cached DB metadata is used. The display name comes
+/// from the manifest when present, falling back to the DB name.
+fn display_meta(
+    conn: &Connection,
+    mods_dir: Option<&std::path::Path>,
+    id: i64,
+    folder: &str,
+    db_name: &str,
+) -> (String, db::ModMetaCache) {
+    if let Some(mods_dir) = mods_dir {
+        if let Ok(Some(meta)) = gta_mo_core::meta::read_mod_meta(mods_dir, folder) {
+            let name = meta.name.clone().unwrap_or_else(|| db_name.to_string());
+            return (name, db::meta_cache_from_meta(&meta));
+        }
+    }
+    (
+        db_name.to_string(),
+        db::load_mod_meta(conn, id).unwrap_or_default(),
+    )
+}
 
-name = "NOMBRE"
-version = "1.0.0"
-author = "AUTOR"
-url = "https://..."
-description = "Descripción del mod."
+/// Optional mods dir resolved from config; `ctl` works without it (DB-only).
+fn mods_dir_from_config() -> Option<std::path::PathBuf> {
+    gta_mo_core::config::load_config()
+        .ok()
+        .map(|cfg| gta_mo_core::config::RuntimePaths::from_config(&cfg).mods_dir)
+}
+
+const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
+# Todos los campos son opcionales. Descomenta y rellena los que quieras.
+
+# name = "NOMBRE"
+# version = "1.0.0"
+# author = "AUTOR"
+# url = "https://..."
+# description = "Descripción del mod."
 
 # Carátula y guías (rutas relativas dentro de esta carpeta)
 # cover = "cover.png"
 # guides = ["guides/instalacion.md"]
 
-# Subdirectorios que se montan sobre la raíz del juego.
+# Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
 # Sin esta clave se monta la carpeta entera (comportamiento por defecto).
-# mount = ["models", "data", "modloader"]
+# mount = ["content"]
 "#;
 
 fn cmd_init(conn: &Connection, folder: &str) -> anyhow::Result<()> {
@@ -147,27 +176,31 @@ fn cmd_init(conn: &Connection, folder: &str) -> anyhow::Result<()> {
     let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
 
     let mod_dir = paths.mods_dir.join(folder);
-    if !mod_dir.is_dir() {
-        anyhow::bail!("La carpeta del mod no existe: {}", mod_dir.display());
-    }
+    std::fs::create_dir_all(&mod_dir)?;
 
     let meta_path = mod_dir.join("mod.toml");
     if meta_path.exists() {
         anyhow::bail!("{} ya existe.", meta_path.display());
     }
-
     std::fs::write(&meta_path, MOD_TOML_TEMPLATE)?;
     log::info(format!("Plantilla creada: {}", meta_path.display()));
 
-    if let Some(m) = db::get_mod_by_folder(conn, folder)? {
+    let registered = match db::get_mod_by_folder(conn, folder)? {
+        Some(m) => Some(m.id),
+        None => {
+            let display_name = folder.replace('_', " ");
+            let id = db::add_mod_to_all_profiles(conn, folder, &display_name)?;
+            log::info(format!(
+                "Mod registrado: [{id}] '{folder}' -> '{display_name}' (desactivado)"
+            ));
+            Some(id)
+        }
+    };
+
+    if let Some(id) = registered {
         let meta = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, folder)?;
-        db::update_mod_meta(conn, m.id, &meta)?;
+        db::update_mod_meta(conn, id, &meta)?;
         log::info(format!("Metadata actualizada para '{}'.", folder));
-    } else {
-        log::warn(format!(
-            "'{}' no está registrado; usa `gta-mo launch --discover` para registrarlo.",
-            folder
-        ));
     }
     Ok(())
 }
@@ -317,10 +350,13 @@ fn cmd_list(
         })
         .collect::<Vec<_>>();
 
+    let mods_dir = mods_dir_from_config();
+
     if json {
         let mut out = Vec::new();
         for m in &mods {
-            let meta = db::load_mod_meta(conn, m.id)?;
+            let (name, meta) =
+                display_meta(conn, mods_dir.as_deref(), m.id, &m.folder_name, &m.name);
             let deps = db::get_dependencies_of(conn, profile.id, m.id)?
                 .into_iter()
                 .map(|(d, req)| DepJson::from_entry(&d, req))
@@ -332,7 +368,7 @@ fn cmd_list(
             out.push(ModJson {
                 id: m.id,
                 folder: m.folder_name.clone(),
-                name: m.name.clone(),
+                name,
                 enabled: m.enabled,
                 order: m.load_order,
                 version: meta.version,
@@ -376,14 +412,14 @@ fn cmd_list(
             "NO".red().to_string()
         };
 
+        let (name, meta) = display_meta(conn, mods_dir.as_deref(), m.id, &m.folder_name, &m.name);
         print!(
             "{:<4} {:<6} {:<7} {:<30} {}",
-            m.id, status, m.load_order, m.folder_name, m.name
+            m.id, status, m.load_order, m.folder_name, name
         );
         println!();
 
         if verbose {
-            let meta = db::load_mod_meta(conn, m.id)?;
             let mut meta_parts: Vec<String> = Vec::new();
             if let Some(v) = &meta.version {
                 meta_parts.push(format!("v{}", v.cyan()));
@@ -580,10 +616,28 @@ fn cmd_rename(conn: &Connection, ident: &str, new_name: &str, folder: bool) -> a
 
     let old_name = m.name.clone();
     db::set_mod_name(conn, id, new_name)?;
-    log::info(format!(
-        "'{}': nombre cambiado de '{old_name}' a '{new_name}'.",
-        m.folder_name
-    ));
+
+    let mut manifest_updated = false;
+    if let Ok(cfg) = gta_mo_core::config::load_config() {
+        let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+        let manifest = paths.mods_dir.join(&m.folder_name).join("mod.toml");
+        if manifest.exists() {
+            gta_mo_core::meta::set_meta_name(&paths.mods_dir, &m.folder_name, new_name)?;
+            manifest_updated = true;
+        }
+    }
+
+    if manifest_updated {
+        log::info(format!(
+            "'{}': nombre cambiado en mod.toml y en la DB de '{old_name}' a '{new_name}'.",
+            m.folder_name
+        ));
+    } else {
+        log::info(format!(
+            "'{}': nombre cambiado de '{old_name}' a '{new_name}'.",
+            m.folder_name
+        ));
+    }
     Ok(())
 }
 
@@ -671,7 +725,8 @@ fn cmd_info(
 
     let deps = db::get_dependencies_of(conn, profile.id, id)?;
     let dependents = db::get_dependents_of(conn, profile.id, id)?;
-    let meta = db::load_mod_meta(conn, id)?;
+    let mods_dir = mods_dir_from_config();
+    let (name, meta) = display_meta(conn, mods_dir.as_deref(), id, &m.folder_name, &m.name);
 
     if json {
         #[derive(Serialize)]
@@ -694,7 +749,7 @@ fn cmd_info(
         let out = InfoJson {
             id: m.id,
             folder: m.folder_name,
-            name: m.name,
+            name,
             enabled,
             order,
             version: meta.version,
@@ -726,7 +781,7 @@ fn cmd_info(
     println!();
     println!("  {}       {}", "ID:".bold(), m.id);
     println!("  {}  {}", "Carpeta:".bold(), m.folder_name);
-    println!("  {}   {}", "Nombre:".bold(), m.name);
+    println!("  {}   {}", "Nombre:".bold(), name);
     if let Some(v) = &meta.version {
         println!("  {}      {}", "Versión:".bold(), v.cyan());
     }

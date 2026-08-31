@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_gta-mo");
@@ -6,6 +6,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_gta-mo");
 struct TempDb {
     dir: PathBuf,
     db: PathBuf,
+    config: Option<PathBuf>,
 }
 
 impl TempDb {
@@ -14,15 +15,34 @@ impl TempDb {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("test.db");
-        Self { dir, db }
+        Self {
+            dir,
+            db,
+            config: None,
+        }
+    }
+
+    fn with_config(mut self, game_root: &Path) -> Self {
+        let cfg = self.dir.join("config.toml");
+        std::fs::write(
+            &cfg,
+            format!(
+                "game_root = \"{}\"\nproton_path = \"/tmp\"\n",
+                game_root.display()
+            ),
+        )
+        .unwrap();
+        self.config = Some(cfg);
+        self
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(BIN)
-            .env("GTA_MO_DB", &self.db)
-            .args(args)
-            .output()
-            .unwrap()
+        let mut cmd = Command::new(BIN);
+        cmd.env("GTA_MO_DB", &self.db);
+        if let Some(cfg) = &self.config {
+            cmd.env("GTA_MO_CONFIG", cfg);
+        }
+        cmd.args(args).output().unwrap()
     }
 
     fn run_ok(&self, args: &[&str]) -> String {
@@ -179,4 +199,57 @@ fn duplicate_mod_is_rejected() {
     t.run_ok(&["ctl", "add", "m1"]);
     let out = t.run(&["ctl", "add", "m1"]);
     assert!(!out.status.success());
+}
+
+#[test]
+fn init_creates_folder_template_and_registers() {
+    let t = TempDb::new("init");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "my_mod"]);
+
+    assert!(game_root.join("mods/my_mod/mod.toml").exists());
+    let v = json(&t.run_ok(&["ctl", "list", "--json"]));
+    assert_eq!(v[0]["folder"].as_str().unwrap(), "my_mod");
+}
+
+#[test]
+fn info_reads_edited_mod_toml_without_launch() {
+    let t = TempDb::new("info");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "d3d9"]);
+    std::fs::write(
+        game_root.join("mods/d3d9/mod.toml"),
+        "name = \"DXVK - D3D9.dll\"\nversion = \"3.1\"\nauthor = \"doitsujin\"\nmount = [\"content\"]\n",
+    )
+    .unwrap();
+
+    let v = json(&t.run_ok(&["ctl", "info", "d3d9", "--json"]));
+    assert_eq!(v["name"].as_str().unwrap(), "DXVK - D3D9.dll");
+    assert_eq!(v["version"].as_str().unwrap(), "3.1");
+    assert_eq!(v["author"].as_str().unwrap(), "doitsujin");
+    assert_eq!(v["mount"][0].as_str().unwrap(), "content");
+}
+
+#[test]
+fn rename_writes_back_to_mod_toml() {
+    let t = TempDb::new("rename");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "m1"]);
+    t.run_ok(&["ctl", "rename", "m1", "New Name"]);
+
+    let content = std::fs::read_to_string(game_root.join("mods/m1/mod.toml")).unwrap();
+    assert!(content.contains("name = \"New Name\""));
+
+    // and it is reflected in info right away
+    let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    assert_eq!(v["name"].as_str().unwrap(), "New Name");
 }

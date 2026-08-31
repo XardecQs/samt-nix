@@ -4,17 +4,19 @@
 # All fields are optional; `mount` is the only one with functional impact.
 # You can also generate it per-mod with: gta-mo ctl init <folder>
 
-name = "Nombre visible"       # si falta, se usa el nombre de la carpeta
-version = "1.0.0"
-author = "Autor"
-url = "https://github.com/..."
-description = "Descripción del mod."
+# name = "Nombre visible"       # si falta, se usa el nombre de la carpeta
+# version = "1.0.0"
+# author = "Autor"
+# url = "https://github.com/..."
+# description = "Descripción del mod."
 
 # Carátula y guías (rutas relativas dentro de esta carpeta)
 # cover = "cover.png"
 # guides = ["guides/instalacion.md"]
 
-# Subdirectorios que se montan sobre la raíz del juego.
-# Cada entrada es una capa propia (ruta relativa, sin '..' ni rutas absolutas).
-# Sin esta clave se monta la carpeta entera (comportamiento por defecto).
-# mount = ["models", "data", "modloader"]
+# Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
+# Cada entrada se trata como la raíz del juego: mount = ["content"] hace que
+# content/d3d9.dll acabe en <raíz del juego>/d3d9.dll y content/models/* en
+# <raíz>/models/*. Útil para mods con muchos archivos sueltos (mételos en una
+# carpeta content/ y lista esa). Sin esta clave se monta la carpeta entera.
+# mount = ["content"]

@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "gta-mo-core"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -248,12 +248,13 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "toml_edit",
  "which",
 ]
 
 [[package]]
 name = "gta-mod-organizer"
-version = "0.37.0"
+version = "0.37.1"
 dependencies = [
  "anyhow",
  "clap",
