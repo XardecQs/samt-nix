@@ -89,6 +89,21 @@ pub enum CtlCommand {
         #[arg(long = "disabled", group = "filter", help = "Only disabled mods")]
         disabled: bool,
 
+        #[arg(long, help = "Filter by tag")]
+        tag: Option<String>,
+
+        #[arg(long, help = "Filter by group (name, slug or id)")]
+        group: Option<String>,
+
+        #[arg(long, help = "Filter by author")]
+        author: Option<String>,
+
+        #[arg(long, help = "Filter by stable mod id (author:slug)")]
+        id: Option<String>,
+
+        #[arg(long, help = "Search name, folder, author, id, description and tags")]
+        search: Option<String>,
+
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
@@ -141,6 +156,11 @@ pub enum CtlCommand {
         #[command(subcommand)]
         action: ProfileAction,
     },
+    #[command(about = "Manage groups (global or per-profile collections of mods)")]
+    Group {
+        #[command(subcommand)]
+        action: GroupAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -182,6 +202,39 @@ pub enum DepAction {
     Remove {
         mod_ident: String,
         dep_ident: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GroupAction {
+    #[command(about = "List groups")]
+    List {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Create a group")]
+    Create { name: String },
+    #[command(about = "Rename a group (slug stays unchanged)")]
+    Rename { ident: String, new_name: String },
+    #[command(about = "Delete a group and its memberships")]
+    Delete {
+        ident: String,
+        #[arg(long, help = "Skip confirmation")]
+        yes: bool,
+    },
+    #[command(about = "Add a mod to a group (--global for all profiles)")]
+    Add {
+        mod_ident: String,
+        group_ident: String,
+        #[arg(long, help = "Apply the membership in every profile")]
+        global: bool,
+    },
+    #[command(about = "Remove a mod from a group (--global for the global membership)")]
+    Remove {
+        mod_ident: String,
+        group_ident: String,
+        #[arg(long, help = "Remove the global membership instead of the profile one")]
+        global: bool,
     },
 }
 

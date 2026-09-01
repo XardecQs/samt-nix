@@ -57,6 +57,25 @@ CREATE TABLE IF NOT EXISTS mod_dependencies (
     CHECK(mod_id != dependency_id)
 );
 
+CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    slug TEXT NOT NULL UNIQUE,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS mod_groups (
+    group_id INTEGER NOT NULL,
+    mod_id INTEGER NOT NULL,
+    profile_id INTEGER,
+    PRIMARY KEY (group_id, mod_id, profile_id),
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_mod_groups_mod_id ON mod_groups(mod_id);
+CREATE INDEX IF NOT EXISTS idx_mod_groups_profile_id ON mod_groups(profile_id);
 CREATE INDEX IF NOT EXISTS idx_mod_deps_mod_id ON mod_dependencies(mod_id);
 CREATE INDEX IF NOT EXISTS idx_mod_deps_dep_id ON mod_dependencies(dependency_id);
 CREATE INDEX IF NOT EXISTS idx_profile_mods_mod_id ON profile_mods(mod_id);

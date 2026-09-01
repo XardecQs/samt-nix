@@ -86,6 +86,11 @@ pub fn run(
             verbose,
             enabled,
             disabled,
+            tag,
+            group,
+            author,
+            id,
+            search,
             json,
         } => {
             let filter = if *enabled {
@@ -96,7 +101,14 @@ pub fn run(
                 None
             };
             let profile = active()?;
-            cmd_list(conn, &profile, *verbose, filter, *json)
+            let filters = ListFilters {
+                tag: tag.clone(),
+                group: group.clone(),
+                author: author.clone(),
+                id: id.clone(),
+                search: search.clone(),
+            };
+            cmd_list(conn, &profile, *verbose, filter, filters, *json)
         }
         super::CtlCommand::Add { folder, name } => cmd_add(conn, folder, name.as_deref()),
         super::CtlCommand::Init { folder } => cmd_init(conn, folder),
@@ -138,6 +150,7 @@ pub fn run(
             } => cmd_dep_rm(conn, mod_ident, dep_ident),
         },
         super::CtlCommand::Profile { action } => cmd_profile(conn, action),
+        super::CtlCommand::Group { action } => cmd_group(conn, action, profile_ident),
     }
 }
 
@@ -410,13 +423,265 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
     }
 }
 
+fn resolve_active_profile(
+    conn: &Connection,
+    profile_ident: Option<&str>,
+) -> anyhow::Result<db::Profile> {
+    match profile_ident {
+        Some(ident) => db::resolve_profile(conn, ident),
+        None => db::active_profile(conn),
+    }
+}
+
+fn cmd_group(
+    conn: &Connection,
+    action: &super::GroupAction,
+    profile_ident: Option<&str>,
+) -> anyhow::Result<()> {
+    match action {
+        super::GroupAction::List { json } => {
+            let groups = db::list_groups(conn)?;
+            if *json {
+                #[derive(Serialize)]
+                struct GroupJson {
+                    id: i64,
+                    name: String,
+                    slug: String,
+                    mods: i64,
+                }
+                let mut out = Vec::new();
+                for g in &groups {
+                    out.push(GroupJson {
+                        id: g.id,
+                        name: g.name.clone(),
+                        slug: g.slug.clone(),
+                        mods: db::group_mod_count(conn, g.id)?,
+                    });
+                }
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
+            if groups.is_empty() {
+                println!("No hay grupos.");
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = groups
+                .iter()
+                .map(|g| {
+                    vec![
+                        g.id.to_string(),
+                        g.name.clone(),
+                        g.slug.clone(),
+                        db::group_mod_count(conn, g.id).unwrap_or(0).to_string(),
+                    ]
+                })
+                .collect();
+            println!(
+                "{}",
+                render_table(
+                    vec![
+                        "ID".to_string(),
+                        "NOMBRE".to_string(),
+                        "SLUG".to_string(),
+                        "MODS".to_string(),
+                    ],
+                    rows,
+                )
+            );
+            Ok(())
+        }
+        super::GroupAction::Create { name } => {
+            let id = db::create_group(conn, name)?;
+            let g =
+                db::get_group_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Grupo no creado"))?;
+            log::info(format!("Grupo '{}' creado (slug: {}).", g.name, g.slug));
+            Ok(())
+        }
+        super::GroupAction::Rename { ident, new_name } => {
+            let g = db::resolve_group(conn, ident)?;
+            let old = g.name.clone();
+            db::rename_group(conn, g.id, new_name)?;
+            log::info(format!(
+                "Grupo renombrado de '{old}' a '{new_name}' (slug '{}' sin cambios).",
+                g.slug
+            ));
+            Ok(())
+        }
+        super::GroupAction::Delete { ident, yes } => {
+            let g = db::resolve_group(conn, ident)?;
+            if !yes {
+                let count = db::group_mod_count(conn, g.id)?;
+                eprintln!();
+                log::warn(format!(
+                    "Vas a eliminar el grupo '{}' (slug: {}) con {count} membresías.",
+                    g.name, g.slug
+                ));
+                eprintln!();
+                eprint!("Confirmar eliminación? [s/N]: ");
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let confirm = input.trim().to_lowercase();
+                if confirm != "s" && confirm != "si" {
+                    log::info("Cancelado.");
+                    return Ok(());
+                }
+            }
+            db::delete_group(conn, g.id)?;
+            log::info(format!("Grupo '{}' eliminado.", g.name));
+            Ok(())
+        }
+        super::GroupAction::Add {
+            mod_ident,
+            group_ident,
+            global,
+        } => {
+            let m = resolve_mod(conn, mod_ident)?;
+            let g = db::resolve_group(conn, group_ident)?;
+            let profile_id = if *global {
+                None
+            } else {
+                Some(resolve_active_profile(conn, profile_ident)?.id)
+            };
+            if db::add_group_membership(conn, g.id, m.id, profile_id)? {
+                let scope = if *global { "global" } else { "perfil actual" };
+                log::info(format!(
+                    "'{}' añadido al grupo '{}' ({scope}).",
+                    m.folder_name, g.name
+                ));
+            } else {
+                log::warn(format!(
+                    "'{}' ya está en el grupo '{}'.",
+                    m.folder_name, g.name
+                ));
+            }
+            Ok(())
+        }
+        super::GroupAction::Remove {
+            mod_ident,
+            group_ident,
+            global,
+        } => {
+            let m = resolve_mod(conn, mod_ident)?;
+            let g = db::resolve_group(conn, group_ident)?;
+            let profile_id = if *global {
+                None
+            } else {
+                Some(resolve_active_profile(conn, profile_ident)?.id)
+            };
+            if db::remove_group_membership(conn, g.id, m.id, profile_id)? {
+                let scope = if *global { "global" } else { "perfil actual" };
+                log::info(format!(
+                    "'{}' quitado del grupo '{}' ({scope}).",
+                    m.folder_name, g.name
+                ));
+            } else {
+                log::warn(format!(
+                    "'{}' no está en el grupo '{}'.",
+                    m.folder_name, g.name
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Filters for `ctl list`. All of them combine with AND.
+#[derive(Default, Clone)]
+struct ListFilters {
+    tag: Option<String>,
+    group: Option<String>,
+    author: Option<String>,
+    id: Option<String>,
+    search: Option<String>,
+}
+
+fn mod_matches_filters(
+    conn: &Connection,
+    mods_dir: Option<&std::path::Path>,
+    m: &db::ModEntry,
+    filters: &ListFilters,
+    group_ids: &std::collections::HashSet<i64>,
+) -> bool {
+    if filters.group.is_some() && !group_ids.contains(&m.id) {
+        return false;
+    }
+    if filters.tag.is_none()
+        && filters.author.is_none()
+        && filters.id.is_none()
+        && filters.search.is_none()
+    {
+        return true;
+    }
+
+    let (name, meta) = display_meta(conn, mods_dir, m.id, &m.folder_name, &m.name);
+
+    if let Some(tag) = &filters.tag {
+        if !meta.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+            return false;
+        }
+    }
+    if let Some(author) = &filters.author {
+        let a = author.to_lowercase();
+        if !meta.author.iter().any(|x| x.to_lowercase().contains(&a)) {
+            return false;
+        }
+    }
+    if let Some(id) = &filters.id {
+        let matches_mod_id = meta
+            .mod_id
+            .as_deref()
+            .map(|x| x.eq_ignore_ascii_case(id))
+            .unwrap_or(false);
+        let matches_folder = m.folder_name.eq_ignore_ascii_case(id);
+        if !matches_mod_id && !matches_folder {
+            return false;
+        }
+    }
+    if let Some(search) = &filters.search {
+        let s = search.to_lowercase();
+        let mut haystack = name.to_lowercase();
+        haystack.push(' ');
+        haystack.push_str(&m.folder_name.to_lowercase());
+        haystack.push(' ');
+        haystack.push_str(&meta.author.join(" ").to_lowercase());
+        if let Some(id) = &meta.mod_id {
+            haystack.push(' ');
+            haystack.push_str(&id.to_lowercase());
+        }
+        if let Some(d) = &meta.description {
+            haystack.push(' ');
+            haystack.push_str(&d.to_lowercase());
+        }
+        haystack.push(' ');
+        haystack.push_str(&meta.tags.join(" ").to_lowercase());
+        if !haystack.contains(&s) {
+            return false;
+        }
+    }
+    true
+}
+
 fn cmd_list(
     conn: &Connection,
     profile: &db::Profile,
     verbose: bool,
     filter: Option<&str>,
+    filters: ListFilters,
     json: bool,
 ) -> anyhow::Result<()> {
+    let mods_dir = mods_dir_from_config();
+
+    let group_ids: std::collections::HashSet<i64> = match &filters.group {
+        Some(g) => {
+            let group = db::resolve_group(conn, g)?;
+            db::mods_in_group(conn, group.id, profile.id)?
+                .into_iter()
+                .collect()
+        }
+        None => std::collections::HashSet::new(),
+    };
+
     let mods = db::load_all_mods_for_profile(conn, profile.id)?
         .into_iter()
         .filter(|m| match filter {
@@ -424,9 +689,8 @@ fn cmd_list(
             Some("disabled") => !m.enabled,
             _ => true,
         })
+        .filter(|m| mod_matches_filters(conn, mods_dir.as_deref(), m, &filters, &group_ids))
         .collect::<Vec<_>>();
-
-    let mods_dir = mods_dir_from_config();
 
     if json {
         let mut out = Vec::new();
@@ -783,6 +1047,7 @@ fn cmd_info(
         None => meta.guides.clone(),
     };
     let profiles = db::mod_enabled_in_profiles(conn, id)?;
+    let groups = db::groups_of_mod_in_profile(conn, id, profile.id)?;
 
     if json {
         #[derive(Serialize)]
@@ -803,9 +1068,17 @@ fn cmd_info(
             tags: Vec<String>,
             pack: bool,
             components: Vec<ComponentJson>,
+            groups: Vec<GroupJson>,
             dependencies: Vec<DepJson>,
             dependents: Vec<DepJson>,
             profiles: Vec<ProfileStateJson>,
+        }
+
+        #[derive(Serialize)]
+        struct GroupJson {
+            id: i64,
+            name: String,
+            slug: String,
         }
 
         #[derive(Serialize)]
@@ -851,6 +1124,15 @@ fn cmd_info(
             })
             .collect();
 
+        let groups_json: Vec<GroupJson> = groups
+            .iter()
+            .map(|g| GroupJson {
+                id: g.id,
+                name: g.name.clone(),
+                slug: g.slug.clone(),
+            })
+            .collect();
+
         let out = InfoJson {
             id: m.id,
             folder: m.folder_name,
@@ -868,6 +1150,7 @@ fn cmd_info(
             tags: meta.tags,
             pack,
             components: components_json,
+            groups: groups_json,
             dependencies: deps
                 .iter()
                 .map(|(d, req)| DepJson::from_entry(d, *req))
@@ -929,6 +1212,10 @@ fn cmd_info(
         println!("  {}   {}", "Tipo:".bold(), kind.magenta());
         println!("  {}   {}", "Estado:".bold(), status);
         println!("  {}    {}", "Orden:".bold(), order);
+        if !groups.is_empty() {
+            let names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+            println!("  {}     {}", "Grupos:".bold(), names.join(", ").cyan());
+        }
 
         if !guides.is_empty() {
             println!("\n  {}", "Guías:".bold());
@@ -1097,6 +1384,18 @@ fn cmd_info(
         ),
     ));
     rows.push(("Perfil".to_string(), profile.name.clone()));
+    if !groups.is_empty() {
+        let names: Vec<String> = groups.iter().map(|g| g.name.clone()).take(3).collect();
+        let shown = if groups.len() > 3 {
+            format!("{}, …", names.join(", "))
+        } else {
+            names.join(", ")
+        };
+        rows.push((
+            "Grupos".to_string(),
+            format!("{} ({shown})", groups.len()).cyan().to_string(),
+        ));
+    }
     if !guides.is_empty() {
         rows.push((
             "Guías".to_string(),

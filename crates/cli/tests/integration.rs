@@ -336,3 +336,85 @@ fn human_output_commands_succeed() {
         );
     }
 }
+
+#[test]
+fn groups_global_and_per_profile_filters() {
+    let t = TempDb::new("groups");
+    t.run_ok(&["ctl", "add", "alpha_mod"]);
+    t.run_ok(&["ctl", "add", "beta_mod"]);
+    t.run_ok(&["ctl", "group", "create", "Graphics"]);
+    t.run_ok(&["ctl", "group", "add", "alpha_mod", "Graphics"]);
+    t.run_ok(&["ctl", "group", "add", "beta_mod", "Graphics", "--global"]);
+
+    let v = json(&t.run_ok(&["ctl", "group", "list", "--json"]));
+    assert_eq!(v[0]["name"].as_str().unwrap(), "Graphics");
+    assert_eq!(v[0]["mods"].as_i64().unwrap(), 2);
+
+    // default profile: both global and per-profile memberships
+    let v = json(&t.run_ok(&["ctl", "list", "--group", "Graphics", "--json"]));
+    let folders: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["folder"].as_str().unwrap())
+        .collect();
+    assert!(folders.contains(&"alpha_mod"));
+    assert!(folders.contains(&"beta_mod"));
+
+    // second profile: only the global membership
+    t.run_ok(&["ctl", "profile", "create", "Second"]);
+    let v = json(&t.run_ok(&[
+        "--profile",
+        "second",
+        "ctl",
+        "list",
+        "--group",
+        "Graphics",
+        "--json",
+    ]));
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["folder"].as_str().unwrap(), "beta_mod");
+
+    // info shows the groups of a mod
+    let v = json(&t.run_ok(&["ctl", "info", "alpha_mod", "--json"]));
+    assert_eq!(v["groups"][0]["name"].as_str().unwrap(), "Graphics");
+
+    // remove membership
+    t.run_ok(&["ctl", "group", "remove", "alpha_mod", "Graphics"]);
+    let v = json(&t.run_ok(&["ctl", "list", "--group", "Graphics", "--json"]));
+    assert_eq!(v.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn list_filters_by_tag_author_and_search() {
+    let t = TempDb::new("filters");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "add", "alpha_mod"]);
+    t.run_ok(&["ctl", "add", "beta_mod"]);
+    std::fs::create_dir_all(game_root.join("mods/alpha_mod")).unwrap();
+    std::fs::create_dir_all(game_root.join("mods/beta_mod")).unwrap();
+    std::fs::write(
+        game_root.join("mods/alpha_mod/mod.toml"),
+        "name = \"Alpha\"\nauthor = [\"xardec\"]\ntags = [\"essential\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        game_root.join("mods/beta_mod/mod.toml"),
+        "name = \"Beta\"\nauthor = [\"other\"]\ntags = [\"graphics\"]\n",
+    )
+    .unwrap();
+
+    let v = json(&t.run_ok(&["ctl", "list", "--tag", "essential", "--json"]));
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["folder"].as_str().unwrap(), "alpha_mod");
+
+    let v = json(&t.run_ok(&["ctl", "list", "--author", "xardec", "--json"]));
+    assert_eq!(v.as_array().unwrap().len(), 1);
+
+    let v = json(&t.run_ok(&["ctl", "list", "--search", "BETA", "--json"]));
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["folder"].as_str().unwrap(), "beta_mod");
+}

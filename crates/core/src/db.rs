@@ -59,6 +59,14 @@ pub struct Profile {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub id: i64,
+    pub name: String,
+    pub slug: String,
+    pub created_at: String,
+}
+
 pub fn slugify(input: &str) -> String {
     let mut slug = String::new();
     for c in input.trim().to_lowercase().chars() {
@@ -304,6 +312,189 @@ pub fn mod_enabled_in_profiles(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+// ---------- Groups ----------
+
+fn row_to_group(row: &rusqlite::Row) -> rusqlite::Result<Group> {
+    Ok(Group {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        slug: row.get(2)?,
+        created_at: row.get(3)?,
+    })
+}
+
+fn unique_group_slug(conn: &Connection, base: &str) -> anyhow::Result<String> {
+    let base = slugify(base);
+    let base = if base.is_empty() {
+        "g".to_string()
+    } else {
+        base
+    };
+    let exists = |slug: &str| -> anyhow::Result<bool> {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM groups WHERE slug = ?1",
+            params![slug],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    };
+    if !exists(&base)? {
+        return Ok(base);
+    }
+    for i in 2.. {
+        let cand = format!("{base}-{i}");
+        if !exists(&cand)? {
+            return Ok(cand);
+        }
+    }
+    unreachable!("unique_group_slug agotó candidatos")
+}
+
+pub fn create_group(conn: &Connection, name: &str) -> anyhow::Result<i64> {
+    if name.trim().is_empty() {
+        anyhow::bail!("El nombre del grupo no puede estar vacío.");
+    }
+    let slug = unique_group_slug(conn, name)?;
+    conn.execute(
+        "INSERT INTO groups (name, slug) VALUES (?1, ?2)",
+        params![name.trim(), slug],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn get_group_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<Group>> {
+    let mut stmt = conn.prepare("SELECT id, name, slug, created_at FROM groups WHERE id = ?1")?;
+    let mut rows = stmt.query_map(params![id], row_to_group)?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn get_group_by_slug(conn: &Connection, slug: &str) -> anyhow::Result<Option<Group>> {
+    let mut stmt = conn.prepare("SELECT id, name, slug, created_at FROM groups WHERE slug = ?1")?;
+    let mut rows = stmt.query_map(params![slug], row_to_group)?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn get_group_by_name(conn: &Connection, name: &str) -> anyhow::Result<Option<Group>> {
+    let mut stmt = conn.prepare("SELECT id, name, slug, created_at FROM groups WHERE name = ?1")?;
+    let mut rows = stmt.query_map(params![name], row_to_group)?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn resolve_group(conn: &Connection, ident: &str) -> anyhow::Result<Group> {
+    if let Ok(id) = ident.parse::<i64>() {
+        if let Some(g) = get_group_by_id(conn, id)? {
+            return Ok(g);
+        }
+    }
+    if let Some(g) = get_group_by_slug(conn, ident)? {
+        return Ok(g);
+    }
+    if let Some(g) = get_group_by_name(conn, ident)? {
+        return Ok(g);
+    }
+    anyhow::bail!("Grupo '{}' no encontrado.", ident)
+}
+
+pub fn list_groups(conn: &Connection) -> anyhow::Result<Vec<Group>> {
+    let mut stmt = conn.prepare("SELECT id, name, slug, created_at FROM groups ORDER BY name")?;
+    let rows = stmt.query_map([], row_to_group)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub fn rename_group(conn: &Connection, id: i64, new_name: &str) -> anyhow::Result<()> {
+    if new_name.trim().is_empty() {
+        anyhow::bail!("El nombre del grupo no puede estar vacío.");
+    }
+    conn.execute(
+        "UPDATE groups SET name = ?1 WHERE id = ?2",
+        params![new_name.trim(), id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_group(conn: &Connection, id: i64) -> anyhow::Result<()> {
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    conn.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn group_mod_count(conn: &Connection, group_id: i64) -> anyhow::Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM mod_groups WHERE group_id = ?1",
+        params![group_id],
+        |row| row.get(0),
+    )?)
+}
+
+/// Adds a mod to a group. `profile_id = None` means the membership is global
+/// (applies to every profile). Returns `false` when it already existed.
+pub fn add_group_membership(
+    conn: &Connection,
+    group_id: i64,
+    mod_id: i64,
+    profile_id: Option<i64>,
+) -> anyhow::Result<bool> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM mod_groups
+         WHERE group_id = ?1 AND mod_id = ?2 AND profile_id IS ?3",
+        params![group_id, mod_id, profile_id],
+        |row| row.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT INTO mod_groups (group_id, mod_id, profile_id) VALUES (?1, ?2, ?3)",
+        params![group_id, mod_id, profile_id],
+    )?;
+    Ok(true)
+}
+
+pub fn remove_group_membership(
+    conn: &Connection,
+    group_id: i64,
+    mod_id: i64,
+    profile_id: Option<i64>,
+) -> anyhow::Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM mod_groups WHERE group_id = ?1 AND mod_id = ?2 AND profile_id IS ?3",
+        params![group_id, mod_id, profile_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Mod ids that belong to `group_id`, considering global memberships plus the
+/// given profile's own memberships.
+pub fn mods_in_group(
+    conn: &Connection,
+    group_id: i64,
+    profile_id: i64,
+) -> anyhow::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT mod_id FROM mod_groups
+         WHERE group_id = ?1 AND (profile_id IS NULL OR profile_id = ?2)",
+    )?;
+    let rows = stmt.query_map(params![group_id, profile_id], |row| row.get(0))?;
+    rows.collect::<Result<Vec<i64>, _>>().map_err(Into::into)
+}
+
+/// Groups a mod belongs to (global memberships plus the profile's own).
+pub fn groups_of_mod_in_profile(
+    conn: &Connection,
+    mod_id: i64,
+    profile_id: i64,
+) -> anyhow::Result<Vec<Group>> {
+    let mut stmt = conn.prepare(
+        "SELECT g.id, g.name, g.slug, g.created_at
+         FROM groups g
+         JOIN mod_groups mg ON mg.group_id = g.id
+         WHERE mg.mod_id = ?1 AND (mg.profile_id IS NULL OR mg.profile_id = ?2)
+         ORDER BY g.name",
+    )?;
+    let rows = stmt.query_map(params![mod_id, profile_id], row_to_group)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 pub fn ensure_db_dir(db_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -319,7 +510,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -344,11 +535,40 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.pragma_update(None, "user_version", 4)?;
     }
 
+    if version < 5 {
+        migrate_to_v5(conn)?;
+        conn.pragma_update(None, "user_version", 5)?;
+    }
+
     debug_assert!(
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0)
             == SCHEMA_VERSION
     );
+    Ok(())
+}
+
+/// Creates the `groups` and `mod_groups` tables (idempotent).
+fn migrate_to_v5(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            slug TEXT NOT NULL UNIQUE,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS mod_groups (
+            group_id INTEGER NOT NULL,
+            mod_id INTEGER NOT NULL,
+            profile_id INTEGER,
+            PRIMARY KEY (group_id, mod_id, profile_id),
+            FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+            FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
+            FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_mod_groups_mod_id ON mod_groups(mod_id);
+        CREATE INDEX IF NOT EXISTS idx_mod_groups_profile_id ON mod_groups(profile_id);",
+    )?;
     Ok(())
 }
 
@@ -1642,6 +1862,57 @@ mod tests {
         assert_eq!(meta.components[0].name.as_deref(), Some("A"));
         assert_eq!(meta.components[0].url.as_deref(), Some("http://a"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn groups_global_and_per_profile_memberships() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "m2", "M2").unwrap();
+        let gid = create_group(&conn, "Graphics").unwrap();
+        let g = get_group_by_id(&conn, gid).unwrap().unwrap();
+        assert_eq!(g.slug, "graphics");
+
+        let default = active_profile(&conn).unwrap();
+        let second = get_profile_by_id(&conn, create_profile(&conn, "Second").unwrap())
+            .unwrap()
+            .unwrap();
+
+        // global membership: m1 in group everywhere
+        assert!(add_group_membership(&conn, gid, 1, None).unwrap());
+        // per-profile: m2 in group only in "default"
+        assert!(add_group_membership(&conn, gid, 2, Some(default.id)).unwrap());
+        // dedup
+        assert!(!add_group_membership(&conn, gid, 1, None).unwrap());
+
+        assert_eq!(mods_in_group(&conn, gid, default.id).unwrap(), vec![1, 2]);
+        assert_eq!(mods_in_group(&conn, gid, second.id).unwrap(), vec![1]);
+
+        let gs = groups_of_mod_in_profile(&conn, 2, second.id).unwrap();
+        assert!(gs.is_empty(), "m2 no está en el grupo en 'second'");
+        let gs = groups_of_mod_in_profile(&conn, 2, default.id).unwrap();
+        assert_eq!(gs.len(), 1);
+
+        // resolve by name/slug/id
+        assert_eq!(resolve_group(&conn, "Graphics").unwrap().id, gid);
+        assert_eq!(resolve_group(&conn, "graphics").unwrap().id, gid);
+        assert_eq!(resolve_group(&conn, &gid.to_string()).unwrap().id, gid);
+
+        // rename keeps slug
+        rename_group(&conn, gid, "Gráficos").unwrap();
+        let g = get_group_by_id(&conn, gid).unwrap().unwrap();
+        assert_eq!(g.name, "Gráficos");
+        assert_eq!(g.slug, "graphics");
+
+        // remove per-profile membership
+        assert!(remove_group_membership(&conn, gid, 2, Some(default.id)).unwrap());
+        assert!(!remove_group_membership(&conn, gid, 2, Some(default.id)).unwrap());
+
+        // delete cascades memberships
+        delete_group(&conn, gid).unwrap();
+        assert!(mods_in_group(&conn, gid, default.id).unwrap().is_empty());
     }
 
     #[test]
