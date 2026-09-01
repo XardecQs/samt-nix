@@ -154,6 +154,7 @@ pub fn run(
         super::CtlCommand::Import { path, force } => cmd_import(conn, path, *force),
         super::CtlCommand::Health { conflicts } => cmd_health(conn, profile_ident, *conflicts),
         super::CtlCommand::Conflicts { json } => cmd_conflicts(conn, profile_ident, *json),
+        super::CtlCommand::Which { path } => cmd_which(conn, profile_ident, path),
         super::CtlCommand::Dep { action } => match action {
             super::DepAction::Add {
                 mod_ident,
@@ -685,6 +686,43 @@ fn cmd_group(
                     m.folder_name, g.name
                 ));
             }
+            Ok(())
+        }
+        super::GroupAction::Enable { group_ident } => {
+            let g = db::resolve_group(conn, group_ident)?;
+            let profile = resolve_active_profile(conn, profile_ident)?;
+            let members = db::mods_in_group(conn, g.id, profile.id)?;
+            let mut visited = std::collections::HashSet::new();
+            let mut enabled = 0usize;
+            for mod_id in members {
+                if let Ok(Some(m)) = db::get_mod_by_id(conn, mod_id) {
+                    db::enable_mod_with_deps(conn, profile.id, mod_id, &mut visited)?;
+                    enabled += 1;
+                    log::info(format!("    [+] {} activado", m.folder_name));
+                }
+            }
+            log::info(format!(
+                "Grupo '{}': {enabled} mod(s) activado(s) en '{}' (con dependencias requeridas).",
+                g.name, profile.name
+            ));
+            Ok(())
+        }
+        super::GroupAction::Disable { group_ident } => {
+            let g = db::resolve_group(conn, group_ident)?;
+            let profile = resolve_active_profile(conn, profile_ident)?;
+            let members = db::mods_in_group(conn, g.id, profile.id)?;
+            let mut disabled = 0usize;
+            for mod_id in members {
+                if let Ok(Some(m)) = db::get_mod_by_id(conn, mod_id) {
+                    db::set_mod_enabled(conn, profile.id, mod_id, false)?;
+                    disabled += 1;
+                    log::info(format!("    [-] {} desactivado", m.folder_name));
+                }
+            }
+            log::info(format!(
+                "Grupo '{}': {disabled} mod(s) desactivado(s) en '{}'.",
+                g.name, profile.name
+            ));
             Ok(())
         }
     }
@@ -2052,6 +2090,43 @@ fn cmd_conflicts(conn: &Connection, profile_ident: Option<&str>, json: bool) -> 
     );
     if dups > 0 {
         println!("\n({dups} duplicado(s) idéntico(s) ignorados)");
+    }
+    Ok(())
+}
+
+fn cmd_which(conn: &Connection, profile_ident: Option<&str>, path: &str) -> anyhow::Result<()> {
+    let profile = resolve_active_profile(conn, profile_ident)?;
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+    let resolved = resolve_enabled_order(conn, &profile)?;
+
+    match gta_mo_core::conflicts::providers_for_path(&paths.mods_dir, &resolved, path)? {
+        None => println!(
+            "'{}' no lo provee ningún mod del perfil '{}' (viene de la base).",
+            path, profile.name
+        ),
+        Some(p) if p.providers.len() == 1 => {
+            println!("'{}' lo provee '{}'.", path, p.providers[0]);
+        }
+        Some(p) => {
+            let winner = &p.providers[0];
+            let overridden: Vec<&str> = p.providers[1..].iter().map(|s| s.as_str()).collect();
+            let severity = match p.severity {
+                gta_mo_core::conflicts::Severity::High => "ALTO".red().to_string(),
+                gta_mo_core::conflicts::Severity::Medium => "MEDIO".yellow().to_string(),
+                gta_mo_core::conflicts::Severity::Info => "INFO".cyan().to_string(),
+            };
+            println!("'{}' → gana '{}' (gravedad: {severity})", path, winner);
+            if p.duplicate {
+                println!(
+                    "  (los {} mods aportan el mismo contenido)",
+                    p.providers.len()
+                );
+            } else {
+                println!("  pisados: {}", overridden.join(", "));
+            }
+        }
     }
     Ok(())
 }

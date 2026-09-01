@@ -47,6 +47,68 @@ pub fn scan_conflicts(mods_dir: &Path, resolved: &[String]) -> anyhow::Result<Ve
     Ok(conflicts)
 }
 
+/// Result of asking "who provides this game-relative path".
+pub struct PathProviders {
+    /// Folders in overlay priority order (first one wins).
+    pub providers: Vec<String>,
+    /// File sizes, aligned with `providers`.
+    pub sizes: Vec<u64>,
+    pub duplicate: bool,
+    pub severity: Severity,
+}
+
+/// Finds every enabled mod that provides `rel` (a game-root-relative path).
+/// Returns `None` when no mod provides it (the file comes from the base game).
+pub fn providers_for_path(
+    mods_dir: &Path,
+    resolved: &[String],
+    rel: &str,
+) -> anyhow::Result<Option<PathProviders>> {
+    let rel = rel.trim_start_matches("./").replace('\\', "/");
+    let mut found: Vec<(String, PathBuf, u64)> = Vec::new();
+    for folder in resolved {
+        for layer in crate::meta::mod_layers(mods_dir, folder) {
+            walk_path(&layer, &layer, folder, &rel, &mut found)?;
+        }
+    }
+    if found.is_empty() {
+        return Ok(None);
+    }
+    let duplicate = providers_all_equal(&found);
+    Ok(Some(PathProviders {
+        providers: found.iter().map(|(f, _, _)| f.clone()).collect(),
+        sizes: found.iter().map(|(_, _, s)| *s).collect(),
+        duplicate,
+        severity: severity_for(&rel),
+    }))
+}
+
+fn walk_path(
+    root: &Path,
+    dir: &Path,
+    folder: &str,
+    rel: &str,
+    found: &mut Vec<(String, PathBuf, u64)>,
+) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            walk_path(root, &path, folder, rel, found)?;
+        } else {
+            let r = path
+                .strip_prefix(root)
+                .map_err(|_| anyhow::anyhow!("strip_prefix falló"))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if r == rel {
+                found.push((folder.to_string(), path, entry.metadata()?.len()));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn walk(
     root: &Path,
     dir: &Path,

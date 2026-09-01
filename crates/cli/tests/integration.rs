@@ -516,3 +516,74 @@ fn list_sort_by_name() {
     assert_eq!(v[0]["folder"].as_str().unwrap(), "alpha");
     assert_eq!(v[1]["folder"].as_str().unwrap(), "beta");
 }
+
+#[test]
+fn group_enable_disables_members_and_deps() {
+    let t = TempDb::new("genable");
+    t.run_ok(&["ctl", "add", "m1"]);
+    t.run_ok(&["ctl", "add", "dep1"]);
+    t.run_ok(&["ctl", "dep", "add", "m1", "dep1"]);
+    t.run_ok(&["ctl", "group", "create", "G"]);
+    t.run_ok(&["ctl", "group", "add", "m1", "G"]);
+
+    t.run_ok(&["ctl", "group", "enable", "G"]);
+    let v = json(&t.run_ok(&["ctl", "list", "--json"]));
+    let states: Vec<(&str, bool)> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["folder"].as_str().unwrap(),
+                m["enabled"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert!(states.contains(&("m1", true)), "{states:?}");
+    assert!(
+        states.contains(&("dep1", true)),
+        "dep transitiva: {states:?}"
+    );
+
+    t.run_ok(&["ctl", "group", "disable", "G"]);
+    let v = json(&t.run_ok(&["ctl", "list", "--json"]));
+    let states: Vec<(&str, bool)> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["folder"].as_str().unwrap(),
+                m["enabled"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert!(states.contains(&("m1", false)), "{states:?}");
+    assert!(
+        states.contains(&("dep1", true)),
+        "disable no toca deps: {states:?}"
+    );
+}
+
+#[test]
+fn which_reports_providers() {
+    let t = TempDb::new("which");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "add", "mod_a"]);
+    t.run_ok(&["ctl", "add", "mod_b"]);
+    std::fs::create_dir_all(game_root.join("mods/mod_a/models")).unwrap();
+    std::fs::create_dir_all(game_root.join("mods/mod_b/models")).unwrap();
+    std::fs::write(game_root.join("mods/mod_a/models/x.dff"), "AAA").unwrap();
+    std::fs::write(game_root.join("mods/mod_b/models/x.dff"), "BBB").unwrap();
+    t.run_ok(&["ctl", "enable", "mod_a"]);
+    t.run_ok(&["ctl", "enable", "mod_b"]);
+
+    let out = t.run_ok(&["ctl", "which", "models/x.dff"]);
+    assert!(out.contains("gana 'mod_b'"), "salida: {out}");
+
+    let out = t.run_ok(&["ctl", "which", "data/gta.dat"]);
+    assert!(out.contains("viene de la base"), "salida: {out}");
+}

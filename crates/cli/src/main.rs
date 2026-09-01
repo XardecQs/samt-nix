@@ -180,6 +180,11 @@ pub enum CtlCommand {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
+    #[command(about = "Show which mods provide a game-relative path (and who wins)")]
+    Which {
+        #[arg(value_name = "PATH", help = "Game-relative path, e.g. models/x.dff")]
+        path: String,
+    },
     #[command(about = "Manage dependencies")]
     Dep {
         #[command(subcommand)]
@@ -272,6 +277,10 @@ pub enum GroupAction {
         #[arg(long, help = "Remove the global membership instead of the profile one")]
         global: bool,
     },
+    #[command(about = "Enable all mods of a group in the profile (with required deps)")]
+    Enable { group_ident: String },
+    #[command(about = "Disable all mods of a group in the profile")]
+    Disable { group_ident: String },
 }
 
 fn main() {

@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS mod_groups (
 
 CREATE INDEX IF NOT EXISTS idx_mod_groups_mod_id ON mod_groups(mod_id);
 CREATE INDEX IF NOT EXISTS idx_mod_groups_profile_id ON mod_groups(profile_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mod_groups_global ON mod_groups(group_id, mod_id) WHERE profile_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_mod_deps_mod_id ON mod_dependencies(mod_id);
 CREATE INDEX IF NOT EXISTS idx_mod_deps_dep_id ON mod_dependencies(dependency_id);
 CREATE INDEX IF NOT EXISTS idx_profile_mods_mod_id ON profile_mods(mod_id);

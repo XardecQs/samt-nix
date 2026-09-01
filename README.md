@@ -228,6 +228,18 @@ metadata). A membership (mod → group) can be:
 `ctl list --group <group>` shows the mods of that group in the current profile
 (global memberships plus the profile's own). `ctl info` lists the groups a mod
 belongs to. Deleting a group (`ctl group delete`) removes its memberships.
+`ctl group enable <group>` activates every member of the group in the profile
+(plus its required dependencies, transitively); `ctl group disable <group>`
+deactivates just the members.
+
+```bash
+gta-mo ctl group create Graphics
+gta-mo ctl group add d3d9 Graphics --global        # every profile
+gta-mo ctl group add essentials-pack Graphics      # only the active profile
+gta-mo ctl list --group Graphics                   # members of "Graphics" here
+gta-mo ctl group enable Graphics                   # enable them all (+ deps)
+gta-mo ctl group disable Graphics
+```
 
 ## Health and conflicts
 
@@ -243,6 +255,15 @@ belongs to. Deleting a group (`ctl group delete`) removes its memberships.
   where Mod Loader manages its own order) — and identical duplicates are
   reported separately (not as real conflicts). `ctl health --conflicts` runs
   both checks at once.
+- `ctl which <game-relative-path>` answers "who provides this file and who
+  wins" for a single path (base game, a single mod, or a conflict).
+
+```bash
+gta-mo ctl health                          # folder/manifest/dep problems
+gta-mo ctl health --conflicts              # plus a conflict scan
+gta-mo ctl conflicts                       # all file conflicts of the profile
+gta-mo ctl which models/player.dff         # who wins that file
+```
 
 ## CLI
 
@@ -276,8 +297,11 @@ gta-mo ctl group rename <id|slug|name> <new-name>
 gta-mo ctl group delete <id|slug|name> [--yes]
 gta-mo ctl group add <mod> <group> [--global]
 gta-mo ctl group remove <mod> <group> [--global]
+gta-mo ctl group enable <group> [--profile <name>]
+gta-mo ctl group disable <group> [--profile <name>]
 gta-mo ctl health [--conflicts]
 gta-mo ctl conflicts [--json]
+gta-mo ctl which <game-relative-path>
 gta-mo ctl export [<file>]
 gta-mo ctl import <file> [--force]
 ```

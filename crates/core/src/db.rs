@@ -596,7 +596,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -626,11 +626,30 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.pragma_update(None, "user_version", 5)?;
     }
 
+    if version < 6 {
+        migrate_to_v6(conn)?;
+        conn.pragma_update(None, "user_version", 6)?;
+    }
+
     debug_assert!(
         conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0)
             == SCHEMA_VERSION
     );
+    Ok(())
+}
+
+/// Deduplicates global group memberships (keeping the lowest rowid) and adds a
+/// partial unique index so the database itself rejects duplicate `(group, mod)`
+/// rows where `profile_id IS NULL`.
+fn migrate_to_v6(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "DELETE FROM mod_groups WHERE profile_id IS NULL AND rowid NOT IN (
+            SELECT MIN(rowid) FROM mod_groups WHERE profile_id IS NULL GROUP BY group_id, mod_id
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mod_groups_global
+            ON mod_groups(group_id, mod_id) WHERE profile_id IS NULL;",
+    )?;
     Ok(())
 }
 
@@ -1069,6 +1088,27 @@ pub fn set_mod_enabled(
          ON CONFLICT(profile_id, mod_id) DO UPDATE SET enabled = excluded.enabled",
         params![profile_id, mod_id, enabled as i64],
     )?;
+    Ok(())
+}
+
+/// Enables a mod in a profile together with its required dependencies
+/// (transitively). `visited` guards against dependency cycles.
+pub fn enable_mod_with_deps(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+    visited: &mut std::collections::HashSet<i64>,
+) -> anyhow::Result<()> {
+    if !visited.insert(mod_id) {
+        return Ok(());
+    }
+    set_mod_enabled(conn, profile_id, mod_id, true)?;
+    let deps = get_dependencies_of(conn, profile_id, mod_id)?;
+    for (d, required) in deps {
+        if required {
+            enable_mod_with_deps(conn, profile_id, d.id, visited)?;
+        }
+    }
     Ok(())
 }
 
@@ -2017,5 +2057,67 @@ mod tests {
             states.iter().map(|(p, e)| (p.name.as_str(), *e)).collect();
         assert!(by_name.contains(&("default", true)));
         assert!(by_name.contains(&("Second", false)));
+    }
+}
+
+#[cfg(test)]
+mod v6_tests {
+    use super::*;
+
+    #[test]
+    fn v6_migration_dedups_global_memberships() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mods (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_name TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                slug TEXT NOT NULL UNIQUE,
+                is_active INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                slug TEXT NOT NULL UNIQUE,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+            CREATE TABLE mod_groups (
+                group_id INTEGER NOT NULL,
+                mod_id INTEGER NOT NULL,
+                profile_id INTEGER,
+                PRIMARY KEY (group_id, mod_id, profile_id),
+                FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+                FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
+                FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+            );
+            INSERT INTO mods (folder_name, name) VALUES ('m1', 'M1');
+            INSERT INTO groups (name, slug) VALUES ('G', 'g');
+            INSERT INTO mod_groups (group_id, mod_id, profile_id) VALUES (1, 1, NULL);
+            INSERT INTO mod_groups (group_id, mod_id, profile_id) VALUES (1, 1, NULL);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mod_groups", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "la migración v6 deduplica las globales");
+
+        assert!(
+            conn.execute(
+                "INSERT INTO mod_groups (group_id, mod_id, profile_id) VALUES (1, 1, NULL)",
+                [],
+            )
+            .is_err(),
+            "el índice único parcial rechaza duplicados globales"
+        );
     }
 }
