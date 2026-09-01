@@ -67,31 +67,31 @@
       };
 
     mkGuiPackage = { pkgs }:
-      pkgs.buildGoModule {
+      pkgs.rustPlatform.buildRustPackage {
         pname = "gta-mo-gui";
         inherit version;
 
-        src = ./gui;
+        src = source;
 
-        vendorHash = "sha256-8eY85GmiZugF9HHRxGFFmnlwny5Agewt2tjPcC95RzI=";
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+        };
 
-        nativeBuildInputs = with pkgs; [ pkg-config makeWrapper ];
+        cargoBuildFlags = [ "-p" "gta-mo-gui" ];
+
+        doCheck = false;
+
+        nativeBuildInputs = with pkgs; [ pkg-config makeWrapper autoPatchelfHook ];
 
         buildInputs = with pkgs; [
-          glfw3
           libGL
           mesa
           libx11
-          libxcb
           libxcursor
           libxrandr
           libxi
-          libxinerama
-          libxext
-          libxxf86vm
           libxkbcommon
           wayland
-          wayland-protocols
         ];
 
         postInstall = ''
@@ -100,7 +100,7 @@
         '';
 
         meta = {
-          description = "GTA San Andreas mod organizer GUI (Fyne frontend for gta-mo)";
+          description = "GTA San Andreas mod organizer GUI (egui/eframe frontend for gta-mo)";
           mainProgram = "gta-mo-gui";
           license = nixpkgs.lib.licenses.gpl3Plus;
           platforms = supportedSystems;
@@ -162,7 +162,6 @@
           fuse-overlayfs
           umu-launcher
           sqlite
-          go
           gcc
           pkg-config
           glfw3

@@ -406,9 +406,10 @@ Steam overlay will not attach to the game window.
 
 ## GUI
 
-There is a lightweight Fyne (Go) frontend that drives the CLI — it never
-touches the database or the overlay directly, it only spawns `gta-mo` and
-parses the `--json` output.
+There is a **Rust (egui/eframe)** graphical frontend (`gta-mo-gui`) that uses
+the **hybrid** architecture: it reads directly from the SQLite database via
+`gta-mo-core` for instant listing, and spawns `gta-mo ctl ...` for every
+mutation and `gta-mo launch` (streaming its output to the Log tab).
 
 ```
 nix build .#gta-mo-gui
@@ -419,13 +420,13 @@ The binary finds `gta-mo` via `GTA_MO_BIN`, `PATH`, or the dev
 `target/debug/gta-mo`. The Nix package is wrapped so it always finds the
 installed `gta-mo`.
 
-Features: list of mods with enable/disable toggles, move up/down load order,
-profile selector plus create/use/rename/copy/delete, and a launch button
-(uses `--deps-enable`, so missing dependencies are auto-enabled instead of
-prompting).
+Features (milestone 1): mods list with search/tag/group filters and sorting,
+enable/disable and load-order controls, a rich detail panel (author, Mod ID,
+URL, tags, groups, mount, description, cover, components), profiles tab with
+create/use/rename/copy/delete, a launch button (`--deps-enable`), a streaming
+Log tab, and a status bar (active profile, enabled count, conflict count).
 
-To develop it: `nix develop` (the shell includes Go and the Fyne
-dependencies), then `cd gui && go run .`.
+To develop it: `nix develop`, then `cargo run -p gta-mo-gui`.
 
 ## How it works
 

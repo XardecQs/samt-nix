@@ -1,0 +1,18 @@
+[package]
+name = "gta-mo-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "gta-mo-gui"
+
+[[bin]]
+name = "gta-mo-gui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+eframe = "0.31"
+gta-mo-core = { path = "../core" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+which = "7"
