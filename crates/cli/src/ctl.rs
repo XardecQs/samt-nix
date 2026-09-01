@@ -2,8 +2,8 @@ use comfy_table::{presets, Cell, ContentArrangement, Table};
 use gta_mo_core::db;
 use gta_mo_core::log;
 use owo_colors::OwoColorize;
-use rusqlite::Connection;
-use serde::Serialize;
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 
 /// Renders a comfy-table with a clean preset, fitting the terminal width.
 fn render_table(headers: Vec<String>, rows: Vec<Vec<String>>) -> String {
@@ -91,6 +91,8 @@ pub fn run(
             author,
             id,
             search,
+            sort,
+            dir,
             json,
         } => {
             let filter = if *enabled {
@@ -108,7 +110,16 @@ pub fn run(
                 id: id.clone(),
                 search: search.clone(),
             };
-            cmd_list(conn, &profile, *verbose, filter, filters, *json)
+            cmd_list(
+                conn,
+                &profile,
+                *verbose,
+                filter,
+                filters,
+                sort.clone(),
+                dir.clone(),
+                *json,
+            )
         }
         super::CtlCommand::Add { folder, name } => cmd_add(conn, folder, name.as_deref()),
         super::CtlCommand::Init { folder } => cmd_init(conn, folder),
@@ -138,6 +149,11 @@ pub fn run(
             let profile = active()?;
             cmd_info(conn, &profile, ident, *verbose, *json)
         }
+        super::CtlCommand::Open { ident, url } => cmd_open(conn, ident, *url),
+        super::CtlCommand::Export { path } => cmd_export(conn, path.as_deref()),
+        super::CtlCommand::Import { path, force } => cmd_import(conn, path, *force),
+        super::CtlCommand::Health { conflicts } => cmd_health(conn, profile_ident, *conflicts),
+        super::CtlCommand::Conflicts { json } => cmd_conflicts(conn, profile_ident, *json),
         super::CtlCommand::Dep { action } => match action {
             super::DepAction::Add {
                 mod_ident,
@@ -420,6 +436,94 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
             ));
             Ok(())
         }
+        super::ProfileAction::Diff { a, b } => {
+            let pa = db::resolve_profile(conn, a)?;
+            let pb = db::resolve_profile(conn, b)?;
+            let state_of = |conn: &Connection,
+                            pid: i64|
+             -> anyhow::Result<
+                std::collections::HashMap<i64, (String, bool, i64)>,
+            > {
+                db::load_all_mods_for_profile(conn, pid)?
+                    .into_iter()
+                    .map(|m| Ok((m.id, (m.folder_name, m.enabled, m.load_order))))
+                    .collect()
+            };
+            let sa = state_of(conn, pa.id)?;
+            let sb = state_of(conn, pb.id)?;
+
+            let only_in_a: Vec<&(String, bool, i64)> = sa
+                .iter()
+                .filter(|(id, (_, en, _))| *en && !sb.get(id).map(|(_, e, _)| *e).unwrap_or(false))
+                .map(|(_, v)| v)
+                .collect();
+            let only_in_b: Vec<&(String, bool, i64)> = sb
+                .iter()
+                .filter(|(id, (_, en, _))| *en && !sa.get(id).map(|(_, e, _)| *e).unwrap_or(false))
+                .map(|(_, v)| v)
+                .collect();
+            let mut order_diff: Vec<(&String, &i64, &i64)> = Vec::new();
+            for (id, (folder, en, oa)) in &sa {
+                if !*en {
+                    continue;
+                }
+                if let Some((_, true, ob)) = sb.get(id) {
+                    if oa != ob {
+                        order_diff.push((folder, oa, ob));
+                    }
+                }
+            }
+            order_diff.sort();
+
+            if only_in_a.is_empty() && only_in_b.is_empty() && order_diff.is_empty() {
+                println!("Sin diferencias entre '{}' y '{}'.", pa.name, pb.name);
+                return Ok(());
+            }
+            if !only_in_a.is_empty() {
+                println!(
+                    "{}",
+                    render_table(
+                        vec!["Solo en".to_string(), "Mod".to_string()],
+                        only_in_a
+                            .iter()
+                            .map(|(f, _, _)| vec![pa.name.clone(), f.clone()])
+                            .collect(),
+                    )
+                );
+                println!();
+            }
+            if !only_in_b.is_empty() {
+                println!(
+                    "{}",
+                    render_table(
+                        vec!["Solo en".to_string(), "Mod".to_string()],
+                        only_in_b
+                            .iter()
+                            .map(|(f, _, _)| vec![pb.name.clone(), f.clone()])
+                            .collect(),
+                    )
+                );
+                println!();
+            }
+            if !order_diff.is_empty() {
+                println!();
+                println!(
+                    "{}",
+                    render_table(
+                        vec![
+                            "Mod".to_string(),
+                            format!("{} (orden)", pa.name),
+                            format!("{} (orden)", pb.name)
+                        ],
+                        order_diff
+                            .iter()
+                            .map(|(f, a, b)| vec![f.to_string(), a.to_string(), b.to_string()])
+                            .collect(),
+                    )
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -662,12 +766,15 @@ fn mod_matches_filters(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_list(
     conn: &Connection,
     profile: &db::Profile,
     verbose: bool,
     filter: Option<&str>,
     filters: ListFilters,
+    sort: Option<String>,
+    dir: Option<String>,
     json: bool,
 ) -> anyhow::Result<()> {
     let mods_dir = mods_dir_from_config();
@@ -682,7 +789,7 @@ fn cmd_list(
         None => std::collections::HashSet::new(),
     };
 
-    let mods = db::load_all_mods_for_profile(conn, profile.id)?
+    let mut mods = db::load_all_mods_for_profile(conn, profile.id)?
         .into_iter()
         .filter(|m| match filter {
             Some("enabled") => m.enabled,
@@ -691,6 +798,41 @@ fn cmd_list(
         })
         .filter(|m| mod_matches_filters(conn, mods_dir.as_deref(), m, &filters, &group_ids))
         .collect::<Vec<_>>();
+
+    if let Some(field) = &sort {
+        let desc = dir.as_deref() == Some("desc") || (field == "order" && dir.is_none());
+        let mut decorated: Vec<(db::ModEntry, String, db::ModMetaCache)> = mods
+            .iter()
+            .map(|m| {
+                let (name, meta) =
+                    display_meta(conn, mods_dir.as_deref(), m.id, &m.folder_name, &m.name);
+                (m.clone(), name, meta)
+            })
+            .collect();
+        let key = |m: &db::ModEntry, name: &str, meta: &db::ModMetaCache| -> String {
+            match field.as_str() {
+                "name" => name.to_lowercase(),
+                "folder" => m.folder_name.to_lowercase(),
+                "author" => meta.author.join(" ").to_lowercase(),
+                "order" => format!("{:010}", m.load_order),
+                "mod_id" => meta.mod_id.clone().unwrap_or_default().to_lowercase(),
+                "version" => meta.version.clone().unwrap_or_default(),
+                "status" => format!("{}", m.enabled as u8),
+                _ => String::new(),
+            }
+        };
+        decorated.sort_by(|a, b| {
+            let ka = key(&a.0, &a.1, &a.2);
+            let kb = key(&b.0, &b.1, &b.2);
+            let ord = ka.cmp(&kb);
+            if desc {
+                ord.reverse()
+            } else {
+                ord
+            }
+        });
+        mods = decorated.into_iter().map(|(m, _, _)| m).collect();
+    }
 
     if json {
         let mut out = Vec::new();
@@ -1441,6 +1583,38 @@ fn cmd_info(
     Ok(())
 }
 
+fn cmd_open(conn: &Connection, ident: &str, url: bool) -> anyhow::Result<()> {
+    let m = resolve_mod(conn, ident)?;
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+
+    let target = if url {
+        let meta =
+            gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder_name)?.unwrap_or_default();
+        match meta.url {
+            Some(u) => u,
+            None => anyhow::bail!("El mod '{}' no tiene URL en su mod.toml.", m.folder_name),
+        }
+    } else {
+        let dir = paths.mods_dir.join(&m.folder_name);
+        if !dir.exists() {
+            anyhow::bail!("La carpeta del mod no existe: {}", dir.display());
+        }
+        dir.display().to_string()
+    };
+
+    let status = std::process::Command::new("xdg-open")
+        .arg(&target)
+        .status()
+        .map_err(|e| anyhow::anyhow!("No se pudo ejecutar xdg-open: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("xdg-open terminó con error: {status}");
+    }
+    log::info(format!("Abriendo '{}'...", target));
+    Ok(())
+}
+
 fn cmd_dep_add(
     conn: &Connection,
     mod_ident: &str,
@@ -1512,5 +1686,466 @@ fn dep_writeback(
         optional,
         add,
     )?;
+    Ok(())
+}
+
+// ---------- Export / import ----------
+
+#[derive(Serialize, Deserialize)]
+struct ExportProfile {
+    name: String,
+    slug: String,
+    is_active: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportMod {
+    folder: String,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mod_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    author: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cover: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mount: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    guides: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    components: Vec<gta_mo_core::meta::MetaComponent>,
+}
+
+impl ExportMod {
+    fn from_identity(m: &gta_mo_core::db::ModIdentity, cache: &db::ModMetaCache) -> Self {
+        Self {
+            folder: m.folder_name.clone(),
+            name: m.name.clone(),
+            mod_id: cache.mod_id.clone(),
+            version: cache.version.clone(),
+            author: cache.author.clone(),
+            url: cache.url.clone(),
+            description: cache.description.clone(),
+            cover: cache.cover.clone(),
+            mount: cache.mount.clone(),
+            guides: cache.guides.clone(),
+            tags: cache.tags.clone(),
+            components: cache.components.clone(),
+        }
+    }
+
+    fn to_cache(&self) -> db::ModMetaCache {
+        db::ModMetaCache {
+            mod_id: self.mod_id.clone(),
+            version: self.version.clone(),
+            author: self.author.clone(),
+            url: self.url.clone(),
+            description: self.description.clone(),
+            cover: self.cover.clone(),
+            mount: self.mount.clone(),
+            guides: self.guides.clone(),
+            tags: self.tags.clone(),
+            components: self.components.clone(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportProfileMod {
+    profile: String,
+    folder: String,
+    enabled: bool,
+    load_order: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportDep {
+    folder: String,
+    dep: String,
+    required: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportGroup {
+    name: String,
+    slug: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportModGroup {
+    group: String,
+    folder: String,
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ExportFile {
+    profiles: Vec<ExportProfile>,
+    mods: Vec<ExportMod>,
+    profile_mods: Vec<ExportProfileMod>,
+    dependencies: Vec<ExportDep>,
+    groups: Vec<ExportGroup>,
+    mod_groups: Vec<ExportModGroup>,
+}
+
+fn cmd_export(conn: &Connection, path: Option<&str>) -> anyhow::Result<()> {
+    let profiles = db::list_profiles(conn)?;
+    let profiles_export: Vec<ExportProfile> = profiles
+        .iter()
+        .map(|p| ExportProfile {
+            name: p.name.clone(),
+            slug: p.slug.clone(),
+            is_active: p.is_active,
+        })
+        .collect();
+
+    let mods = db::load_all_mods(conn)?;
+    let mods_export: Vec<ExportMod> = mods
+        .iter()
+        .map(|m| {
+            let cache = db::load_mod_meta(conn, m.id).unwrap_or_default();
+            ExportMod::from_identity(m, &cache)
+        })
+        .collect();
+
+    let mut profile_mods_export = Vec::new();
+    for p in &profiles {
+        for e in db::load_all_mods_for_profile(conn, p.id)? {
+            profile_mods_export.push(ExportProfileMod {
+                profile: p.slug.clone(),
+                folder: e.folder_name,
+                enabled: e.enabled,
+                load_order: e.load_order,
+            });
+        }
+    }
+
+    let dependencies: Vec<ExportDep> = db::export_dependencies(conn)?
+        .into_iter()
+        .map(|(folder, dep, required)| ExportDep {
+            folder,
+            dep,
+            required,
+        })
+        .collect();
+    let groups: Vec<ExportGroup> = db::list_groups(conn)?
+        .into_iter()
+        .map(|g| ExportGroup {
+            name: g.name,
+            slug: g.slug,
+        })
+        .collect();
+    let mod_groups: Vec<ExportModGroup> = db::export_mod_groups(conn)?
+        .into_iter()
+        .map(|(group, folder, profile)| ExportModGroup {
+            group,
+            folder,
+            profile,
+        })
+        .collect();
+
+    let out = ExportFile {
+        profiles: profiles_export,
+        mods: mods_export,
+        profile_mods: profile_mods_export,
+        dependencies,
+        groups,
+        mod_groups,
+    };
+    let json = serde_json::to_string_pretty(&out)?;
+    match path {
+        Some(p) => {
+            std::fs::write(p, json)?;
+            log::info(format!("Estado exportado a '{}'.", p));
+        }
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
+fn cmd_import(conn: &Connection, path: &str, force: bool) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(path)?;
+    let data: ExportFile = serde_json::from_str(&content)?;
+
+    if !force {
+        eprintln!();
+        log::warn("Esto reemplazará el estado actual de la base de datos con el backup.");
+        eprintln!();
+        eprint!("Continuar? [s/N]: ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let confirm = input.trim().to_lowercase();
+        if confirm != "s" && confirm != "si" {
+            log::info("Cancelado.");
+            return Ok(());
+        }
+    }
+
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    conn.execute("DELETE FROM mod_groups", [])?;
+    conn.execute("DELETE FROM groups", [])?;
+    conn.execute("DELETE FROM mod_dependencies", [])?;
+    conn.execute("DELETE FROM profile_mods", [])?;
+    conn.execute("DELETE FROM mods", [])?;
+    conn.execute("DELETE FROM profiles", [])?;
+    let _ = conn.execute("DELETE FROM sqlite_sequence", []);
+
+    let mut profile_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut active_id: Option<i64> = None;
+    for p in &data.profiles {
+        let id = db::insert_profile(conn, &p.name, &p.slug, p.is_active)?;
+        if p.is_active {
+            active_id = Some(id);
+        }
+        profile_ids.insert(p.slug.clone(), id);
+    }
+    if profile_ids.is_empty() {
+        let id = db::insert_profile(conn, "default", "default", true)?;
+        active_id = Some(id);
+    }
+    let first_active = active_id.or_else(|| profile_ids.values().next().copied());
+    if let Some(id) = first_active {
+        conn.execute(
+            "UPDATE profiles SET is_active = 1 WHERE id = ?1",
+            params![id],
+        )?;
+    }
+
+    let mut mod_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for m in &data.mods {
+        let id = db::insert_mod(conn, &m.folder, &m.name)?;
+        let cache = m.to_cache();
+        db::set_mod_meta_cache(conn, id, &cache)?;
+        mod_ids.insert(m.folder.clone(), id);
+    }
+
+    for pm in &data.profile_mods {
+        let (Some(pid), Some(mid)) = (profile_ids.get(&pm.profile), mod_ids.get(&pm.folder)) else {
+            continue;
+        };
+        conn.execute(
+            "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![pid, mid, pm.enabled as i64, pm.load_order],
+        )?;
+    }
+
+    for d in &data.dependencies {
+        let (Some(mid), Some(did)) = (mod_ids.get(&d.folder), mod_ids.get(&d.dep)) else {
+            continue;
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO mod_dependencies (mod_id, dependency_id, required)
+             VALUES (?1, ?2, ?3)",
+            params![mid, did, d.required as i64],
+        )?;
+    }
+
+    let mut group_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for g in &data.groups {
+        let id = db::insert_group(conn, &g.name, &g.slug)?;
+        group_ids.insert(g.slug.clone(), id);
+    }
+    for mg in &data.mod_groups {
+        let (Some(gid), Some(mid)) = (group_ids.get(&mg.group), mod_ids.get(&mg.folder)) else {
+            continue;
+        };
+        let pid = mg.profile.as_deref().and_then(|s| profile_ids.get(s));
+        conn.execute(
+            "INSERT INTO mod_groups (group_id, mod_id, profile_id) VALUES (?1, ?2, ?3)",
+            params![gid, mid, pid],
+        )?;
+    }
+
+    log::info("Importación completada.");
+    Ok(())
+}
+
+// ---------- Health / conflicts ----------
+
+fn resolve_enabled_order(conn: &Connection, profile: &db::Profile) -> anyhow::Result<Vec<String>> {
+    let all_mods = db::load_all_mods_for_profile(conn, profile.id)?;
+    let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
+    let deps = db::load_dependencies(conn)?;
+    let enabled_ids = db::load_enabled_mod_ids_for_profile(conn, profile.id)?;
+    let mut graph = gta_mo_core::resolver::DepGraph::new(mods_map, deps, enabled_ids);
+    graph.prompt = gta_mo_core::resolver::DepPrompt::Ignore;
+    let _ = graph.validate_dependencies();
+    let _ = graph.detect_cycles();
+    Ok(graph.resolve())
+}
+
+fn cmd_conflicts(conn: &Connection, profile_ident: Option<&str>, json: bool) -> anyhow::Result<()> {
+    let profile = resolve_active_profile(conn, profile_ident)?;
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+    let resolved = resolve_enabled_order(conn, &profile)?;
+    let conflicts = gta_mo_core::conflicts::scan_conflicts(&paths.mods_dir, &resolved)?;
+
+    if json {
+        #[derive(Serialize)]
+        struct ConflictJson {
+            path: String,
+            providers: Vec<String>,
+            duplicate: bool,
+            severity: String,
+        }
+        let out: Vec<ConflictJson> = conflicts
+            .iter()
+            .map(|c| ConflictJson {
+                path: c.path.clone(),
+                providers: c.providers.clone(),
+                duplicate: c.duplicate,
+                severity: format!("{:?}", c.severity).to_lowercase(),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let real: Vec<&gta_mo_core::conflicts::Conflict> =
+        conflicts.iter().filter(|c| !c.duplicate).collect();
+    let dups = conflicts.iter().filter(|c| c.duplicate).count();
+    if real.is_empty() {
+        println!(
+            "No hay conflictos de archivos entre los mods activos del perfil '{}'.",
+            profile.name
+        );
+        if dups > 0 {
+            println!("({dups} duplicado(s) idéntico(s) ignorados)");
+        }
+        return Ok(());
+    }
+
+    let rows: Vec<Vec<String>> = real
+        .iter()
+        .map(|c| {
+            let severity = match c.severity {
+                gta_mo_core::conflicts::Severity::High => "ALTO".red().to_string(),
+                gta_mo_core::conflicts::Severity::Medium => "MEDIO".yellow().to_string(),
+                gta_mo_core::conflicts::Severity::Info => "INFO".cyan().to_string(),
+            };
+            vec![c.path.clone(), severity, c.providers.join(" -> ")]
+        })
+        .collect();
+    println!(
+        "{}",
+        render_table(
+            vec![
+                "Archivo".to_string(),
+                "Gravedad".to_string(),
+                "Proveedores (el primero gana)".to_string(),
+            ],
+            rows,
+        )
+    );
+    if dups > 0 {
+        println!("\n({dups} duplicado(s) idéntico(s) ignorados)");
+    }
+    Ok(())
+}
+
+fn cmd_health(
+    conn: &Connection,
+    profile_ident: Option<&str>,
+    conflicts: bool,
+) -> anyhow::Result<()> {
+    let profile = resolve_active_profile(conn, profile_ident)?;
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut folders: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+
+    for m in db::load_all_mods(conn)? {
+        let dir = paths.mods_dir.join(&m.folder_name);
+        folders.insert(m.id, m.folder_name.clone());
+        if !dir.is_dir() {
+            errors.push(format!("{}: carpeta no existe en disco", m.folder_name));
+            continue;
+        }
+        match gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder_name) {
+            Ok(_) => {}
+            Err(e) => warnings.push(format!("{}: {e}", m.folder_name)),
+        }
+        if let Ok(Some(meta)) = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder_name) {
+            if let Some(mount) = meta.mount {
+                for entry in mount {
+                    if !gta_mo_core::meta::valid_mount_entry(&entry) {
+                        warnings.push(format!("{}: mount inválido '{entry}'", m.folder_name));
+                    } else if !dir.join(&entry).is_dir() {
+                        warnings.push(format!("{}: mount '{}' no existe", m.folder_name, entry));
+                    }
+                }
+            }
+        }
+    }
+
+    let enabled_ids = db::load_enabled_mod_ids_for_profile(conn, profile.id)?;
+    let enabled_set: std::collections::HashSet<i64> = enabled_ids.iter().copied().collect();
+    let deps = db::load_dependencies(conn)?;
+    for mid in &enabled_ids {
+        if let Some(refs) = deps.get(mid) {
+            for r in refs {
+                let name = folders.get(mid).cloned().unwrap_or_default();
+                match folders.get(&r.id) {
+                    Some(dep_folder) => {
+                        if r.required && !enabled_set.contains(&r.id) {
+                            warnings.push(format!(
+                                "{name}: dependencia requerida desactivada '{dep_folder}'"
+                            ));
+                        }
+                    }
+                    None => errors.push(format!(
+                        "{name}: dependencia no resuelta (id={} no instalado)",
+                        r.id
+                    )),
+                }
+            }
+        }
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    for e in &errors {
+        lines.push(format!("[X] {e}"));
+    }
+    for w in &warnings {
+        lines.push(format!("[!] {w}"));
+    }
+
+    if errors.is_empty() && warnings.is_empty() {
+        println!(
+            "Estado saludable: sin problemas en los mods del perfil '{}'.",
+            profile.name
+        );
+    } else {
+        for l in &lines {
+            println!("{l}");
+        }
+        println!();
+        println!(
+            "Resumen: {} error(es), {} advertencia(s)",
+            errors.len(),
+            warnings.len()
+        );
+    }
+
+    if conflicts {
+        println!();
+        cmd_conflicts(conn, profile_ident, false)?;
+    }
     Ok(())
 }

@@ -104,6 +104,12 @@ pub enum CtlCommand {
         #[arg(long, help = "Search name, folder, author, id, description and tags")]
         search: Option<String>,
 
+        #[arg(long, value_parser = ["name", "folder", "author", "order", "mod_id", "version", "status"], help = "Sort by field (default: priority order)")]
+        sort: Option<String>,
+
+        #[arg(long, value_parser = ["asc", "desc"], help = "Sort direction (default asc, desc for --sort order)")]
+        dir: Option<String>,
+
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
@@ -146,6 +152,34 @@ pub enum CtlCommand {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
+    #[command(about = "Open the mod folder (or its URL with --url)")]
+    Open {
+        ident: String,
+        #[arg(long, help = "Open the mod's URL from mod.toml instead of its folder")]
+        url: bool,
+    },
+    #[command(about = "Export the whole state to a JSON file (or stdout)")]
+    Export {
+        #[arg(value_name = "FILE", help = "Output file (defaults to stdout)")]
+        path: Option<String>,
+    },
+    #[command(about = "Import a state from a JSON export (destructive)")]
+    Import {
+        #[arg(value_name = "FILE")]
+        path: String,
+        #[arg(long, help = "Skip confirmation")]
+        force: bool,
+    },
+    #[command(about = "Check the health of the mod setup (folders, deps, manifests)")]
+    Health {
+        #[arg(long, help = "Also scan for file conflicts between enabled mods")]
+        conflicts: bool,
+    },
+    #[command(about = "Report file conflicts between the enabled mods of the profile")]
+    Conflicts {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
     #[command(about = "Manage dependencies")]
     Dep {
         #[command(subcommand)]
@@ -184,6 +218,8 @@ pub enum ProfileAction {
     Rename { ident: String, new_name: String },
     #[command(about = "Copy a profile's mod states to a new profile")]
     Copy { source: String, new_name: String },
+    #[command(about = "Diff the enabled/order state of two profiles")]
+    Diff { a: String, b: String },
 }
 
 #[derive(Subcommand)]

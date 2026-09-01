@@ -216,12 +216,42 @@ Essentials_Pack/
   Covers and guides stay as files in the mod folder; rendering them in the GUI
   is planned for a future GUI rewrite.
 
+## Groups
+
+Groups are user-curated collections of mods (unlike tags, which are manifest
+metadata). A membership (mod → group) can be:
+
+- **Global** (`ctl group add <mod> <group> --global`): applies in every profile.
+- **Per-profile** (`ctl group add <mod> <group>` without `--global`): only in
+  the active profile (or `--profile`).
+
+`ctl list --group <group>` shows the mods of that group in the current profile
+(global memberships plus the profile's own). `ctl info` lists the groups a mod
+belongs to. Deleting a group (`ctl group delete`) removes its memberships.
+
+## Health and conflicts
+
+- `ctl health [--profile <p>]` checks the profile: mods whose folder is missing
+  on disk, malformed `mod.toml` files, `mount` entries pointing to non-existent
+  directories, and required dependencies that are disabled or unresolved.
+- `ctl conflicts [--profile <p>] [--json]` scans the enabled mods of a profile
+  (in overlay priority order) and reports **file conflicts**: the same
+  game-relative path provided by more than one mod with different content. The
+  first provider in priority order is the winner (the others are silently
+  overridden by the overlay). Overlaps are classified by severity — high
+  (executables), medium (data/textures) and info (paths under `modloader/`,
+  where Mod Loader manages its own order) — and identical duplicates are
+  reported separately (not as real conflicts). `ctl health --conflicts` runs
+  both checks at once.
+
 ## CLI
 
 ```
 gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [--no-auto-discover]
 gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/mount namespace (for Steam)
 gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
+              [--tag <tag>] [--group <group>] [--author <author>] [--id <id>]
+              [--search <text>] [--sort name|folder|author|order|mod_id|version|status] [--dir asc|desc]
 gta-mo ctl add <folder> [--name <name>]
 gta-mo ctl init <folder>                    # create folder + mod.toml template and register the mod
 gta-mo ctl remove <id|folder>
@@ -229,7 +259,8 @@ gta-mo ctl enable <id|folder> [--profile <name>]
 gta-mo ctl disable <id|folder> [--profile <name>]
 gta-mo ctl order <id|folder> <n> [--profile <name>]
 gta-mo ctl rename <id|folder> <name> [--folder]
-gta-mo ctl info <id|folder> [--json] [--profile <name>]
+gta-mo ctl info <id|folder> [-v] [--json] [--profile <name>]
+gta-mo ctl open <id|folder> [--url]
 gta-mo ctl dep add <mod> <dependency> [--optional]
 gta-mo ctl dep remove <mod> <dependency>
 gta-mo ctl profile list [--json]
@@ -238,6 +269,17 @@ gta-mo ctl profile delete <name>
 gta-mo ctl profile use <name>
 gta-mo ctl profile rename <old> <new>
 gta-mo ctl profile copy <source> <new-name>
+gta-mo ctl profile diff <a> <b>
+gta-mo ctl group list [--json]
+gta-mo ctl group create <name>
+gta-mo ctl group rename <id|slug|name> <new-name>
+gta-mo ctl group delete <id|slug|name> [--yes]
+gta-mo ctl group add <mod> <group> [--global]
+gta-mo ctl group remove <mod> <group> [--global]
+gta-mo ctl health [--conflicts]
+gta-mo ctl conflicts [--json]
+gta-mo ctl export [<file>]
+gta-mo ctl import <file> [--force]
 ```
 
 - `--profile <name>` (global flag, also `--profile <slug|id>`): selects which
@@ -258,6 +300,21 @@ gta-mo ctl profile copy <source> <new-name>
 - `dep add --optional`: marks a dependency as optional/recommended. A missing
   or disabled optional dependency only prints a warning at launch; it does
   not block the game nor get forced on.
+- `list` filters (combinable with AND): `--tag`, `--group` (global memberships
+  plus the profile's own), `--author`, `--id` (stable `author:slug` or folder),
+  and `--search` (case-insensitive over name, folder, authors, id, description
+  and tags). `--sort` orders by a field (`--dir asc|desc`); without it the list
+  keeps the load-order priority.
+- `info` shows a compact summary by default; `-v` prints the full output
+  (components, guides, dependents, profiles as tables). `open` opens the mod
+  folder (or its `--url`) with `xdg-open`.
+- `health` checks folders, manifests, mount entries and dependencies of the
+  profile; `--conflicts` also scans for file conflicts. `conflicts` reports
+  paths provided by more than one enabled mod (the first provider in priority
+  wins), grouping by severity and ignoring identical duplicates.
+- `export`/`import` dump and restore the whole state (mods, metadata, profiles,
+  dependencies, groups) as JSON. Import replaces the database (asks for
+  confirmation unless `--force`).
 
 Shell completions are installed automatically when using the Home Manager module. To generate them manually:
 

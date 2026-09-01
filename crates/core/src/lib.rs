@@ -1,4 +1,5 @@
 pub mod config;
+pub mod conflicts;
 pub mod db;
 pub mod launcher;
 pub mod log;

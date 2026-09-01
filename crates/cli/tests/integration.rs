@@ -418,3 +418,101 @@ fn list_filters_by_tag_author_and_search() {
     assert_eq!(v.as_array().unwrap().len(), 1);
     assert_eq!(v[0]["folder"].as_str().unwrap(), "beta_mod");
 }
+
+#[test]
+fn export_import_roundtrip() {
+    let t = TempDb::new("export");
+    t.run_ok(&["ctl", "add", "m1"]);
+    t.run_ok(&["ctl", "enable", "m1"]);
+    t.run_ok(&["ctl", "group", "create", "G"]);
+    t.run_ok(&["ctl", "group", "add", "m1", "G", "--global"]);
+    let export_file = t.dir.join("state.json");
+    t.run_ok(&["ctl", "export", export_file.to_str().unwrap()]);
+
+    let t2 = TempDb::new("export2");
+    t2.run_ok(&["ctl", "import", export_file.to_str().unwrap(), "--force"]);
+    let v = json(&t2.run_ok(&["ctl", "list", "--json"]));
+    assert_eq!(v[0]["folder"].as_str().unwrap(), "m1");
+    assert!(v[0]["enabled"].as_bool().unwrap());
+    let v = json(&t2.run_ok(&["ctl", "group", "list", "--json"]));
+    assert_eq!(v[0]["name"].as_str().unwrap(), "G");
+}
+
+#[test]
+fn conflicts_detected_between_enabled_mods() {
+    let t = TempDb::new("conflict");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "add", "mod_a"]);
+    t.run_ok(&["ctl", "add", "mod_b"]);
+    std::fs::create_dir_all(game_root.join("mods/mod_a")).unwrap();
+    std::fs::create_dir_all(game_root.join("mods/mod_b")).unwrap();
+    std::fs::create_dir_all(game_root.join("mods/mod_a/models")).unwrap();
+    std::fs::create_dir_all(game_root.join("mods/mod_b/models")).unwrap();
+    std::fs::write(game_root.join("mods/mod_a/models/x.dff"), "AAA").unwrap();
+    std::fs::write(game_root.join("mods/mod_b/models/x.dff"), "BBB").unwrap();
+    t.run_ok(&["ctl", "enable", "mod_a"]);
+    t.run_ok(&["ctl", "enable", "mod_b"]);
+
+    let v = json(&t.run_ok(&["ctl", "conflicts", "--json"]));
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["path"].as_str().unwrap(), "models/x.dff");
+    assert!(!v[0]["duplicate"].as_bool().unwrap());
+    // higher load_order (mod_b) wins
+    assert_eq!(v[0]["providers"][0].as_str().unwrap(), "mod_b");
+
+    // identical files are not real conflicts
+    std::fs::write(game_root.join("mods/mod_a/models/x.dff"), "SAME").unwrap();
+    std::fs::write(game_root.join("mods/mod_b/models/x.dff"), "SAME").unwrap();
+    let v = json(&t.run_ok(&["ctl", "conflicts", "--json"]));
+    assert!(v[0]["duplicate"].as_bool().unwrap());
+}
+
+#[test]
+fn health_reports_missing_folder_and_disabled_dep() {
+    let t = TempDb::new("health");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "add", "ghost"]);
+    let out = t.run_ok(&["ctl", "health"]);
+    assert!(out.contains("carpeta no existe"), "salida: {out}");
+
+    t.run_ok(&["ctl", "add", "a"]);
+    t.run_ok(&["ctl", "add", "b"]);
+    t.run_ok(&["ctl", "enable", "a"]);
+    std::fs::create_dir_all(game_root.join("mods/a")).unwrap();
+    std::fs::create_dir_all(game_root.join("mods/b")).unwrap();
+    t.run_ok(&["ctl", "dep", "add", "a", "b"]);
+    let out = t.run_ok(&["ctl", "health"]);
+    assert!(
+        out.contains("dependencia requerida desactivada"),
+        "salida: {out}"
+    );
+}
+
+#[test]
+fn profile_diff_reports_differences() {
+    let t = TempDb::new("diff");
+    t.run_ok(&["ctl", "add", "m1"]);
+    t.run_ok(&["ctl", "add", "m2"]);
+    t.run_ok(&["ctl", "enable", "m1"]);
+    t.run_ok(&["ctl", "enable", "m2"]);
+    t.run_ok(&["ctl", "profile", "create", "Second"]);
+    t.run_ok(&["--profile", "second", "ctl", "enable", "m1"]);
+    let out = t.run_ok(&["ctl", "profile", "diff", "default", "second"]);
+    assert!(out.contains("m2"), "m2 solo en default; salida: {out}");
+}
+
+#[test]
+fn list_sort_by_name() {
+    let t = TempDb::new("sort");
+    t.run_ok(&["ctl", "add", "beta"]);
+    t.run_ok(&["ctl", "add", "alpha"]);
+    let v = json(&t.run_ok(&["ctl", "list", "--sort", "name", "--json"]));
+    assert_eq!(v[0]["folder"].as_str().unwrap(), "alpha");
+    assert_eq!(v[1]["folder"].as_str().unwrap(), "beta");
+}

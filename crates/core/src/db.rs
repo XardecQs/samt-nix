@@ -312,6 +312,92 @@ pub fn mod_enabled_in_profiles(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+// ---------- Export / import helpers ----------
+
+/// Inserts a profile with an explicit slug (used by `ctl import`). Callers
+/// must ensure the slug is free.
+pub fn insert_profile(
+    conn: &Connection,
+    name: &str,
+    slug: &str,
+    is_active: bool,
+) -> anyhow::Result<i64> {
+    conn.execute(
+        "INSERT INTO profiles (name, slug, is_active) VALUES (?1, ?2, ?3)",
+        params![name, slug, is_active as i64],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Inserts a mod without touching profile states (used by `ctl import`).
+pub fn insert_mod(conn: &Connection, folder: &str, name: &str) -> anyhow::Result<i64> {
+    conn.execute(
+        "INSERT INTO mods (folder_name, name) VALUES (?1, ?2)",
+        params![folder, name],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Inserts a group with an explicit slug (used by `ctl import`).
+pub fn insert_group(conn: &Connection, name: &str, slug: &str) -> anyhow::Result<i64> {
+    conn.execute(
+        "INSERT INTO groups (name, slug) VALUES (?1, ?2)",
+        params![name, slug],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Writes a metadata cache entry directly (used by `ctl import`).
+pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
+         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10 WHERE id = ?11",
+        params![
+            cache.mod_id,
+            cache.version,
+            json_vec(&cache.author),
+            cache.url,
+            cache.description,
+            cache.cover,
+            json_vec(&cache.mount),
+            json_vec(&cache.guides),
+            json_vec(&cache.tags),
+            json_components(&cache.components),
+            id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// (mod folder, dependency folder, required) for the whole dependency graph.
+pub fn export_dependencies(conn: &Connection) -> anyhow::Result<Vec<(String, String, bool)>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.folder_name, d.folder_name, md.required
+         FROM mod_dependencies md
+         JOIN mods m ON m.id = md.mod_id
+         JOIN mods d ON d.id = md.dependency_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// (group slug, mod folder, optional profile slug) for every membership.
+pub fn export_mod_groups(
+    conn: &Connection,
+) -> anyhow::Result<Vec<(String, String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT g.slug, m.folder_name, p.slug
+         FROM mod_groups mg
+         JOIN groups g ON g.id = mg.group_id
+         JOIN mods m ON m.id = mg.mod_id
+         LEFT JOIN profiles p ON p.id = mg.profile_id",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 // ---------- Groups ----------
 
 fn row_to_group(row: &rusqlite::Row) -> rusqlite::Result<Group> {
