@@ -206,7 +206,7 @@ impl DepGraph {
             eprint!("Elige una opción [1-3]: ");
 
             let mut input = String::new();
-            std::io::Write::flush(&mut std::io::stdout()).ok();
+            std::io::Write::flush(&mut std::io::stderr()).ok();
             std::io::stdin().read_line(&mut input).ok();
             let choice = input.trim().to_string();
             self.apply_dep_choice(&disabled_deps, choice.as_str())?;

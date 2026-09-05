@@ -622,3 +622,31 @@ fn which_reports_providers() {
     let out = t.run_ok(&["ctl", "which", "data/gta.dat"]);
     assert!(out.contains("viene de la base"), "salida: {out}");
 }
+
+#[test]
+fn list_distinguishes_empty_from_filtered_out() {
+    let t = TempDb::new("emptymsgs");
+
+    // sin mods
+    let out = t.run_ok(&["ctl", "list"]);
+    assert!(out.contains("No hay mods registrados"), "salida: {out}");
+
+    // con mods pero filtrados todos
+    t.run_ok(&["ctl", "add", "m1"]);
+    let out = t.run_ok(&["ctl", "list", "--tag", "inexistente"]);
+    assert!(
+        !out.contains("No hay mods registrados"),
+        "no debe decir que no hay mods: {out}"
+    );
+    assert!(out.contains("Ningún mod coincide"), "salida: {out}");
+}
+
+#[test]
+fn negative_load_order_is_parseable() {
+    let t = TempDb::new("negorder");
+    // ident inexistente: falla en dominio (exit 1), pero clap debe aceptar -5
+    // como número negativo (sin allow_negative_numbers sería exit 2).
+    let out = t.run(&["ctl", "order", "nope", "-5"]);
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(1), "clap no debe rechazar -5");
+}

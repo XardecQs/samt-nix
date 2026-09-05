@@ -1,9 +1,26 @@
 use comfy_table::{presets, Cell, ContentArrangement, Table};
+use gta_mo_core::color;
 use gta_mo_core::db;
 use gta_mo_core::log;
 use owo_colors::OwoColorize;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+
+/// Strip ANSI codes from stdout output when it is not a color-capable terminal
+/// (pipe/redirect/`NO_COLOR`), so `gta-mo ctl ... | grep` stays clean.
+macro_rules! println {
+    () => {
+        ::std::println!()
+    };
+    ($($arg:tt)*) => {{
+        let msg = format!($($arg)*);
+        if color::stdout_enabled() {
+            ::std::println!("{}", msg);
+        } else {
+            ::std::println!("{}", color::strip_ansi(&msg));
+        }
+    }};
+}
 
 /// Renders a comfy-table with a clean preset, fitting the terminal width.
 fn render_table(headers: Vec<String>, rows: Vec<Vec<String>>) -> String {
@@ -363,15 +380,7 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
                 return Ok(());
             }
 
-            println!(
-                "{:4} {:6} {:24} {:30} {:5} {:5}",
-                "ID".bold(),
-                "ACTIVO".bold(),
-                "NOMBRE".bold(),
-                "SLUG".bold(),
-                "MODS".bold(),
-                "ON".bold()
-            );
+            let mut rows = Vec::new();
             for p in &profiles {
                 let (total, enabled) = db::profile_mod_count(conn, p.id)?;
                 let mark = if p.id == active.id {
@@ -379,11 +388,29 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
                 } else {
                     "".to_string()
                 };
-                println!(
-                    "{:<4} {:<6} {:<24} {:<30} {:<5} {:<5}",
-                    p.id, mark, p.name, p.slug, total, enabled
-                );
+                rows.push(vec![
+                    p.id.to_string(),
+                    mark,
+                    p.name.clone(),
+                    p.slug.clone(),
+                    total.to_string(),
+                    enabled.to_string(),
+                ]);
             }
+            println!(
+                "{}",
+                render_table(
+                    vec![
+                        "ID".to_string(),
+                        "ACTIVO".to_string(),
+                        "NOMBRE".to_string(),
+                        "SLUG".to_string(),
+                        "MODS".to_string(),
+                        "ON".to_string(),
+                    ],
+                    rows,
+                )
+            );
             Ok(())
         }
         super::ProfileAction::Create { name } => {
@@ -405,7 +432,7 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
                 log::warn("Se eliminarán sus estados de mods y su directorio en run/profiles/.");
                 eprintln!();
                 eprint!("Confirmar eliminación? [s/N]: ");
-                std::io::Write::flush(&mut std::io::stdout()).ok();
+                std::io::Write::flush(&mut std::io::stderr()).ok();
 
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input)?;
@@ -473,16 +500,18 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
             let sa = state_of(conn, pa.id)?;
             let sb = state_of(conn, pb.id)?;
 
-            let only_in_a: Vec<&(String, bool, i64)> = sa
+            let mut only_in_a: Vec<&(String, bool, i64)> = sa
                 .iter()
                 .filter(|(id, (_, en, _))| *en && !sb.get(id).map(|(_, e, _)| *e).unwrap_or(false))
                 .map(|(_, v)| v)
                 .collect();
-            let only_in_b: Vec<&(String, bool, i64)> = sb
+            only_in_a.sort();
+            let mut only_in_b: Vec<&(String, bool, i64)> = sb
                 .iter()
                 .filter(|(id, (_, en, _))| *en && !sa.get(id).map(|(_, e, _)| *e).unwrap_or(false))
                 .map(|(_, v)| v)
                 .collect();
+            only_in_b.sort();
             let mut order_diff: Vec<(&String, &i64, &i64)> = Vec::new();
             for (id, (folder, en, oa)) in &sa {
                 if !*en {
@@ -643,7 +672,7 @@ fn cmd_group(
                 ));
                 eprintln!();
                 eprint!("Confirmar eliminación? [s/N]: ");
-                std::io::Write::flush(&mut std::io::stdout()).ok();
+                std::io::Write::flush(&mut std::io::stderr()).ok();
                 let mut input = String::new();
                 std::io::stdin().read_line(&mut input)?;
                 let confirm = input.trim().to_lowercase();
@@ -847,7 +876,9 @@ fn cmd_list(
         None => std::collections::HashSet::new(),
     };
 
-    let mut mods = db::load_all_mods_for_profile(conn, profile.id)?
+    let all_profile_mods = db::load_all_mods_for_profile(conn, profile.id)?;
+    let any_registered = !all_profile_mods.is_empty();
+    let mut mods = all_profile_mods
         .into_iter()
         .filter(|m| match filter {
             Some("enabled") => m.enabled,
@@ -930,7 +961,11 @@ fn cmd_list(
 
     let count = mods.len();
     if count == 0 {
-        println!("No hay mods registrados.");
+        if any_registered {
+            println!("Ningún mod coincide con los filtros.");
+        } else {
+            println!("No hay mods registrados.");
+        }
         return Ok(());
     }
 
@@ -1016,7 +1051,7 @@ fn cmd_remove(conn: &Connection, ident: &str, yes: bool) -> anyhow::Result<()> {
         }
         eprintln!();
         eprint!("Confirmar eliminacion? [s/N]: ");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
+        std::io::Write::flush(&mut std::io::stderr()).ok();
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -1036,14 +1071,42 @@ fn cmd_remove(conn: &Connection, ident: &str, yes: bool) -> anyhow::Result<()> {
 fn cmd_enable(conn: &Connection, profile: &db::Profile, ident: &str) -> anyhow::Result<()> {
     let m = resolve_mod(conn, ident)?;
     let id = m.id;
-    let (enabled, _) = db::profile_mod_state(conn, profile.id, id)?;
-    if enabled {
-        log::warn(format!("'{}' ya esta activado.", m.folder_name));
+    let (already_enabled, _) = db::profile_mod_state(conn, profile.id, id)?;
+
+    let before: std::collections::HashSet<i64> =
+        db::load_enabled_mod_ids_for_profile(conn, profile.id)?.into_iter().collect();
+    let mut visited = std::collections::HashSet::new();
+    db::enable_mod_with_deps(conn, profile.id, id, &mut visited)?;
+    let after: std::collections::HashSet<i64> =
+        db::load_enabled_mod_ids_for_profile(conn, profile.id)?.into_iter().collect();
+
+    let mut new_folders: Vec<String> = after
+        .difference(&before)
+        .filter_map(|nid| db::get_mod_by_id(conn, *nid).ok().flatten())
+        .map(|x| x.folder_name)
+        .collect();
+    new_folders.sort();
+
+    if already_enabled {
+        if new_folders.is_empty() {
+            log::warn(format!("'{}' ya esta activado.", m.folder_name));
+        } else {
+            log::info(format!(
+                "'{}' ya estaba activado; dependencias requeridas activadas: {}.",
+                m.folder_name,
+                new_folders.join(", ")
+            ));
+        }
         return Ok(());
     }
-    db::set_mod_enabled(conn, profile.id, id, true)?;
+
+    let deps_note = if new_folders.is_empty() {
+        String::new()
+    } else {
+        format!(" (con dependencias: {})", new_folders.join(", "))
+    };
     log::info(format!(
-        "Mod '{}' activado (perfil '{}').",
+        "Mod '{}' activado (perfil '{}'){deps_note}.",
         m.folder_name, profile.name
     ));
     Ok(())
@@ -1076,7 +1139,7 @@ fn cmd_disable(
         }
         eprintln!();
         eprint!("Desactivar de todas formas? [s/N]: ");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
+        std::io::Write::flush(&mut std::io::stderr()).ok();
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -1363,45 +1426,47 @@ fn cmd_info(
     };
 
     if verbose {
-        println!();
-        println!("  {}       {}", "ID:".bold(), m.id);
-        println!("  {}  {}", "Carpeta:".bold(), m.folder_name);
-        println!("  {}   {}", "Nombre:".bold(), name);
+        let label = |l: &str| l.bold().to_string();
+        let mut rows: Vec<Vec<String>> = vec![
+            vec![label("ID"), m.id.to_string()],
+            vec![label("Carpeta"), m.folder_name.clone()],
+            vec![label("Nombre"), name.clone()],
+        ];
         if let Some(id) = &meta.mod_id {
-            println!("  {}      {}", "Mod ID:".bold(), id.green());
+            rows.push(vec![label("Mod ID"), id.green().to_string()]);
         }
         if let Some(v) = &meta.version {
-            println!("  {}      {}", "Versión:".bold(), v.cyan());
+            rows.push(vec![label("Versión"), v.cyan().to_string()]);
         }
         if !meta.author.is_empty() {
-            println!(
-                "  {}    {}",
-                "Autor:".bold(),
-                meta.author.join(", ").magenta()
-            );
+            rows.push(vec![
+                label("Autor"),
+                meta.author.join(", ").magenta().to_string(),
+            ]);
         }
         if let Some(u) = &meta.url {
-            println!("  {}       {}", "URL:".bold(), u.blue().underline());
+            rows.push(vec![label("URL"), u.blue().underline().to_string()]);
         }
         if let Some(d) = &meta.description {
-            println!("  {} {}", "Descripción:".bold(), d.yellow());
+            rows.push(vec![label("Descripción"), d.yellow().to_string()]);
         }
         if let Some(c) = &meta.cover {
-            println!("  {}  {}", "Carátula:".bold(), c);
+            rows.push(vec![label("Carátula"), c.clone()]);
         }
         if !meta.tags.is_empty() {
-            println!("  {}     {}", "Tags:".bold(), meta.tags.join(", "));
+            rows.push(vec![label("Tags"), meta.tags.join(", ")]);
         }
         if !meta.mount.is_empty() {
-            println!("  {}     {}", "Mount:".bold(), meta.mount.join(", "));
+            rows.push(vec![label("Mount"), meta.mount.join(", ")]);
         }
-        println!("  {}   {}", "Tipo:".bold(), kind.magenta());
-        println!("  {}   {}", "Estado:".bold(), status);
-        println!("  {}    {}", "Orden:".bold(), order);
+        rows.push(vec![label("Tipo"), kind.clone().magenta().to_string()]);
+        rows.push(vec![label("Estado"), status.clone()]);
+        rows.push(vec![label("Orden"), order.to_string()]);
         if !groups.is_empty() {
             let names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
-            println!("  {}     {}", "Grupos:".bold(), names.join(", ").cyan());
+            rows.push(vec![label("Grupos"), names.join(", ").cyan().to_string()]);
         }
+        println!("\n{}", render_table(vec![], rows));
 
         if !guides.is_empty() {
             println!("\n  {}", "Guías:".bold());

@@ -29,9 +29,11 @@ enum Command {
     Completions {
         shell: String,
     },
+    #[command(about = "Mount the overlay and launch the game")]
     Launch(LaunchArgs),
     #[command(about = "Launch from Steam (re-execs inside a user/mount namespace)")]
     Steam(LaunchArgs),
+    #[command(about = "Manage mods, profiles, groups and dependencies")]
     Ctl(CtlArgs),
 }
 
@@ -136,7 +138,11 @@ pub enum CtlCommand {
         yes: bool,
     },
     #[command(about = "Change load order")]
-    Order { ident: String, new_order: i64 },
+    Order {
+        ident: String,
+        #[arg(allow_negative_numbers = true)]
+        new_order: i64,
+    },
     #[command(about = "Rename a mod's display name (or its folder with --folder)")]
     Rename {
         ident: String,
@@ -351,7 +357,9 @@ fn main() {
 }
 
 fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
-    println!("=== GTA SA Mod Organizer ===");
+    if !args.dry_run {
+        println!("=== GTA SA Mod Organizer ===");
+    }
 
     let opts = LaunchOptions {
         dry_run: args.dry_run,
