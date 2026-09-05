@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use eframe::egui;
@@ -70,6 +70,8 @@ pub struct GtaMoApp {
     input: Option<InputState>,
     confirm: Option<ConfirmState>,
     covers: HashMap<String, egui::TextureHandle>,
+    covers_order: VecDeque<String>,
+    cover_missing: HashSet<String>,
     status: Option<String>,
 }
 
@@ -93,6 +95,8 @@ impl GtaMoApp {
             input: None,
             confirm: None,
             covers: HashMap::new(),
+            covers_order: VecDeque::new(),
+            cover_missing: HashSet::new(),
             status: None,
         };
         app.refresh();
@@ -186,49 +190,45 @@ impl GtaMoApp {
         self.exec(args, false);
     }
 
-    fn move_mod(&mut self, id: i64, dir: i32) {
-        let mut sorted = self.snapshot.mods.clone();
-        sorted.sort_by_key(|m| std::cmp::Reverse(m.order));
-        let Some(pos) = sorted.iter().position(|m| m.id == id) else {
+    /// Drag&drop reordering is only meaningful on the full, priority-sorted
+    /// list (no search/tag/group filters) and while nothing is running.
+    fn can_reorder(&self) -> bool {
+        !(self.busy || self.playing)
+            && self.filters.search.is_empty()
+            && self.filters.tag.is_none()
+            && self.filters.group.is_none()
+            && self.filters.sort == SortField::Order
+            && self.filters.desc
+    }
+
+    /// Applies a drag&drop move: `dragged` ends up right before
+    /// `before_folder`, or at the end when it is `None`. One bulk `ctl reorder`
+    /// call persists the whole new order.
+    fn reorder_drop(&mut self, dragged: &str, before_folder: Option<&str>) {
+        if !self.can_reorder() {
             return;
+        }
+        let mut full = self.snapshot.mods.clone();
+        full.sort_by_key(|m| std::cmp::Reverse(m.order));
+        let full_folders: Vec<String> = full.iter().map(|m| m.folder.clone()).collect();
+        if !full_folders.iter().any(|f| f == dragged) {
+            return;
+        }
+        let mut seq: Vec<String> = full_folders.iter().filter(|f| **f != dragged).cloned().collect();
+        let insert_at = match before_folder {
+            Some(b) => seq.iter().position(|f| f == b).unwrap_or(seq.len()),
+            None => seq.len(),
         };
-        let other = if dir < 0 {
-            pos.checked_sub(1)
-        } else {
-            (pos + 1 < sorted.len()).then_some(pos + 1)
-        };
-        let Some(other) = other else { return };
-        let a = sorted[pos].clone();
-        let b = sorted[other].clone();
-        let slug = self.snapshot.active_slug.clone();
-        self.exec(
-            vec![
-                "ctl",
-                "order",
-                &a.id.to_string(),
-                &b.order.to_string(),
-                "--profile",
-                &slug,
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-            false,
-        );
-        self.exec(
-            vec![
-                "ctl",
-                "order",
-                &b.id.to_string(),
-                &a.order.to_string(),
-                "--profile",
-                &slug,
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-            false,
-        );
+        seq.insert(insert_at, dragged.to_string());
+        if seq == full_folders {
+            return;
+        }
+
+        let mut args: Vec<String> = vec!["ctl".into(), "reorder".into()];
+        args.extend(seq);
+        args.push("--profile".into());
+        args.push(self.snapshot.active_slug.clone());
+        self.exec(args, false);
     }
 
     fn load_cover(
@@ -241,21 +241,93 @@ impl GtaMoApp {
         if let Some(t) = self.covers.get(&key) {
             return Some(t.clone());
         }
-        let path = self.backend.cover_path(folder, cover)?;
-        let img = image::ImageReader::open(&path)
-            .ok()?
-            .decode()
-            .ok()?
-            .to_rgba8();
+        if self.cover_missing.contains(&key) {
+            return None;
+        }
+        let Some(path) = self.backend.cover_path(folder, cover) else {
+            self.cover_missing.insert(key);
+            return None;
+        };
+        let Some(img) = image::ImageReader::open(&path)
+            .ok()
+            .and_then(|reader| reader.decode().ok())
+        else {
+            self.cover_missing.insert(key);
+            return None;
+        };
+        let img = img.to_rgba8();
         let (w, h) = (img.width(), img.height());
         let color =
             egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
         let tex = ctx.load_texture(&key, color, egui::TextureOptions::LINEAR);
-        if self.covers.len() >= 64 {
-            self.covers.clear();
+
+        // LRU: capa el número de texturas y descarta solo la más antigua.
+        if self.covers.len() >= 128 {
+            if let Some(old) = self.covers_order.pop_front() {
+                self.covers.remove(&old);
+            }
         }
-        self.covers.insert(key, tex.clone());
+        self.covers.insert(key.clone(), tex.clone());
+        self.covers_order.retain(|k| k != &key);
+        self.covers_order.push_back(key);
         Some(tex)
+    }
+
+    /// Draws one row of the mods list: optional cover thumbnail, enable
+    /// checkbox and the name/author/tags block plus a "Detalle" button.
+    fn draw_mod_row(&mut self, ui: &mut egui::Ui, m: &crate::model::ModView) {
+        ui.horizontal(|ui| {
+            let mut enabled = m.enabled;
+            if ui
+                .add_enabled(
+                    !(self.busy || self.playing),
+                    egui::Checkbox::new(&mut enabled, ""),
+                )
+                .on_hover_text("Activar/desactivar")
+                .changed()
+            {
+                self.set_enabled(m.id, enabled);
+            }
+            if let Some(cover) = m.meta.cover.clone() {
+                if let Some(tex) = self.load_cover(ui.ctx(), &m.folder, &cover) {
+                    ui.add(
+                        egui::Image::new(&tex)
+                            .fit_to_exact_size(egui::vec2(40.0, 40.0))
+                            .corner_radius(4),
+                    );
+                }
+            }
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&m.name).strong());
+                    if let Some(v) = &m.meta.version {
+                        ui.label(egui::RichText::new(format!("v{v}")).weak());
+                    }
+                    if !m.meta.author.is_empty() {
+                        ui.label(egui::RichText::new(m.meta.author.join(", ")).weak());
+                    }
+                });
+                if !m.meta.tags.is_empty() || !m.groups.is_empty() {
+                    ui.horizontal(|ui| {
+                        for t in &m.meta.tags {
+                            ui.label(
+                                egui::RichText::new(format!("#{t}"))
+                                    .small()
+                                    .color(egui::Color32::from_rgb(120, 160, 255)),
+                            );
+                        }
+                        for g in &m.groups {
+                            ui.label(
+                                egui::RichText::new(format!("[{g}]")).small().weak(),
+                            );
+                        }
+                    });
+                }
+            });
+            if ui.button("Detalle").clicked() {
+                self.selected_mod = Some(m.id);
+            }
+        });
     }
 }
 
@@ -449,74 +521,58 @@ impl GtaMoApp {
         let mut filtered = self.snapshot.mods.clone();
         filter_and_sort(&mut filtered, &self.filters);
 
+        let reorderable = self.can_reorder();
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                for m in &filtered {
+                if reorderable {
                     ui.horizontal(|ui| {
-                        let mut enabled = m.enabled;
-                        if ui
-                            .add_enabled(
-                                !(self.busy || self.playing),
-                                egui::Checkbox::new(&mut enabled, ""),
-                            )
-                            .on_hover_text("Activar/desactivar")
-                            .changed()
-                        {
-                            self.set_enabled(m.id, enabled);
-                        }
-                        if ui
-                            .add_enabled(
-                                !(self.busy || self.playing),
-                                egui::Button::new("▲").small(),
-                            )
-                            .on_hover_text("Subir prioridad")
-                            .clicked()
-                        {
-                            self.move_mod(m.id, -1);
-                        }
-                        if ui
-                            .add_enabled(
-                                !(self.busy || self.playing),
-                                egui::Button::new("▼").small(),
-                            )
-                            .on_hover_text("Bajar prioridad")
-                            .clicked()
-                        {
-                            self.move_mod(m.id, 1);
-                        }
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(&m.name).strong());
-                                if let Some(v) = &m.meta.version {
-                                    ui.label(egui::RichText::new(format!("v{v}")).weak());
-                                }
-                                if !m.meta.author.is_empty() {
-                                    ui.label(egui::RichText::new(m.meta.author.join(", ")).weak());
-                                }
-                            });
-                            if !m.meta.tags.is_empty() || !m.groups.is_empty() {
-                                ui.horizontal(|ui| {
-                                    for t in &m.meta.tags {
-                                        ui.label(
-                                            egui::RichText::new(format!("#{t}"))
-                                                .small()
-                                                .color(egui::Color32::from_rgb(120, 160, 255)),
-                                        );
-                                    }
-                                    for g in &m.groups {
-                                        ui.label(
-                                            egui::RichText::new(format!("[{g}]")).small().weak(),
-                                        );
-                                    }
-                                });
-                            }
-                        });
-                        if ui.button("Detalle").clicked() {
-                            self.selected_mod = Some(m.id);
-                        }
+                        ui.label(
+                            egui::RichText::new("Arrastra una fila para reordenarla")
+                                .weak()
+                                .small(),
+                        );
                     });
+                    ui.add_space(2.0);
+                }
+                for (idx, m) in filtered.iter().enumerate() {
+                    let folder = m.folder.clone();
+                    if reorderable {
+                        let id = egui::Id::new(("mod_row", m.id, idx));
+                        let (_, dropped): (_, Option<std::sync::Arc<String>>) =
+                            ui.dnd_drop_zone(egui::Frame::NONE, |ui| {
+                                ui.dnd_drag_source(id, folder.clone(), |ui| {
+                                    self.draw_mod_row(ui, m);
+                                });
+                            });
+                        if let Some(payload) = dropped {
+                            let dragged = payload.as_str().to_string();
+                            if dragged != folder {
+                                self.reorder_drop(&dragged, Some(&folder));
+                            }
+                        }
+                    } else {
+                        self.draw_mod_row(ui, m);
+                    }
                     ui.separator();
+                }
+
+                // Zona final: soltar aquí mueve el mod al final de la lista.
+                if reorderable {
+                    let (_, dropped): (_, Option<std::sync::Arc<String>>) =
+                        ui.dnd_drop_zone(egui::Frame::NONE, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new("▾ Suelta aquí para mover al final")
+                                        .weak()
+                                        .small(),
+                                );
+                            });
+                        });
+                    if let Some(payload) = dropped {
+                        let dragged = payload.as_str().to_string();
+                        self.reorder_drop(&dragged, None);
+                    }
                 }
             });
     }
