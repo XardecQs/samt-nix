@@ -99,7 +99,23 @@ impl Backend {
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|m| {
-                let meta = db::load_mod_meta(conn, m.id).unwrap_or_default();
+                let folder = m.folder_name.clone();
+                let cached = db::load_mod_meta(conn, m.id).unwrap_or_default();
+                // mod.toml es la fuente canónica: léelo en vivo y funde sus
+                // campos con la caché (los ausentes caen a lo cacheado), así las
+                // ediciones manuales (nombre, cover, tags…) se reflejan al
+                // instante sin esperar un discover.
+                let live = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &folder)
+                    .ok()
+                    .flatten();
+                let meta = match live {
+                    Some(ref lm) => merge_meta_caches(cached, db::meta_cache_from_meta(lm)),
+                    None => cached,
+                };
+                let name = live
+                    .as_ref()
+                    .and_then(|lm| lm.name.clone())
+                    .unwrap_or_else(|| m.name.clone());
                 let groups = db::groups_of_mod_in_profile(conn, m.id, profile.id)
                     .unwrap_or_default()
                     .into_iter()
@@ -107,8 +123,8 @@ impl Backend {
                     .collect();
                 ModView {
                     id: m.id,
-                    folder: m.folder_name,
-                    name: m.name,
+                    folder,
+                    name,
                     enabled: m.enabled,
                     order: m.load_order,
                     meta,
@@ -191,6 +207,43 @@ impl Backend {
     }
 }
 
+/// Live `mod.toml` metadata wins; fields the manifest leaves absent/empty fall
+/// back to the DB cache.
+fn merge_meta_caches(cached: db::ModMetaCache, live: db::ModMetaCache) -> db::ModMetaCache {
+    db::ModMetaCache {
+        mod_id: live.mod_id.or(cached.mod_id),
+        version: live.version.or(cached.version),
+        author: if live.author.is_empty() {
+            cached.author
+        } else {
+            live.author
+        },
+        url: live.url.or(cached.url),
+        description: live.description.or(cached.description),
+        cover: live.cover.or(cached.cover),
+        mount: if live.mount.is_empty() {
+            cached.mount
+        } else {
+            live.mount
+        },
+        guides: if live.guides.is_empty() {
+            cached.guides
+        } else {
+            live.guides
+        },
+        tags: if live.tags.is_empty() {
+            cached.tags
+        } else {
+            live.tags
+        },
+        components: if live.components.is_empty() {
+            cached.components
+        } else {
+            live.components
+        },
+    }
+}
+
 impl Default for Backend {
     fn default() -> Self {
         Self::new()
@@ -232,4 +285,37 @@ pub fn find_gta_mo_bin() -> String {
         }
     }
     "gta-mo".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gta_mo_core::meta::ModMeta;
+
+    #[test]
+    fn live_metadata_overrides_cache_and_falls_back() {
+        let cached = db::ModMetaCache {
+            mod_id: Some("a:b".into()),
+            version: Some("1".into()),
+            author: vec!["Old".into()],
+            url: None,
+            description: None,
+            cover: Some("c.png".into()),
+            mount: vec![],
+            guides: vec![],
+            tags: vec![],
+            components: vec![],
+        };
+        let mut live = ModMeta::default();
+        live.name = Some("Live Name".into());
+        live.author = vec!["New".into()];
+        live.tags = Some(vec!["essential".into()]);
+        // version/cover ausentes en el manifest -> se mantienen de la caché
+        let merged = merge_meta_caches(cached, db::meta_cache_from_meta(&live));
+        assert_eq!(merged.mod_id.as_deref(), Some("a:b"));
+        assert_eq!(merged.version.as_deref(), Some("1"));
+        assert_eq!(merged.cover.as_deref(), Some("c.png"));
+        assert_eq!(merged.author, vec!["New"]);
+        assert_eq!(merged.tags, vec!["essential".to_string()]);
+    }
 }
