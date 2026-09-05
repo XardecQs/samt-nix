@@ -67,6 +67,20 @@
       };
 
     mkGuiPackage = { pkgs }:
+      let
+        # winit/eframe load these at runtime via dlopen (not linked), so they must
+        # also be reachable through LD_LIBRARY_PATH, not just at build time.
+        guiRuntimeLibs = with pkgs; [
+          libGL
+          mesa
+          libx11
+          libxcursor
+          libxrandr
+          libxi
+          libxkbcommon
+          wayland
+        ];
+      in
       pkgs.rustPlatform.buildRustPackage {
         pname = "gta-mo-gui";
         inherit version;
@@ -83,20 +97,12 @@
 
         nativeBuildInputs = with pkgs; [ pkg-config makeWrapper autoPatchelfHook ];
 
-        buildInputs = with pkgs; [
-          libGL
-          mesa
-          libx11
-          libxcursor
-          libxrandr
-          libxi
-          libxkbcommon
-          wayland
-        ];
+        buildInputs = guiRuntimeLibs;
 
         postInstall = ''
           wrapProgram "$out/bin/gta-mo-gui" \
-            --prefix PATH : ${self.packages.${pkgs.stdenv.hostPlatform.system}.gta-mod-organizer}/bin
+            --prefix PATH : ${self.packages.${pkgs.stdenv.hostPlatform.system}.gta-mod-organizer}/bin \
+            --suffix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiRuntimeLibs}"
         '';
 
         meta = {
@@ -151,9 +157,19 @@
       gta-mod-organizer = ./modules/home-manager.nix;
     };
 
-    devShells = forAllSystems (pkgs: {
+    devShells = forAllSystems (pkgs: let
+      # winit/eframe dlopen these at runtime (they are not linked), so cargo-built
+      # binaries also need them on LD_LIBRARY_PATH inside the dev shell.
+      devRuntimeLibs = with pkgs; [
+        libGL
+        mesa
+        libx11
+        libxkbcommon
+        wayland
+      ];
+    in {
       default = pkgs.mkShell {
-        buildInputs = with pkgs; [
+        buildInputs = devRuntimeLibs ++ (with pkgs; [
           cargo
           rustc
           rustfmt
@@ -165,9 +181,6 @@
           gcc
           pkg-config
           glfw3
-          libGL
-          mesa
-          libx11
           libxcb
           libxcursor
           libxrandr
@@ -175,10 +188,10 @@
           libxinerama
           libxext
           libxxf86vm
-          libxkbcommon
-          wayland
           wayland-protocols
-        ];
+        ]);
+
+        LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath devRuntimeLibs;
 
         shellHook = ''
           export CARGO_TARGET_DIR="$HOME/.cache/gta-mo-target"
