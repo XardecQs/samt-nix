@@ -43,7 +43,8 @@
         postInstall = ''
           wrapProgram "$out/bin/gta-mo" \
             --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
-            --prefix PATH : ${pkgs.umu-launcher}/bin
+            --prefix PATH : ${pkgs.umu-launcher}/bin \
+            --prefix PATH : ${pkgs.xdg-utils}/bin
 
           # NOTE: do not add `fuse3` to PATH here. Its bin/ contains a
           # non-setuid fusermount3 that shadows the setuid wrapper in
@@ -125,11 +126,23 @@
     in {
       build = pkg;
 
-      clippy = pkgs.stdenv.mkDerivation {
-        name = "gta-mod-organizer-clippy";
+      clippy = pkgs.rustPlatform.buildRustPackage {
+        pname = "gta-mod-organizer-clippy";
+        inherit version;
+
         src = source;
-        nativeBuildInputs = with pkgs; [ rustc cargo clippy ];
-        buildPhase = "cargo clippy --all-targets -- -D warnings";
+
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+        };
+
+        nativeBuildInputs = with pkgs; [ clippy ];
+
+        # Compile-level lint only (no `cargo build` needed). Without
+        # `--all-targets` the #[cfg(test)] code — which currently has a few
+        # pre-existing style warnings — is not compiled.
+        cargoBuildCommand = "cargo clippy -p gta-mod-organizer -p gta-mo-core";
+
         installPhase = "mkdir $out";
       };
 
@@ -146,6 +159,8 @@
       gta-mod-organizer = self.packages.${final.stdenv.hostPlatform.system}.default;
       gta-mo-gui = self.packages.${final.stdenv.hostPlatform.system}.gta-mo-gui;
     };
+
+    overlays.default = self.overlay;
 
     nixosModules = {
       default = ./modules/nixos.nix;

@@ -21,8 +21,17 @@ Add the flake to your Home Manager configuration:
     gta-mo.url = "github:XardecQs/samt-nix";
   };
 
-  outputs = { nixpkgs, gta-mo, ... }: {
+  outputs = { nixpkgs, gta-mo, ... }: let
+    system = "x86_64-linux";
+    # The gta-mo module defaults to `pkgs.gta-mod-organizer`, which only exists
+    # if the flake overlay is applied to the pkgs set it sees.
+    pkgs = import nixpkgs {
+      inherit system;
+      overlays = [ gta-mo.overlays.default ];
+    };
+  in {
     homeConfigurations."tu-usuario" = nixpkgs.lib.homeManagerConfiguration {
+      inherit pkgs;
       modules = [
         gta-mo.homeManagerModules.default
         {
