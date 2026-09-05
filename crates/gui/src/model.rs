@@ -51,6 +51,8 @@ pub struct Snapshot {
     pub all_groups: Vec<String>,
     /// Enabled mods of the active profile in overlay priority order (top first).
     pub resolved: Vec<String>,
+    /// (group name, members in the active profile).
+    pub group_counts: Vec<(String, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

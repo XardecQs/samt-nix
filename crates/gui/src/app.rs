@@ -10,6 +10,7 @@ use crate::model::{filter_and_sort, Filters, Snapshot, SortField};
 enum Tab {
     Mods,
     Profiles,
+    Groups,
     Conflicts,
     Log,
 }
@@ -20,6 +21,8 @@ enum InputAction {
     Copy(String),
     NewMod,
     RenameMod(String),
+    NewGroup,
+    RenameGroup(String),
 }
 
 struct InputState {
@@ -40,9 +43,11 @@ impl InputState {
     }
 }
 
+#[allow(clippy::enum_variant_names)]
 enum ConfirmAction {
     DeleteProfile(String),
     DeleteMod(String),
+    DeleteGroup(String),
 }
 
 struct ConfirmState {
@@ -80,6 +85,9 @@ pub struct GtaMoApp {
     conflicts: Vec<crate::backend::ConflictView>,
     conflicts_pending: bool,
     scan_gen: u64,
+    selected_group: Option<String>,
+    group_members: Option<Vec<String>>,
+    group_pick: Option<String>,
     covers: HashMap<String, egui::TextureHandle>,
     covers_order: VecDeque<String>,
     cover_missing: HashSet<String>,
@@ -112,6 +120,9 @@ impl GtaMoApp {
             conflicts: Vec::new(),
             conflicts_pending: false,
             scan_gen: 0,
+            selected_group: None,
+            group_members: None,
+            group_pick: None,
             covers: HashMap::new(),
             covers_order: VecDeque::new(),
             cover_missing: HashSet::new(),
@@ -130,6 +141,7 @@ impl GtaMoApp {
                 self.snapshot = s;
                 self.status = None;
                 self.reload_relations();
+                self.reload_groups();
                 self.start_conflict_scan();
             }
             Err(e) => self.status = Some(e),
@@ -162,6 +174,12 @@ impl GtaMoApp {
                 self.relations = None;
                 self.relations_for = None;
             }
+        }
+    }
+
+    fn reload_groups(&mut self) {
+        if let Some(group) = self.selected_group.clone() {
+            self.group_members = self.backend.group_members(&group).ok();
         }
     }
 
@@ -494,6 +512,12 @@ impl eframe::App for GtaMoApp {
                 {
                     self.tab = Tab::Profiles;
                 }
+                if ui
+                    .selectable_label(self.tab == Tab::Groups, "Grupos")
+                    .clicked()
+                {
+                    self.tab = Tab::Groups;
+                }
                 let conflict_label = format!(
                     "Conflictos ({})",
                     self.conflicts.iter().filter(|c| !c.duplicate).count()
@@ -523,6 +547,7 @@ impl eframe::App for GtaMoApp {
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Mods => self.ui_mods(ui),
             Tab::Profiles => self.ui_profiles(ui),
+            Tab::Groups => self.ui_groups(ui),
             Tab::Conflicts => self.ui_conflicts(ui),
             Tab::Log => self.ui_log(ui),
         });
@@ -929,6 +954,59 @@ impl GtaMoApp {
                         }
                     }
                 });
+
+                if !self.snapshot.all_groups.is_empty() {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let groups = self.snapshot.all_groups.clone();
+                        let mut pick = self.group_pick.clone();
+                        egui::ComboBox::from_id_salt("detail_group_pick")
+                            .selected_text(pick.clone().unwrap_or_else(|| "Añadir a grupo…".into()))
+                            .show_ui(ui, |ui| {
+                                for name in &groups {
+                                    if ui
+                                        .selectable_label(pick.as_deref() == Some(name.as_str()), name)
+                                        .clicked()
+                                    {
+                                        pick = Some(name.clone());
+                                    }
+                                }
+                            });
+                        self.group_pick = pick;
+                        if let Some(group) = self.group_pick.clone() {
+                            let in_group = m.groups.iter().any(|g| g == &group);
+                            let action = if in_group { "remove" } else { "add" };
+                            let label = if in_group {
+                                "Quitar del grupo"
+                            } else {
+                                "Añadir al grupo"
+                            };
+                            if ui
+                                .add_enabled(
+                                    !(self.busy || self.playing),
+                                    egui::Button::new(label),
+                                )
+                                .on_hover_text("Membresía del perfil activo (no global)")
+                                .clicked()
+                            {
+                                let folder = m.folder.clone();
+                                let slug = self.snapshot.active_slug.clone();
+                                self.exec(
+                                    vec![
+                                        "ctl".into(),
+                                        "group".into(),
+                                        action.into(),
+                                        folder,
+                                        group,
+                                        "--profile".into(),
+                                        slug,
+                                    ],
+                                    false,
+                                );
+                            }
+                        }
+                    });
+                }
             });
         if let Some(go) = go_to {
             if let Some(tm) = self.snapshot.mods.iter().find(|x| x.folder == go).cloned() {
@@ -1034,6 +1112,134 @@ impl GtaMoApp {
                 });
             }
         });
+    }
+
+    fn ui_groups(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !(self.busy || self.playing),
+                    egui::Button::new("Nuevo grupo"),
+                )
+                .clicked()
+            {
+                self.input = Some(InputState::new(
+                    "Nuevo grupo",
+                    "Nombre del grupo:",
+                    InputAction::NewGroup,
+                ));
+            }
+            let sel = self.selected_group.clone();
+            if ui
+                .add_enabled(
+                    sel.is_some() && !(self.busy || self.playing),
+                    egui::Button::new("Renombrar"),
+                )
+                .clicked()
+            {
+                if let Some(g) = &sel {
+                    self.input = Some(InputState::new(
+                        "Renombrar grupo",
+                        "Nuevo nombre:",
+                        InputAction::RenameGroup(g.clone()),
+                    ));
+                }
+            }
+            if ui
+                .add_enabled(
+                    sel.is_some() && !(self.busy || self.playing),
+                    egui::Button::new("Eliminar"),
+                )
+                .clicked()
+            {
+                if let Some(g) = &sel {
+                    self.confirm = Some(ConfirmState {
+                        title: "Eliminar grupo".into(),
+                        message: format!("¿Eliminar el grupo '{g}' y sus membresías?"),
+                        action: ConfirmAction::DeleteGroup(g.clone()),
+                    });
+                }
+            }
+        });
+        ui.separator();
+
+        let mut select: Option<String> = None;
+        for (name, count) in &self.snapshot.group_counts {
+            let selected = self.selected_group.as_deref() == Some(name.as_str());
+            if ui
+                .selectable_label(selected, format!("{name} ({count} mods)"))
+                .clicked()
+            {
+                select = Some(name.clone());
+            }
+        }
+        if let Some(g) = select {
+            if self.selected_group.as_deref() != Some(g.as_str()) {
+                self.selected_group = Some(g.clone());
+                self.reload_groups();
+            }
+        }
+
+        if let Some(g) = self.selected_group.clone() {
+            ui.separator();
+            ui.label(egui::RichText::new(format!("Grupo: {g}")).strong());
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !(self.busy || self.playing),
+                        egui::Button::new("Activar grupo"),
+                    )
+                    .on_hover_text("Activa todos sus mods en el perfil activo (con deps)")
+                    .clicked()
+                {
+                    let slug = self.snapshot.active_slug.clone();
+                    self.exec(
+                        vec![
+                            "ctl".into(),
+                            "group".into(),
+                            "enable".into(),
+                            g.clone(),
+                            "--profile".into(),
+                            slug,
+                        ],
+                        false,
+                    );
+                }
+                if ui
+                    .add_enabled(
+                        !(self.busy || self.playing),
+                        egui::Button::new("Desactivar grupo"),
+                    )
+                    .clicked()
+                {
+                    let slug = self.snapshot.active_slug.clone();
+                    self.exec(
+                        vec![
+                            "ctl".into(),
+                            "group".into(),
+                            "disable".into(),
+                            g.clone(),
+                            "--profile".into(),
+                            slug,
+                        ],
+                        false,
+                    );
+                }
+            });
+            ui.add_space(4.0);
+            ui.label("Miembros (perfil activo):");
+            match &self.group_members {
+                Some(mems) if !mems.is_empty() => {
+                    for folder in mems {
+                        ui.label(egui::RichText::new(format!("• {folder}")).small());
+                    }
+                }
+                _ => {
+                    ui.label(egui::RichText::new("(vacío)").weak().small());
+                }
+            }
+        }
     }
 
     fn ui_conflicts(&mut self, ui: &mut egui::Ui) {
@@ -1218,6 +1424,15 @@ impl GtaMoApp {
                     false,
                 );
             }
+            InputAction::NewGroup => {
+                self.exec(vec!["ctl".into(), "group".into(), "create".into(), value], false);
+            }
+            InputAction::RenameGroup(ident) => {
+                self.exec(
+                    vec!["ctl".into(), "group".into(), "rename".into(), ident, value],
+                    false,
+                );
+            }
         }
     }
 
@@ -1244,6 +1459,18 @@ impl GtaMoApp {
                         "--yes".into(),
                         "--profile".into(),
                         self.snapshot.active_slug.clone(),
+                    ],
+                    false,
+                );
+            }
+            ConfirmAction::DeleteGroup(ident) => {
+                self.exec(
+                    vec![
+                        "ctl".into(),
+                        "group".into(),
+                        "delete".into(),
+                        ident,
+                        "--yes".into(),
                     ],
                     false,
                 );

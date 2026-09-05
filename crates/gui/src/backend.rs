@@ -124,6 +124,30 @@ impl Backend {
         })
     }
 
+    /// Folder names of the mods that belong to `group_ident` in the active
+    /// profile (empty when the group does not exist there).
+    pub fn group_members(&self, group_ident: &str) -> Result<Vec<String>, String> {
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| "Sin conexión a la base de datos".to_string())?;
+        let profile = db::active_profile(conn).map_err(|e| e.to_string())?;
+        let Ok(group) = db::resolve_group(conn, group_ident) else {
+            return Ok(Vec::new());
+        };
+        let members = db::mods_in_group(conn, group.id, profile.id)
+            .map_err(|e| e.to_string())?;
+        let folder_of: std::collections::HashMap<i64, String> = db::load_all_mods_for_profile(conn, profile.id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|m| (m.id, m.folder_name))
+            .collect();
+        Ok(members
+            .into_iter()
+            .filter_map(|id| folder_of.get(&id).cloned())
+            .collect())
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot, String> {
         if let Some(e) = &self.error {
             return Err(e.clone());
@@ -205,6 +229,17 @@ impl Backend {
             .map(|g| g.name)
             .collect::<Vec<_>>();
 
+        let group_counts = db::list_groups(conn)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| {
+                let n = db::mods_in_group(conn, g.id, profile.id)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                (g.name.clone(), n)
+            })
+            .collect::<Vec<_>>();
+
         let resolved = resolve_enabled_order(conn, &profile).unwrap_or_default();
 
         Ok(Snapshot {
@@ -214,6 +249,7 @@ impl Backend {
             all_tags,
             all_groups,
             resolved,
+            group_counts,
         })
     }
 
