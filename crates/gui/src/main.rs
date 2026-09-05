@@ -3,6 +3,7 @@
 mod app;
 mod backend;
 mod model;
+mod settings;
 
 use eframe::egui;
 

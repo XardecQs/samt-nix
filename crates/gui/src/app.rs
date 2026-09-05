@@ -88,6 +88,8 @@ pub struct GtaMoApp {
     selected_group: Option<String>,
     group_members: Option<Vec<String>>,
     group_pick: Option<String>,
+    drag_folder: Option<String>,
+    drop_index: usize,
     covers: HashMap<String, egui::TextureHandle>,
     covers_order: VecDeque<String>,
     cover_missing: HashSet<String>,
@@ -95,7 +97,10 @@ pub struct GtaMoApp {
 }
 
 impl GtaMoApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let ui_scale = crate::settings::GuiSettings::load().ui_scale;
+        cc.egui_ctx
+            .set_pixels_per_point(cc.egui_ctx.pixels_per_point() * ui_scale);
         let backend = Backend::new();
         let (tx, rx) = channel();
         let mut app = Self {
@@ -123,6 +128,8 @@ impl GtaMoApp {
             selected_group: None,
             group_members: None,
             group_pick: None,
+            drag_folder: None,
+            drop_index: 0,
             covers: HashMap::new(),
             covers_order: VecDeque::new(),
             cover_missing: HashSet::new(),
@@ -274,10 +281,10 @@ impl GtaMoApp {
             && self.filters.desc
     }
 
-    /// Applies a drag&drop move: `dragged` ends up right before
-    /// `before_folder`, or at the end when it is `None`. One bulk `ctl reorder`
-    /// call persists the whole new order.
-    fn reorder_drop(&mut self, dragged: &str, before_folder: Option<&str>) {
+    /// Applies a drag&drop move: `dragged` is placed at index `index` of the
+    /// full priority-sorted list (0 = top). One bulk `ctl reorder` call
+    /// persists the whole new order.
+    fn reorder_drop_at(&mut self, dragged: &str, index: usize) {
         if !self.can_reorder() {
             return;
         }
@@ -288,10 +295,7 @@ impl GtaMoApp {
             return;
         }
         let mut seq: Vec<String> = full_folders.iter().filter(|f| **f != dragged).cloned().collect();
-        let insert_at = match before_folder {
-            Some(b) => seq.iter().position(|f| f == b).unwrap_or(seq.len()),
-            None => seq.len(),
-        };
+        let insert_at = index.min(seq.len());
         seq.insert(insert_at, dragged.to_string());
         if seq == full_folders {
             return;
@@ -348,59 +352,121 @@ impl GtaMoApp {
 
     /// Draws one row of the mods list: optional cover thumbnail, enable
     /// checkbox and the name/author/tags block plus a "Detalle" button.
-    fn draw_mod_row(&mut self, ui: &mut egui::Ui, m: &crate::model::ModView) {
-        ui.horizontal(|ui| {
-            let mut enabled = m.enabled;
-            if ui
-                .add_enabled(
-                    !(self.busy || self.playing),
-                    egui::Checkbox::new(&mut enabled, ""),
-                )
-                .on_hover_text("Activar/desactivar")
-                .changed()
-            {
-                self.set_enabled(m.id, enabled);
-            }
-            if let Some(cover) = m.meta.cover.clone() {
-                if let Some(tex) = self.load_cover(ui.ctx(), &m.folder, &cover) {
-                    ui.add(
-                        egui::Image::new(&tex)
-                            .fit_to_exact_size(egui::vec2(40.0, 40.0))
-                            .corner_radius(4),
-                    );
-                }
-            }
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&m.name).strong());
-                    if let Some(v) = &m.meta.version {
-                        ui.label(egui::RichText::new(format!("v{v}")).weak());
-                    }
-                    if !m.meta.author.is_empty() {
-                        ui.label(egui::RichText::new(m.meta.author.join(", ")).weak());
-                    }
-                });
-                if !m.meta.tags.is_empty() || !m.groups.is_empty() {
-                    ui.horizontal(|ui| {
-                        for t in &m.meta.tags {
-                            ui.label(
-                                egui::RichText::new(format!("#{t}"))
-                                    .small()
-                                    .color(egui::Color32::from_rgb(120, 160, 255)),
-                            );
-                        }
-                        for g in &m.groups {
-                            ui.label(
-                                egui::RichText::new(format!("[{g}]")).small().weak(),
-                            );
-                        }
+    fn draw_mod_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        m: &crate::model::ModView,
+        reorderable: bool,
+    ) -> egui::Response {
+        let idle = !(self.busy || self.playing);
+        let fill = if m.enabled {
+            egui::Color32::from_rgba_unmultiplied(70, 130, 230, 22)
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let frame = egui::Frame::new()
+            .fill(fill)
+            .corner_radius(egui::CornerRadius::same(5))
+            .inner_margin(egui::Margin::symmetric(6, 2));
+        let row = frame.show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                if reorderable {
+                    let handle = egui::Id::new(("mod_handle", m.id));
+                    ui.dnd_drag_source(handle, m.folder.clone(), |ui| {
+                        ui.add(
+                            egui::Button::new("⠿")
+                                .frame(false)
+                                .small()
+                                .min_size(egui::vec2(22.0, 24.0)),
+                        )
+                        .on_hover_text("Arrastra para reordenar");
                     });
                 }
+                if Self::toggle_indicator(ui, m.enabled, idle) {
+                    self.set_enabled(m.id, !m.enabled);
+                }
+                if let Some(cover) = m.meta.cover.clone() {
+                    if let Some(tex) = self.load_cover(ui.ctx(), &m.folder, &cover) {
+                        ui.add(
+                            egui::Image::new(&tex)
+                                .fit_to_exact_size(egui::vec2(40.0, 40.0))
+                                .corner_radius(4),
+                        );
+                    }
+                }
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        let name_color = if m.enabled {
+                            egui::Color32::WHITE
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        ui.label(egui::RichText::new(&m.name).strong().color(name_color));
+                        if let Some(v) = &m.meta.version {
+                            ui.label(egui::RichText::new(format!("v{v}")).weak());
+                        }
+                        if !m.meta.author.is_empty() {
+                            ui.label(egui::RichText::new(m.meta.author.join(", ")).weak());
+                        }
+                    });
+                    if !m.meta.tags.is_empty() || !m.groups.is_empty() {
+                        ui.horizontal(|ui| {
+                            for t in &m.meta.tags {
+                                ui.label(
+                                    egui::RichText::new(format!("#{t}"))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(120, 160, 255)),
+                                );
+                            }
+                            for g in &m.groups {
+                                ui.label(
+                                    egui::RichText::new(format!("[{g}]")).small().weak(),
+                                );
+                            }
+                        });
+                    }
+                });
+                if ui.button("Detalle").clicked() {
+                    self.selected_mod = Some(m.id);
+                }
             });
-            if ui.button("Detalle").clicked() {
-                self.selected_mod = Some(m.id);
-            }
         });
+        row.response
+    }
+
+    /// Indicador de estado propio: cuadrado redondeado de color acento cuando
+    /// el mod está activo, gris cuando no. Devuelve `true` cuando se hace clic.
+    fn toggle_indicator(ui: &mut egui::Ui, active: bool, interactive: bool) -> bool {
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+        let fill = if active {
+            egui::Color32::from_rgb(90, 160, 255)
+        } else {
+            egui::Color32::from_rgb(58, 58, 66)
+        };
+        let stroke_color = if active {
+            egui::Color32::from_rgb(140, 195, 255)
+        } else {
+            egui::Color32::from_rgb(110, 110, 120)
+        };
+        let inner = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 14.0));
+        ui.painter()
+            .rect(inner, egui::CornerRadius::same(4), fill, egui::Stroke::new(1.5, stroke_color), egui::StrokeKind::Inside);
+        if active {
+            ui.painter().text(
+                inner.center(),
+                egui::Align2::CENTER_CENTER,
+                "✓",
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+        }
+        let _ = response.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
+        if !interactive {
+            return false;
+        }
+        response.clicked()
     }
 }
 
@@ -688,50 +754,61 @@ impl GtaMoApp {
                 if reorderable {
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("Arrastra una fila para reordenarla")
+                            egui::RichText::new("Arrastra el asidero ⠿ para reordenar")
                                 .weak()
                                 .small(),
                         );
                     });
                     ui.add_space(2.0);
                 }
-                for (idx, m) in filtered.iter().enumerate() {
-                    let folder = m.folder.clone();
+
+                // (rect, folder) de cada fila, para el indicador de inserción.
+                let mut row_rects: Vec<(egui::Rect, String)> = Vec::new();
+                for m in &filtered {
+                    let row = self.draw_mod_row(ui, m, reorderable);
                     if reorderable {
-                        let id = egui::Id::new(("mod_row", m.id, idx));
-                        let (_, dropped): (_, Option<std::sync::Arc<String>>) =
-                            ui.dnd_drop_zone(egui::Frame::NONE, |ui| {
-                                ui.dnd_drag_source(id, folder.clone(), |ui| {
-                                    self.draw_mod_row(ui, m);
-                                });
-                            });
-                        if let Some(payload) = dropped {
-                            let dragged = payload.as_str().to_string();
-                            if dragged != folder {
-                                self.reorder_drop(&dragged, Some(&folder));
-                            }
-                        }
-                    } else {
-                        self.draw_mod_row(ui, m);
+                        row_rects.push((row.rect, m.folder.clone()));
                     }
                     ui.separator();
                 }
 
-                // Zona final: soltar aquí mueve el mod al final de la lista.
-                if reorderable {
-                    let (_, dropped): (_, Option<std::sync::Arc<String>>) =
-                        ui.dnd_drop_zone(egui::Frame::NONE, |ui| {
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    egui::RichText::new("▾ Suelta aquí para mover al final")
-                                        .weak()
-                                        .small(),
-                                );
-                            });
-                        });
-                    if let Some(payload) = dropped {
-                        let dragged = payload.as_str().to_string();
-                        self.reorder_drop(&dragged, None);
+                if reorderable && !row_rects.is_empty() {
+                    let ctx = ui.ctx();
+                    // ¿Hay un arrastre activo desde un asidero?
+                    let active: Option<String> = filtered
+                        .iter()
+                        .find(|m| ctx.is_being_dragged(egui::Id::new(("mod_handle", m.id))))
+                        .map(|m| m.folder.clone());
+
+                    let pos = ctx.pointer_hover_pos().or_else(|| ctx.pointer_latest_pos());
+
+                    let prev_dragging = self.drag_folder.take();
+                    if let Some(folder) = active {
+                        self.drag_folder = Some(folder.clone());
+                        // Índice de inserción y barra indicadora.
+                        let index = match pos {
+                            Some(p) => row_rects
+                                .iter()
+                                .position(|(r, _)| p.y < r.center().y)
+                                .unwrap_or(row_rects.len()),
+                            None => row_rects.len(),
+                        };
+                        self.drop_index = index;
+                        let y = if index < row_rects.len() {
+                            row_rects[index].0.top()
+                        } else {
+                            row_rects.last().map(|(r, _)| r.bottom()).unwrap_or_else(|| ui.clip_rect().bottom())
+                        };
+                        let x0 = ui.clip_rect().left() + 4.0;
+                        let x1 = ui.clip_rect().right() - 4.0;
+                        ui.painter().line_segment(
+                            [egui::pos2(x0, y), egui::pos2(x1, y)],
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(90, 160, 255)),
+                        );
+                    } else if let Some(folder) = prev_dragging {
+                        // Suelta: persiste el orden con la posición señalada.
+                        let index = self.drop_index;
+                        self.reorder_drop_at(&folder, index);
                     }
                 }
             });

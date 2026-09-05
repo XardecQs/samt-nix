@@ -94,6 +94,10 @@ impl RuntimePaths {
     }
 }
 
+pub fn config_dir_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("gta-mo"))
+}
+
 pub fn find_config_file() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("GTA_MO_CONFIG") {
         let p = PathBuf::from(val);
