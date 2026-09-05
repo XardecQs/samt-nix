@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use crate::{config, db, overlay, resolver};
@@ -158,6 +159,13 @@ impl LaunchEngine {
             .and_then(|v| v.parse::<u32>().ok());
 
         if unsafe { libc::geteuid() } == 0 {
+            if Self::zero_maps_to_zero_in_initial_ns() {
+                return Err(anyhow::anyhow!(
+                    "gta-mo se ejecuta como root real en el namespace inicial; no se puede \
+                     'dropear' a un usuario de forma segura. Ejecútalo como tu usuario o a \
+                     través del subcomando `steam` (GTA_MO_DROP_UID no aplica aquí)."
+                ));
+            }
             return match drop_uid {
                 Some(uid) => Self::launch_game_dropped(exe_path, working_dir, uid, drop_gid),
                 None => anyhow::bail!(
@@ -167,6 +175,47 @@ impl LaunchEngine {
         }
 
         Self::launch_game_direct(exe_path, working_dir)
+    }
+
+    /// True when this process runs with euid 0 in the *initial* (host) user
+    /// namespace, i.e. genuinely as real root. The Steam wrapper runs inside a
+    /// fresh user namespace where uid 0 maps to a real (non-zero) uid, so its
+    /// `/proc/self/uid_map` does not start with `0 0`.
+    fn zero_maps_to_zero_in_initial_ns() -> bool {
+        let Ok(content) = std::fs::read_to_string("/proc/self/uid_map") else {
+            return false;
+        };
+        for line in content.lines() {
+            let mut it = line.split_whitespace();
+            let inside = it.next().and_then(|v| v.parse::<u64>().ok());
+            let outside = it.next().and_then(|v| v.parse::<u64>().ok());
+            match (inside, outside) {
+                (Some(0), Some(outside)) => return outside == 0,
+                _ => continue,
+            }
+        }
+        false
+    }
+
+    /// Primary group of `uid` via `getpwuid`, when resolvable.
+    fn primary_gid_for_uid(uid: u32) -> Option<u32> {
+        unsafe {
+            let mut pwd: libc::passwd = std::mem::zeroed();
+            let mut buf = vec![0u8; 4096];
+            let mut result: *mut libc::passwd = std::ptr::null_mut();
+            let rc = libc::getpwuid_r(
+                uid,
+                &mut pwd,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut result,
+            );
+            if rc == 0 && !result.is_null() {
+                Some(pwd.pw_gid)
+            } else {
+                None
+            }
+        }
     }
 
     fn launch_game_direct(exe_path: &Path, working_dir: &Path) -> anyhow::Result<()> {
@@ -193,7 +242,11 @@ impl LaunchEngine {
         uid: u32,
         gid: Option<u32>,
     ) -> anyhow::Result<()> {
-        let gid = gid.unwrap_or(uid);
+        // uid/GID del usuario real. El gid por defecto NO es el uid: usa el
+        // grupo primario del usuario cuando se puede resolver.
+        let gid = gid
+            .or_else(|| Self::primary_gid_for_uid(uid))
+            .unwrap_or(uid);
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             anyhow::bail!("fork falló: {}", std::io::Error::last_os_error());
@@ -237,6 +290,9 @@ impl LaunchEngine {
             );
             return 1;
         }
+        // Requerido para poder escribir gid_map sin CAP_SETGID en el namespace
+        // padre. Falla con EPERM si ya está denegado: lo ignoramos.
+        let _ = std::fs::write("/proc/self/setgroups", "deny");
         if let Err(e) = std::fs::write("/proc/self/uid_map", format!("{uid} 0 1")) {
             eprintln!("gta-mo: no se pudo escribir /proc/self/uid_map: {e}");
             return 1;
@@ -318,6 +374,14 @@ impl LaunchEngine {
             graph.prompt = resolver::DepPrompt::AutoEnable;
         } else if opts.deps_ignore {
             graph.prompt = resolver::DepPrompt::Ignore;
+        } else if !std::io::stdin().is_terminal() {
+            // Headless context (Steam/scripts): stdin is EOF, so a Prompt would
+            // block forever. Skip disabled dependencies with a warning instead.
+            crate::log::warn(
+                "stdin no es una terminal: dependencias requeridas desactivadas se ignorarán. \
+                 Usa --deps-enable para autoactivarlas.",
+            );
+            graph.prompt = resolver::DepPrompt::Ignore;
         }
 
         if !graph.validate_dependencies() || !graph.detect_cycles() {
@@ -326,7 +390,9 @@ impl LaunchEngine {
 
         graph.enable_mods_for_deps()?;
         graph.warn_optional_deps();
-        graph.sync_enabled_to_db(&conn, profile_id)?;
+        if !opts.dry_run {
+            graph.sync_enabled_to_db(&conn, profile_id)?;
+        }
 
         if graph.enabled_ids.is_empty() {
             log("Sin mods activos — lanzando juego limpio.");
