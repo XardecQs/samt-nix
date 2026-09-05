@@ -137,6 +137,21 @@ pub fn mod_layers(mods_dir: &Path, folder: &str) -> Vec<PathBuf> {
     vec![base]
 }
 
+/// Atomically writes `content` to `path` (temp file + rename) so a crash or
+/// power loss can never leave a truncated `mod.toml`.
+fn write_manifest(path: &Path, content: &str) -> anyhow::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("No hay directorio padre para {}", path.display()))?;
+    let tmp = dir.join(format!(".mod.toml.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, content)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 /// Rewrites the `name` field of a `mod.toml` (keeping comments and the rest of
 /// the file intact). No-op when the mod has no manifest.
 pub fn set_meta_name(mods_dir: &Path, folder: &str, name: &str) -> anyhow::Result<()> {
@@ -147,8 +162,7 @@ pub fn set_meta_name(mods_dir: &Path, folder: &str, name: &str) -> anyhow::Resul
     let content = std::fs::read_to_string(&path)?;
     let mut doc: toml_edit::DocumentMut = content.parse()?;
     doc["name"] = toml_edit::value(name);
-    std::fs::write(&path, doc.to_string())?;
-    Ok(())
+    write_manifest(&path, &doc.to_string())
 }
 
 /// Adds/removes `dep_ref` from the `[dependencies]` section of a `mod.toml`
@@ -173,23 +187,35 @@ pub fn set_mod_dependency(
             toml_edit::Item::Table(toml_edit::Table::new()),
         );
     }
-    let deps = doc["dependencies"].as_table_mut().unwrap();
-    let key = if optional { "optional" } else { "required" };
-    if !deps.contains_key(key) {
-        deps.insert(
-            key,
-            toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
-        );
-    }
-    let arr = deps[key].as_array_mut().unwrap();
+    let deps = doc["dependencies"].as_table_mut().ok_or_else(|| {
+        anyhow::anyhow!("'dependencies' en {} no es una tabla", path.display())
+    })?;
     if add {
+        let key = if optional { "optional" } else { "required" };
+        if !deps.contains_key(key) {
+            deps.insert(
+                key,
+                toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
+            );
+        }
+        let arr = deps[key].as_array_mut().ok_or_else(|| {
+            anyhow::anyhow!("'{key}' en {} no es una lista", path.display())
+        })?;
         if !arr.iter().any(|v| v.as_str() == Some(dep_ref)) {
             arr.push(dep_ref.to_string());
         }
     } else {
-        arr.retain(|v| v.as_str() != Some(dep_ref));
+        // Removal is key-agnostic: the dep may live under `required` or
+        // `optional` (we don't track that flag in the DB at remove time).
+        for key in ["required", "optional"] {
+            if deps.contains_key(key) {
+                if let Some(arr) = deps[key].as_array_mut() {
+                    arr.retain(|v| v.as_str() != Some(dep_ref));
+                }
+            }
+        }
     }
-    std::fs::write(&path, doc.to_string())?;
+    write_manifest(&path, &doc.to_string())?;
     Ok(())
 }
 

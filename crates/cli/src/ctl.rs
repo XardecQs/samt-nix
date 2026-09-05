@@ -19,6 +19,23 @@ fn render_table(headers: Vec<String>, rows: Vec<Vec<String>>) -> String {
     table.to_string()
 }
 
+/// Mirrors the `folder_name` CHECK constraint from `schema.sql` so folder paths
+/// can be validated *before* touching the filesystem (the DB constraint alone
+/// runs too late for `cmd_init`, which writes first).
+fn valid_folder_name(folder: &str) -> bool {
+    !folder.is_empty()
+        && !folder.contains('|')
+        && !folder.contains('/')
+        && !folder.contains('\\')
+        && !folder.contains(':')
+        && folder != "."
+        && folder != ".."
+        && !folder.starts_with(".. ")
+        && !folder.starts_with("..\\")
+        && !folder.starts_with("../")
+        && folder.trim() == folder
+}
+
 #[derive(Serialize)]
 struct DepJson {
     id: i64,
@@ -277,6 +294,9 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 "#;
 
 fn cmd_init(conn: &Connection, folder: &str) -> anyhow::Result<()> {
+    if !valid_folder_name(folder) {
+        anyhow::bail!("Nombre de carpeta no válido: '{folder}'.");
+    }
     let cfg =
         gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
     let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
@@ -960,12 +980,8 @@ fn cmd_list(
 }
 
 fn cmd_add(conn: &Connection, folder: &str, name: Option<&str>) -> anyhow::Result<()> {
-    if folder.contains(':') || folder.contains('|') || folder.contains('/') || folder.contains('\\')
-    {
-        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\'.");
-    }
-    if folder == "." || folder == ".." {
-        anyhow::bail!("Nombre de carpeta no valido.");
+    if !valid_folder_name(folder) {
+        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\', ni ser '.', '..', ni llevar espacios alrededor.");
     }
     if db::mod_exists(conn, folder)? {
         anyhow::bail!("El mod '{folder}' ya existe en la base de datos.");
@@ -1140,18 +1156,8 @@ fn cmd_rename_folder(
     m: &db::ModIdentity,
     new_folder: &str,
 ) -> anyhow::Result<()> {
-    if new_folder.contains(':')
-        || new_folder.contains('|')
-        || new_folder.contains('/')
-        || new_folder.contains('\\')
-    {
-        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\'.");
-    }
-    if new_folder == "." || new_folder == ".." {
-        anyhow::bail!("Nombre de carpeta no valido.");
-    }
-    if new_folder.trim() != new_folder {
-        anyhow::bail!("El nombre de carpeta no puede tener espacios al inicio o final.");
+    if !valid_folder_name(new_folder) {
+        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\', ni ser '.', '..', ni llevar espacios alrededor.");
     }
 
     let cfg =
@@ -1653,6 +1659,15 @@ fn cmd_open(conn: &Connection, ident: &str, url: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn dep_exists(conn: &Connection, mod_id: i64, dep_id: i64) -> anyhow::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM mod_dependencies WHERE mod_id = ?1 AND dependency_id = ?2",
+        params![mod_id, dep_id],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn cmd_dep_add(
     conn: &Connection,
     mod_ident: &str,
@@ -1664,8 +1679,20 @@ fn cmd_dep_add(
     let mod_folder = m.folder_name.clone();
     let dep_folder = d.folder_name.clone();
 
-    db::add_dependency(conn, m.id, d.id, !optional)?;
-    dep_writeback(conn, &m, &d, optional, true)?;
+    if dep_exists(conn, m.id, d.id)? {
+        anyhow::bail!("La dependencia ya existe.");
+    }
+
+    // The mod.toml manifest is updated first and the DB row last (single
+    // source of truth), so a failing write-back never leaves the DB changed
+    // while the command reports failure.
+    if let Err(e) = dep_writeback(conn, &m, &d, optional, true) {
+        anyhow::bail!("No se pudo actualizar el manifest: {e:#}");
+    }
+    if let Err(e) = db::add_dependency(conn, m.id, d.id, !optional) {
+        let _ = dep_writeback(conn, &m, &d, optional, false);
+        return Err(e);
+    }
 
     if optional {
         log::info(format!(
@@ -1683,8 +1710,17 @@ fn cmd_dep_rm(conn: &Connection, mod_ident: &str, dep_ident: &str) -> anyhow::Re
     let mod_folder = m.folder_name.clone();
     let dep_folder = d.folder_name.clone();
 
-    db::remove_dependency(conn, m.id, d.id)?;
-    dep_writeback(conn, &m, &d, false, false)?;
+    if !dep_exists(conn, m.id, d.id)? {
+        anyhow::bail!("La dependencia no existe.");
+    }
+
+    if let Err(e) = dep_writeback(conn, &m, &d, false, false) {
+        anyhow::bail!("No se pudo actualizar el manifest: {e:#}");
+    }
+    if let Err(e) = db::remove_dependency(conn, m.id, d.id) {
+        let _ = dep_writeback(conn, &m, &d, false, true);
+        return Err(e);
+    }
 
     log::info(format!(
         "Dependencia eliminada: '{mod_folder}' ya no depende de '{dep_folder}'."
@@ -1919,7 +1955,7 @@ fn cmd_import(conn: &Connection, path: &str, force: bool) -> anyhow::Result<()> 
         log::warn("Esto reemplazará el estado actual de la base de datos con el backup.");
         eprintln!();
         eprint!("Continuar? [s/N]: ");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
+        std::io::Write::flush(&mut std::io::stderr()).ok();
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         let confirm = input.trim().to_lowercase();
@@ -1929,7 +1965,24 @@ fn cmd_import(conn: &Connection, path: &str, force: bool) -> anyhow::Result<()> 
         }
     }
 
-    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    // All-or-nothing: replace the live DB state inside a single transaction so
+    // a mid-import failure rolls back instead of leaving a wiped database.
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let result = do_import(conn, &data);
+    match result {
+        Ok(()) => {
+            conn.execute("COMMIT", [])?;
+            log::info("Importación completada.");
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
+}
+
+fn do_import(conn: &Connection, data: &ExportFile) -> anyhow::Result<()> {
     conn.execute("DELETE FROM mod_groups", [])?;
     conn.execute("DELETE FROM groups", [])?;
     conn.execute("DELETE FROM mod_dependencies", [])?;
@@ -1937,7 +1990,6 @@ fn cmd_import(conn: &Connection, path: &str, force: bool) -> anyhow::Result<()> 
     conn.execute("DELETE FROM mods", [])?;
     conn.execute("DELETE FROM profiles", [])?;
     let _ = conn.execute("DELETE FROM sqlite_sequence", []);
-
     let mut profile_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut active_id: Option<i64> = None;
     for p in &data.profiles {
@@ -2004,8 +2056,6 @@ fn cmd_import(conn: &Connection, path: &str, force: bool) -> anyhow::Result<()> 
             params![gid, mid, pid],
         )?;
     }
-
-    log::info("Importación completada.");
     Ok(())
 }
 

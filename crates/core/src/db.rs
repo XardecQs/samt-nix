@@ -1606,29 +1606,23 @@ mod tests {
     }
 
     #[test]
-    fn migration_from_old_schema_preserves_states() {
+    fn refuses_pre_versioned_schema() {
         let conn = mem_conn();
         build_old_schema(&conn);
-        run_migrations(&conn).unwrap();
-
-        let p = active_profile(&conn).unwrap();
-        assert_eq!(p.slug, "default");
-        assert!(p.is_active);
-
-        let mods = load_all_mods_for_profile(&conn, p.id).unwrap();
-        let m1 = mods.iter().find(|m| m.folder_name == "m1").unwrap();
-        assert!(m1.enabled);
-        assert_eq!(m1.load_order, 20);
-        let m2 = mods.iter().find(|m| m.folder_name == "m2").unwrap();
-        assert!(!m2.enabled);
-        assert_eq!(m2.load_order, 10);
-
-        let deps = load_dependencies(&conn).unwrap();
-        assert!(deps.get(&1).map(|d| d.len()).unwrap_or(0) == 1);
-        assert!(deps.get(&1).unwrap()[0].required);
-
-        run_migrations(&conn).unwrap();
-        run_migrations(&conn).unwrap();
+        let err = run_migrations(&conn).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("versión antigua"),
+            "el error debe explicar que la DB es antigua: {err:#}"
+        );
+        // nada se migra ni se toca
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mods", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 0);
     }
 
     #[test]
@@ -1695,19 +1689,8 @@ mod tests {
     }
 
     #[test]
-    fn v2_migration_adds_metadata_columns() {
+    fn fresh_bootstrap_has_full_metadata_schema() {
         let conn = mem_conn();
-        conn.execute_batch(
-            "CREATE TABLE mods (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                folder_name TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                enabled INTEGER DEFAULT 0,
-                load_order INTEGER DEFAULT 0
-            );
-            INSERT INTO mods (folder_name, name) VALUES ('m1', 'M1');",
-        )
-        .unwrap();
         run_migrations(&conn).unwrap();
 
         let cols: Vec<String> = conn
@@ -1731,6 +1714,13 @@ mod tests {
         ] {
             assert!(cols.contains(&c.to_string()), "falta columna {c}");
         }
+
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+
+        // idempotente
         run_migrations(&conn).unwrap();
         run_migrations(&conn).unwrap();
     }
