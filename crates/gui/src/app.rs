@@ -10,6 +10,7 @@ use crate::model::{filter_and_sort, Filters, Snapshot, SortField};
 enum Tab {
     Mods,
     Profiles,
+    Conflicts,
     Log,
 }
 
@@ -76,6 +77,9 @@ pub struct GtaMoApp {
     confirm: Option<ConfirmState>,
     relations: Option<crate::backend::ModRelations>,
     relations_for: Option<i64>,
+    conflicts: Vec<crate::backend::ConflictView>,
+    conflicts_pending: bool,
+    scan_gen: u64,
     covers: HashMap<String, egui::TextureHandle>,
     covers_order: VecDeque<String>,
     cover_missing: HashSet<String>,
@@ -105,6 +109,9 @@ impl GtaMoApp {
             confirm: None,
             relations: None,
             relations_for: None,
+            conflicts: Vec::new(),
+            conflicts_pending: false,
+            scan_gen: 0,
             covers: HashMap::new(),
             covers_order: VecDeque::new(),
             cover_missing: HashSet::new(),
@@ -123,8 +130,25 @@ impl GtaMoApp {
                 self.snapshot = s;
                 self.status = None;
                 self.reload_relations();
+                self.start_conflict_scan();
             }
             Err(e) => self.status = Some(e),
+        }
+    }
+
+    /// Kicks off a background conflict scan. Results are discarded if they
+    /// arrive after a newer scan started (`scan_gen`).
+    fn start_conflict_scan(&mut self) {
+        self.scan_gen += 1;
+        self.conflicts_pending = true;
+        match self.backend.mods_dir_path() {
+            Some(mdir) => {
+                let resolved = self.snapshot.resolved.clone();
+                let gen = self.scan_gen;
+                let tx = self.tx.clone();
+                crate::backend::Backend::scan_conflicts_async(gen, mdir, resolved, tx);
+            }
+            None => self.conflicts_pending = false,
         }
     }
 
@@ -171,6 +195,12 @@ impl GtaMoApp {
                     self.log.push(l);
                     if self.log.len() > 2000 {
                         self.log.drain(..self.log.len() - 2000);
+                    }
+                }
+                GuiEvent::ConflictScan(gen, list) => {
+                    if gen == self.scan_gen {
+                        self.conflicts = list;
+                        self.conflicts_pending = false;
                     }
                 }
                 GuiEvent::CommandDone(ok, msg) => {
@@ -464,6 +494,16 @@ impl eframe::App for GtaMoApp {
                 {
                     self.tab = Tab::Profiles;
                 }
+                let conflict_label = format!(
+                    "Conflictos ({})",
+                    self.conflicts.iter().filter(|c| !c.duplicate).count()
+                );
+                if ui
+                    .selectable_label(self.tab == Tab::Conflicts, conflict_label)
+                    .clicked()
+                {
+                    self.tab = Tab::Conflicts;
+                }
                 if ui.selectable_label(self.tab == Tab::Log, "Log").clicked() {
                     self.tab = Tab::Log;
                 }
@@ -483,16 +523,29 @@ impl eframe::App for GtaMoApp {
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Mods => self.ui_mods(ui),
             Tab::Profiles => self.ui_profiles(ui),
+            Tab::Conflicts => self.ui_conflicts(ui),
             Tab::Log => self.ui_log(ui),
         });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if let Some(e) = &self.status {
+                if let Some(e) = self.backend.error_str() {
+                    ui.colored_label(egui::Color32::RED, e);
+                    if ui.button("Reintentar").clicked() {
+                        self.backend.retry();
+                        self.refresh();
+                    }
+                } else if let Some(e) = &self.status {
                     ui.colored_label(egui::Color32::YELLOW, e);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("Conflictos: {}", self.snapshot.conflicts));
+                    let n = self.conflicts.iter().filter(|c| !c.duplicate).count();
+                    let conflicts_label = if self.conflicts_pending {
+                        format!("Conflictos: {n}…")
+                    } else {
+                        format!("Conflictos: {n}")
+                    };
+                    ui.label(conflicts_label);
                     ui.separator();
                     let enabled = self.snapshot.mods.iter().filter(|m| m.enabled).count();
                     ui.label(format!(
@@ -981,6 +1034,67 @@ impl GtaMoApp {
                 });
             }
         });
+    }
+
+    fn ui_conflicts(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        if self.conflicts.is_empty() {
+            if self.conflicts_pending {
+                ui.label("Calculando conflictos de archivos…");
+            } else {
+                ui.label("Sin conflictos de archivo entre los mods activos de este perfil.");
+            }
+            return;
+        }
+
+        let mut open: Option<String> = None;
+        let mut open_folder: Option<String> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                for c in &self.conflicts {
+                    ui.horizontal(|ui| {
+                        let sev_color = match c.severity.as_str() {
+                            "alta" => egui::Color32::from_rgb(230, 90, 90),
+                            "media" => egui::Color32::from_rgb(230, 170, 90),
+                            _ => egui::Color32::from_rgb(150, 150, 150),
+                        };
+                        ui.label(
+                            egui::RichText::new(&c.severity).color(sev_color).strong().small(),
+                        );
+                        ui.monospace(&c.path);
+                        if c.duplicate {
+                            ui.label(egui::RichText::new("idéntico").weak().small());
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("provee:").weak().small());
+                        ui.label(
+                            egui::RichText::new(c.providers.join(" → ")).small(),
+                        );
+                        if let Some(winner) = c.providers.first() {
+                            let w = winner.clone();
+                            if ui.button("Ver ganador").clicked() {
+                                open = Some(w.clone());
+                            }
+                            if ui.button("Carpeta").clicked() {
+                                open_folder = Some(w.clone());
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
+            });
+
+        if let Some(folder) = open {
+            if let Some(tm) = self.snapshot.mods.iter().find(|x| x.folder == folder).cloned() {
+                self.selected_mod = Some(tm.id);
+                self.reload_relations();
+            }
+        }
+        if let Some(folder) = open_folder {
+            self.exec(vec!["ctl".into(), "open".into(), folder], false);
+        }
     }
 
     fn ui_log(&mut self, ui: &mut egui::Ui) {

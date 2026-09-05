@@ -14,6 +14,16 @@ use crate::model::{ModView, ProfileView, Snapshot};
 pub enum GuiEvent {
     LogLine(String),
     CommandDone(bool, String),
+    ConflictScan(u64, Vec<ConflictView>),
+}
+
+/// One file conflict for the Conflicts tab.
+#[derive(Debug, Clone)]
+pub struct ConflictView {
+    pub path: String,
+    pub severity: String,
+    pub providers: Vec<String>,
+    pub duplicate: bool,
 }
 
 /// Dependencies and dependents of a mod within the active profile.
@@ -33,6 +43,20 @@ pub struct Backend {
 }
 
 impl Backend {
+    pub fn mods_dir_path(&self) -> Option<PathBuf> {
+        self.mods_dir.clone()
+    }
+
+    pub fn error_str(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Tries to (re)initialize the backend (config + DB). Used to recover from
+    /// a startup failure once the user fixes the environment.
+    pub fn retry(&mut self) {
+        *self = Self::new();
+    }
+
     pub fn new() -> Self {
         let db_path = config::db_path();
         let conn = match db::open_db(&db_path) {
@@ -181,13 +205,7 @@ impl Backend {
             .map(|g| g.name)
             .collect::<Vec<_>>();
 
-        let resolved = resolve_enabled_order(conn, &profile);
-        let conflicts = match resolved {
-            Ok(res) => conflicts::scan_conflicts(&paths.mods_dir, &res)
-                .map(|c| c.iter().filter(|x| !x.duplicate).count())
-                .unwrap_or(0),
-            Err(_) => 0,
-        };
+        let resolved = resolve_enabled_order(conn, &profile).unwrap_or_default();
 
         Ok(Snapshot {
             profiles,
@@ -195,8 +213,39 @@ impl Backend {
             active_slug: profile.slug,
             all_tags,
             all_groups,
-            conflicts,
+            resolved,
         })
+    }
+
+    /// Scans file conflicts on a background thread so the UI thread is never
+    /// blocked walking large mod trees. Results arrive as
+    /// [`GuiEvent::ConflictScan`].
+    pub fn scan_conflicts_async(
+        gen: u64,
+        mods_dir: PathBuf,
+        resolved: Vec<String>,
+        tx: Sender<GuiEvent>,
+    ) {
+        thread::spawn(move || {
+            let list = match conflicts::scan_conflicts(&mods_dir, &resolved) {
+                Ok(cs) => cs
+                    .into_iter()
+                    .map(|c| ConflictView {
+                        path: c.path,
+                        severity: match c.severity {
+                            conflicts::Severity::High => "alta",
+                            conflicts::Severity::Medium => "media",
+                            conflicts::Severity::Info => "info",
+                        }
+                        .to_string(),
+                        providers: c.providers,
+                        duplicate: c.duplicate,
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            let _ = tx.send(GuiEvent::ConflictScan(gen, list));
+        });
     }
 
     /// Spawns `gta-mo <args>` in a background thread, streaming output to `tx`.

@@ -49,7 +49,8 @@ pub struct Snapshot {
     pub active_slug: String,
     pub all_tags: Vec<String>,
     pub all_groups: Vec<String>,
-    pub conflicts: usize,
+    /// Enabled mods of the active profile in overlay priority order (top first).
+    pub resolved: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
