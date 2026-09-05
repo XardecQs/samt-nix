@@ -8,5 +8,12 @@ launcher.lock
 run/
 *.log
 
+# Nix
+result
+result-*
+
+# direnv
+.direnv/
+
 # Local config (personal paths) — use config.toml.example as a template
 config.toml

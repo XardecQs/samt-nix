@@ -31,13 +31,13 @@ in {
       description = "The gta-mod-organizer CLI package to use.";
     };
 
-    enableGui = lib.mkEnableOption "the gta-mo-gui (Fyne) frontend";
+    enableGui = lib.mkEnableOption "the gta-mo-gui (egui) frontend";
 
     guiPackage = lib.mkOption {
       type = lib.types.package;
       default = pkgs.gta-mo-gui;
       defaultText = lib.literalExpression "pkgs.gta-mo-gui";
-      description = "The gta-mo-gui (Fyne frontend) package to use.";
+      description = "The gta-mo-gui (egui frontend) package to use.";
     };
 
     settings = lib.mkOption {

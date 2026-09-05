@@ -195,7 +195,7 @@
 
         shellHook = ''
           export CARGO_TARGET_DIR="$HOME/.cache/gta-mo-target"
-          echo "Listo — GTA Mod Organizer (Rust + Go dev shell)"
+          echo "Listo — GTA Mod Organizer (Rust dev shell)"
         '';
       };
     });

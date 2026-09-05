@@ -28,7 +28,7 @@ Add the flake to your Home Manager configuration:
         {
           programs.gta-mo = {
             enable = true;
-            # enableGui = true;   # also install the gta-mo-gui (Fyne) frontend
+            # enableGui = true;   # also install the gta-mo-gui (egui) frontend
             settings = {
               game_root = "/home/user/Games/GTA_SA";
               proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1";
