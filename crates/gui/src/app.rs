@@ -69,6 +69,8 @@ pub struct GtaMoApp {
     selected_profile: Option<String>,
     busy: bool,
     playing: bool,
+    launch_debug: bool,
+    launch_dry_run: bool,
     pending: VecDeque<Job>,
     input: Option<InputState>,
     confirm: Option<ConfirmState>,
@@ -96,6 +98,8 @@ impl GtaMoApp {
             selected_profile: None,
             busy: false,
             playing: false,
+            launch_debug: false,
+            launch_dry_run: false,
             pending: VecDeque::new(),
             input: None,
             confirm: None,
@@ -384,23 +388,64 @@ impl eframe::App for GtaMoApp {
                             }
                         }
                     });
+                ui.separator();
+                ui.checkbox(&mut self.launch_debug, "Debug")
+                    .on_hover_text("Habilitar log de Proton/DXVK (--debug)");
+                ui.checkbox(&mut self.launch_dry_run, "Previsualizar")
+                    .on_hover_text("Mostrar el orden de capas sin montar ni lanzar (--dry-run)");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let idle = !self.busy && !self.playing;
                     let label = if self.playing { "Jugando…" } else { "Jugar" };
+                    if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
+                        let slug = self.snapshot.active_slug.clone();
+                        self.log.clear();
+                        let mode = if self.launch_dry_run {
+                            "previsualizando (dry-run)"
+                        } else {
+                            "lanzando"
+                        };
+                        self.log.push(format!("--- {mode} perfil '{slug}' ---"));
+                        let mut args: Vec<String> = vec!["launch".into(), "--deps-enable".into()];
+                        if self.launch_debug {
+                            args.push("--debug".into());
+                        }
+                        if self.launch_dry_run {
+                            args.push("--dry-run".into());
+                        }
+                        args.push("--profile".into());
+                        args.push(slug.clone());
+                        self.exec(args, !self.launch_dry_run);
+                    }
                     if ui
-                        .add_enabled(!self.busy, egui::Button::new(label))
+                        .add_enabled(idle, egui::Button::new("Limpiar"))
+                        .on_hover_text("Eliminar mods huérfanos (carpetas desaparecidas)")
                         .clicked()
                     {
                         let slug = self.snapshot.active_slug.clone();
-                        self.log.clear();
-                        self.log.push(format!("--- Lanzando perfil '{slug}' ---"));
                         self.exec(
                             vec![
                                 "launch".into(),
-                                "--deps-enable".into(),
+                                "--clean".into(),
                                 "--profile".into(),
                                 slug,
                             ],
-                            true,
+                            false,
+                        );
+                    }
+                    if ui
+                        .add_enabled(idle, egui::Button::new("Descubrir"))
+                        .on_hover_text("Escanear mods/ y registrar mods nuevos")
+                        .clicked()
+                    {
+                        let slug = self.snapshot.active_slug.clone();
+                        self.exec(
+                            vec![
+                                "launch".into(),
+                                "--discover".into(),
+                                "--profile".into(),
+                                slug,
+                            ],
+                            false,
                         );
                     }
                 });
