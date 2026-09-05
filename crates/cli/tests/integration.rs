@@ -134,7 +134,7 @@ fn profiles_are_isolated() {
 }
 
 #[test]
-fn migrates_old_schema_to_profiles() {
+fn refuses_pre_versioned_database() {
     let t = TempDb::new("migrate");
     {
         let conn = rusqlite::Connection::open(&t.db).unwrap();
@@ -171,19 +171,54 @@ fn migrates_old_schema_to_profiles() {
             INSERT INTO mods (folder_name, name, enabled, load_order) VALUES ('m1', 'M1', 1, 30);
             INSERT INTO mods (folder_name, name, enabled, load_order) VALUES ('m2', 'M2', 0, 10);
             INSERT INTO mod_dependencies (mod_id, dependency_id, required) VALUES (1, 2, 1);
-        ",
+            ",
         )
         .unwrap();
     }
 
-    let v = json(&t.run_ok(&["--profile", "default", "ctl", "list", "--json"]));
-    let arr = v.as_array().unwrap();
-    let m1 = arr.iter().find(|m| m["folder"] == "m1").unwrap();
-    assert!(m1["enabled"].as_bool().unwrap());
-    assert_eq!(m1["order"].as_i64().unwrap(), 30);
-    assert_eq!(m1["deps"][0]["folder"].as_str().unwrap(), "m2");
-    let m2 = arr.iter().find(|m| m["folder"] == "m2").unwrap();
-    assert!(!m2["enabled"].as_bool().unwrap());
+    let out = t.run(&["ctl", "list", "--json"]);
+    assert!(
+        !out.status.success(),
+        "una base de datos pre-versionada debe rechazarse, no migrarse"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("versión antigua"),
+        "el error debería explicar que la DB es antigua: {stderr}"
+    );
+
+    {
+        let conn = rusqlite::Connection::open(&t.db).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 0, "la base de datos no debe migrarse");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mods", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "los datos originales deben quedar intactos");
+    }
+}
+
+#[test]
+fn fresh_database_bootstraps_to_latest_schema() {
+    let t = TempDb::new("freshboot");
+    let out = t.run_ok(&["ctl", "list", "--json"]);
+    assert!(json(&out).is_array());
+
+    let conn = rusqlite::Connection::open(&t.db).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 6);
+    let profile: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM profiles WHERE slug = 'default'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(profile, 1);
 }
 
 #[test]

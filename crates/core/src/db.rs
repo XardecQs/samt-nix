@@ -591,52 +591,61 @@ pub fn ensure_db_dir(db_path: &Path) -> anyhow::Result<()> {
 pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
     ensure_db_dir(db_path)?;
     let conn = Connection::open(db_path)?;
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA journal_mode = WAL;
+         PRAGMA busy_timeout = 5000;",
+    )?;
     Ok(conn)
 }
 
 /// Current schema version. Every new migration step bumps it.
 const SCHEMA_VERSION: i64 = 6;
 
+/// Applies any pending schema migration. The whole chain runs inside a single
+/// transaction: a failure rolls everything back and `user_version` is only
+/// bumped to the target once the work is committed.
 pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
-    if version < 1 {
-        bootstrap_to_v1(conn)?;
-        conn.pragma_update(None, "user_version", 1)?;
+    if version >= SCHEMA_VERSION {
+        return Ok(());
     }
 
-    if version < 2 {
-        migrate_to_v2(conn)?;
-        conn.pragma_update(None, "user_version", 2)?;
-    }
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> anyhow::Result<()> {
+        if version < 1 {
+            bootstrap_to_v1(conn)?;
+        }
+        if version < 2 {
+            migrate_to_v2(conn)?;
+        }
+        if version < 3 {
+            migrate_to_v3(conn)?;
+        }
+        if version < 4 {
+            migrate_to_v4(conn)?;
+        }
+        if version < 5 {
+            migrate_to_v5(conn)?;
+        }
+        if version < 6 {
+            migrate_to_v6(conn)?;
+        }
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        Ok(())
+    })();
 
-    if version < 3 {
-        migrate_to_v3(conn)?;
-        conn.pragma_update(None, "user_version", 3)?;
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-
-    if version < 4 {
-        migrate_to_v4(conn)?;
-        conn.pragma_update(None, "user_version", 4)?;
-    }
-
-    if version < 5 {
-        migrate_to_v5(conn)?;
-        conn.pragma_update(None, "user_version", 5)?;
-    }
-
-    if version < 6 {
-        migrate_to_v6(conn)?;
-        conn.pragma_update(None, "user_version", 6)?;
-    }
-
-    debug_assert!(
-        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap_or(0)
-            == SCHEMA_VERSION
-    );
-    Ok(())
 }
 
 /// Deduplicates global group memberships (keeping the lowest rowid) and adds a
@@ -747,212 +756,57 @@ fn migrate_to_v2(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Applies the base schema and the legacy migrations that bring any
-/// pre-versioned database up to v1. Introspection-based, so it is idempotent
-/// for fresh databases, databases from before profiles, and v1 databases.
+/// Installs the schema on a brand-new database and makes sure a `default`
+/// profile exists and is active. Databases created by pre-versioning builds of
+/// gta-mo (the old bash/early-Rust schema) are refused with a clear message
+/// instead of being migrated: no real databases of that era remain and their
+/// migration paths relied on fragile table rebuilds.
 fn bootstrap_to_v1(conn: &Connection) -> anyhow::Result<()> {
+    let existing_tables: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    if existing_tables > 0 {
+        anyhow::bail!(
+            "Base de datos de una versión antigua de gta-mo (formato sin versionar). \
+             La migración automática desde ese formato ya no está soportada.\n  \
+             Haz una copia de seguridad y elimina el archivo: {}\n  \
+             En la próxima ejecución se creará una base de datos nueva; los mods se \
+             vuelven a registrar desde mods/ (auto_discover o `--discover`).",
+            crate::config::db_path().display()
+        );
+    }
+
     let schema = include_str!("../schema.sql");
     conn.execute_batch(schema)?;
 
-    let has_cascade: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_foreign_key_list('mod_dependencies')
-             WHERE \"from\" = 'mod_id' AND \"on_delete\" = 'CASCADE'",
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))?;
+    if count == 0 {
+        log::info("Creando perfil 'default'...");
+        conn.execute(
+            "INSERT INTO profiles (name, slug, is_active) VALUES ('default', 'default', 1)",
             [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    if !has_cascade {
-        log::info("Migrando schema: añadiendo ON DELETE CASCADE en mod_dependencies...");
-        conn.execute_batch(
-            "BEGIN;
-             CREATE TABLE mod_dependencies_new (
-                 mod_id INTEGER NOT NULL,
-                 dependency_id INTEGER NOT NULL,
-                 PRIMARY KEY (mod_id, dependency_id),
-                 FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
-                 FOREIGN KEY (dependency_id) REFERENCES mods(id) ON DELETE CASCADE,
-                 CHECK(mod_id != dependency_id)
-             );
-             INSERT INTO mod_dependencies_new SELECT * FROM mod_dependencies;
-             DROP TABLE mod_dependencies;
-             ALTER TABLE mod_dependencies_new RENAME TO mod_dependencies;
-             COMMIT;",
         )?;
-        log::info("[+] Migración completada.");
-    }
-
-    let has_colon_constraint: String = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='mods'",
+        log::info("[+] Perfil 'default' creado.");
+    } else {
+        let active: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM profiles WHERE is_active = 1",
             [],
             |row| row.get(0),
-        )
-        .unwrap_or_default();
-
-    if !has_colon_constraint.contains("%:%") {
-        let colon_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM mods WHERE folder_name LIKE '%:%'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        if colon_count > 0 {
-            log::warn(format!(
-                "[!] Advertencia: {} mod(s) contienen ':' en folder_name.",
-                colon_count
-            ));
-            log::warn("    El overlay usa ':' como separador de capas; el montaje fallará.");
-            log::warn("    Renombra las carpetas y actualiza la base de datos antes de continuar.");
-        } else {
-            log::info("Migrando schema: añadiendo restricción ':' en folder_name...");
-            conn.execute_batch(
-                "PRAGMA foreign_keys = OFF;
-                 BEGIN;
-                 CREATE TABLE mod_deps_temp AS SELECT * FROM mod_dependencies;
-                 DROP TABLE mod_dependencies;
-                 CREATE TABLE mods_new (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     folder_name TEXT NOT NULL UNIQUE,
-                     name TEXT NOT NULL CHECK(length(name) > 0),
-                     enabled INTEGER DEFAULT 0 CHECK(enabled IN (0, 1)),
-                     load_order INTEGER DEFAULT 0,
-                     CHECK(
-                         length(folder_name) > 0
-                         AND folder_name NOT LIKE '%|%'
-                         AND folder_name NOT LIKE '%/%'
-                         AND folder_name NOT LIKE '%\\%'
-                         AND folder_name NOT LIKE '%:%'
-                         AND folder_name != '.'
-                         AND folder_name != '..'
-                         AND folder_name NOT LIKE '.. %'
-                         AND folder_name NOT LIKE '..\\%'
-                         AND folder_name NOT LIKE '../%'
-                         AND trim(folder_name) = folder_name
-                     )
-                 );
-                 INSERT INTO mods_new SELECT * FROM mods;
-                 DROP TABLE mods;
-                 ALTER TABLE mods_new RENAME TO mods;
-                 CREATE TABLE mod_dependencies (
-                     mod_id INTEGER NOT NULL,
-                     dependency_id INTEGER NOT NULL,
-                     required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0, 1)),
-                     PRIMARY KEY (mod_id, dependency_id),
-                     FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE,
-                     FOREIGN KEY (dependency_id) REFERENCES mods(id) ON DELETE CASCADE,
-                     CHECK(mod_id != dependency_id)
-                 );
-                 INSERT INTO mod_dependencies SELECT * FROM mod_deps_temp;
-                 DROP TABLE mod_deps_temp;
-                 CREATE INDEX IF NOT EXISTS idx_mod_deps_mod_id ON mod_dependencies(mod_id);
-                 CREATE INDEX IF NOT EXISTS idx_mod_deps_dep_id ON mod_dependencies(dependency_id);
-                 COMMIT;
-                 PRAGMA foreign_keys = ON;",
-            )?;
-            log::info("[+] Migración completada.");
-        }
-    }
-
-    let has_required: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('mod_dependencies')
-             WHERE name = 'required'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    if !has_required {
-        log::info("Migrando schema: añadiendo columna 'required' en mod_dependencies...");
-        conn.execute_batch(
-            "ALTER TABLE mod_dependencies
-             ADD COLUMN required INTEGER NOT NULL DEFAULT 1 CHECK(required IN (0, 1));",
         )?;
-        log::info("[+] Migración completada.");
-    }
-
-    let profiles_exist: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'profiles'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-    if profiles_exist > 0 {
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))?;
-        if count == 0 {
-            log::info("Migrando schema: creando perfil 'default'...");
+        if active == 0 {
+            let first: i64 =
+                conn.query_row("SELECT id FROM profiles ORDER BY id LIMIT 1", [], |row| {
+                    row.get(0)
+                })?;
             conn.execute(
-                "INSERT INTO profiles (name, slug, is_active) VALUES ('default', 'default', 1)",
-                [],
+                "UPDATE profiles SET is_active = 1 WHERE id = ?1",
+                params![first],
             )?;
-            log::info("[+] Perfil 'default' creado.");
-        } else {
-            let active: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM profiles WHERE is_active = 1",
-                [],
-                |row| row.get(0),
-            )?;
-            if active == 0 {
-                let first: i64 =
-                    conn.query_row("SELECT id FROM profiles ORDER BY id LIMIT 1", [], |row| {
-                        row.get(0)
-                    })?;
-                conn.execute(
-                    "UPDATE profiles SET is_active = 1 WHERE id = ?1",
-                    params![first],
-                )?;
-            }
         }
-    }
-
-    let has_enabled_col: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('mods') WHERE name = 'enabled'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-    if has_enabled_col > 0 {
-        log::info("Migrando schema: moviendo estados a perfiles...");
-        conn.execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             BEGIN;
-             INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
-                 SELECT p.id, m.id, m.enabled, m.load_order
-                 FROM mods m JOIN profiles p ON p.slug = 'default';
-             CREATE TABLE mods_new (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 folder_name TEXT NOT NULL UNIQUE,
-                 name TEXT NOT NULL CHECK(length(name) > 0),
-                 CHECK(
-                     length(folder_name) > 0
-                     AND folder_name NOT LIKE '%|%'
-                     AND folder_name NOT LIKE '%/%'
-                     AND folder_name NOT LIKE '%\\%'
-                     AND folder_name NOT LIKE '%:%'
-                     AND folder_name != '.'
-                     AND folder_name != '..'
-                     AND folder_name NOT LIKE '.. %'
-                     AND folder_name NOT LIKE '..\\%'
-                     AND folder_name NOT LIKE '../%'
-                     AND trim(folder_name) = folder_name
-                 )
-             );
-             INSERT INTO mods_new (id, folder_name, name) SELECT id, folder_name, name FROM mods;
-             DROP TABLE mods;
-             ALTER TABLE mods_new RENAME TO mods;
-             UPDATE sqlite_sequence SET seq = (SELECT MAX(id) FROM mods) WHERE name = 'mods';
-             COMMIT;
-             PRAGMA foreign_keys = ON;",
-        )?;
-        log::info("[+] Migración completada.");
     }
 
     Ok(())

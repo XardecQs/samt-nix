@@ -27,10 +27,17 @@ impl Backend {
     pub fn new() -> Self {
         let db_path = config::db_path();
         let conn = match db::open_db(&db_path) {
-            Ok(c) => {
-                let _ = db::run_migrations(&c);
-                Some(c)
-            }
+            Ok(c) => match db::run_migrations(&c) {
+                Ok(()) => Some(c),
+                Err(e) => {
+                    return Self {
+                        conn: None,
+                        mods_dir: None,
+                        bin: find_gta_mo_bin(),
+                        error: Some(format!("No se pudo migrar la base de datos: {e:#}")),
+                    };
+                }
+            },
             Err(e) => {
                 return Self {
                     conn: None,
