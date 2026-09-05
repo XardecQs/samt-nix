@@ -143,6 +143,11 @@ pub enum CtlCommand {
         #[arg(allow_negative_numbers = true)]
         new_order: i64,
     },
+    #[command(about = "Rewrite the whole load order (top priority first)")]
+    Reorder {
+        #[arg(value_name = "FOLDER", num_args = 1..)]
+        mods: Vec<String>,
+    },
     #[command(about = "Rename a mod's display name (or its folder with --folder)")]
     Rename {
         ident: String,

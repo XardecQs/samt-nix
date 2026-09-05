@@ -1003,6 +1003,42 @@ pub fn set_mod_order(
     Ok(())
 }
 
+/// Rewrites the load order of a whole profile in one transaction. `ordered`
+/// must list every mod id, top priority first; the first entry gets the
+/// highest `load_order` and each following one a strictly lower value.
+/// Entries not present in the profile are created as disabled (kept in the
+/// profile so reordering is total).
+pub fn set_profile_order(
+    conn: &Connection,
+    profile_id: i64,
+    ordered: &[i64],
+) -> anyhow::Result<()> {
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> anyhow::Result<()> {
+        let n = ordered.len() as i64;
+        for (idx, mod_id) in ordered.iter().enumerate() {
+            let order = n - idx as i64;
+            conn.execute(
+                "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+                 VALUES (?1, ?2, 0, ?3)
+                 ON CONFLICT(profile_id, mod_id) DO UPDATE SET load_order = excluded.load_order",
+                params![profile_id, mod_id, order],
+            )?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            conn.execute("COMMIT", [])?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
+    }
+}
+
 pub fn set_mod_name(conn: &Connection, id: i64, name: &str) -> anyhow::Result<()> {
     conn.execute("UPDATE mods SET name = ?1 WHERE id = ?2", params![name, id])?;
     Ok(())

@@ -170,6 +170,10 @@ pub fn run(
             let profile = active()?;
             cmd_order(conn, &profile, ident, *new_order)
         }
+        super::CtlCommand::Reorder { mods } => {
+            let profile = active()?;
+            cmd_reorder(conn, &profile, mods)
+        }
         super::CtlCommand::Rename {
             ident,
             new_name,
@@ -1172,6 +1176,25 @@ fn cmd_order(
     log::info(format!(
         "'{}': orden cambiado de {old_order} a {new_order} (perfil '{}').",
         m.folder_name, profile.name
+    ));
+    Ok(())
+}
+
+fn cmd_reorder(conn: &Connection, profile: &db::Profile, folders: &[String]) -> anyhow::Result<()> {
+    if folders.is_empty() {
+        anyhow::bail!("Indica al menos un mod para reordenar.");
+    }
+    let mut ids = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let m = db::get_mod_by_folder(conn, folder)?
+            .ok_or_else(|| anyhow::anyhow!("Mod '{folder}' no encontrado."))?;
+        ids.push(m.id);
+    }
+    db::set_profile_order(conn, profile.id, &ids)?;
+    log::info(format!(
+        "Orden del perfil '{}' actualizado ({} mod(s), prioridad de arriba a abajo).",
+        profile.name,
+        ids.len()
     ));
     Ok(())
 }

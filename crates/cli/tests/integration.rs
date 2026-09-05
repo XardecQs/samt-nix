@@ -650,3 +650,31 @@ fn negative_load_order_is_parseable() {
     assert!(!out.status.success());
     assert_eq!(out.status.code(), Some(1), "clap no debe rechazar -5");
 }
+
+#[test]
+fn reorder_rewrites_profile_order() {
+    let t = TempDb::new("reorder");
+    t.run_ok(&["ctl", "add", "m1"]);
+    t.run_ok(&["ctl", "add", "m2"]);
+    t.run_ok(&["ctl", "add", "m3"]);
+
+    t.run_ok(&["ctl", "reorder", "m3", "m1", "m2"]);
+
+    let v = json(&t.run_ok(&["ctl", "list", "--json"]));
+    let arr = v.as_array().unwrap();
+    let order = |folder: &str| {
+        arr.iter()
+            .find(|m| m["folder"] == folder)
+            .unwrap_or_else(|| panic!("mod {folder} no listado"))
+            .get("order")
+            .and_then(|o| o.as_i64())
+            .unwrap_or(-1)
+    };
+    assert!(
+        order("m3") > order("m1") && order("m1") > order("m2"),
+        "orden esperado m3 > m1 > m2, got m3={} m1={} m2={}",
+        order("m3"),
+        order("m1"),
+        order("m2")
+    );
+}
