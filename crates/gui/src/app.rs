@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use eframe::egui;
@@ -22,6 +22,7 @@ enum InputAction {
 struct InputState {
     title: String,
     label: String,
+    value: String,
     action: InputAction,
 }
 
@@ -30,6 +31,7 @@ impl InputState {
         Self {
             title: title.into(),
             label: label.into(),
+            value: String::new(),
             action,
         }
     }
@@ -45,6 +47,13 @@ struct ConfirmState {
     action: ConfirmAction,
 }
 
+/// A CLI invocation queued for execution. Commands run strictly one at a time
+/// so concurrent `gta-mo ctl` writes never race on the SQLite database.
+struct Job {
+    args: Vec<String>,
+    launch: bool,
+}
+
 pub struct GtaMoApp {
     backend: Backend,
     snapshot: Snapshot,
@@ -57,6 +66,7 @@ pub struct GtaMoApp {
     selected_profile: Option<String>,
     busy: bool,
     playing: bool,
+    pending: VecDeque<Job>,
     input: Option<InputState>,
     confirm: Option<ConfirmState>,
     covers: HashMap<String, egui::TextureHandle>,
@@ -79,6 +89,7 @@ impl GtaMoApp {
             selected_profile: None,
             busy: false,
             playing: false,
+            pending: VecDeque::new(),
             input: None,
             confirm: None,
             covers: HashMap::new(),
@@ -101,11 +112,26 @@ impl GtaMoApp {
         }
     }
 
+    /// Queues a CLI invocation and starts one if none is running. Commands are
+    /// executed strictly one at a time to avoid racing SQLite writes between
+    /// concurrent `gta-mo ctl` processes.
     fn exec(&mut self, args: Vec<String>, launch: bool) {
-        self.busy = true;
-        self.playing = launch;
-        let tx = self.tx.clone();
-        self.backend.run_cli_async(args, tx);
+        self.pending.push_back(Job { args, launch });
+        self.pump();
+    }
+
+    fn pump(&mut self) {
+        if self.busy {
+            return;
+        }
+        if let Some(job) = self.pending.pop_front() {
+            self.busy = true;
+            self.playing = job.launch;
+            let tx = self.tx.clone();
+            self.backend.run_cli_async(job.args, tx);
+        } else {
+            self.playing = false;
+        }
     }
 
     fn poll_events(&mut self) {
@@ -121,12 +147,21 @@ impl GtaMoApp {
                 GuiEvent::CommandDone(ok, msg) => {
                     self.busy = false;
                     self.playing = false;
-                    if ok {
-                        self.refresh();
-                    } else if !msg.is_empty() {
-                        self.status = Some(msg);
+                    if !ok {
+                        // Abort any follow-up jobs: a failed write may have left
+                        // the DB in an unknown state, so don't keep mutating.
+                        self.pending.clear();
+                        self.status = Some(if msg.is_empty() {
+                            "La operación falló (ver Log)".to_string()
+                        } else {
+                            msg
+                        });
+                        self.pump();
                     } else {
-                        self.status = Some("La operación falló (ver Log)".to_string());
+                        self.pump();
+                        if !self.busy {
+                            self.refresh();
+                        }
                     }
                 }
             }
@@ -242,6 +277,7 @@ impl eframe::App for GtaMoApp {
                         for p in &profiles {
                             if ui.selectable_label(p.slug == active, &p.name).clicked()
                                 && p.slug != active
+                                && !(self.busy || self.playing)
                             {
                                 self.exec(
                                     vec![
@@ -420,21 +456,30 @@ impl GtaMoApp {
                     ui.horizontal(|ui| {
                         let mut enabled = m.enabled;
                         if ui
-                            .add_enabled(!self.playing, egui::Checkbox::new(&mut enabled, ""))
+                            .add_enabled(
+                                !(self.busy || self.playing),
+                                egui::Checkbox::new(&mut enabled, ""),
+                            )
                             .on_hover_text("Activar/desactivar")
                             .changed()
                         {
                             self.set_enabled(m.id, enabled);
                         }
                         if ui
-                            .add_enabled(!self.playing, egui::Button::new("▲").small())
+                            .add_enabled(
+                                !(self.busy || self.playing),
+                                egui::Button::new("▲").small(),
+                            )
                             .on_hover_text("Subir prioridad")
                             .clicked()
                         {
                             self.move_mod(m.id, -1);
                         }
                         if ui
-                            .add_enabled(!self.playing, egui::Button::new("▼").small())
+                            .add_enabled(
+                                !(self.busy || self.playing),
+                                egui::Button::new("▼").small(),
+                            )
                             .on_hover_text("Bajar prioridad")
                             .clicked()
                         {
@@ -605,7 +650,10 @@ impl GtaMoApp {
     fn ui_profiles(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("Nuevo").clicked() {
+            if ui
+                .add_enabled(!(self.busy || self.playing), egui::Button::new("Nuevo"))
+                .clicked()
+            {
                 self.input = Some(InputState::new(
                     "Nuevo perfil",
                     "Nombre:",
@@ -614,7 +662,10 @@ impl GtaMoApp {
             }
             let sel = self.selected_profile.clone();
             if ui
-                .add_enabled(sel.is_some(), egui::Button::new("Usar"))
+                .add_enabled(
+                    sel.is_some() && !(self.busy || self.playing),
+                    egui::Button::new("Usar"),
+                )
                 .clicked()
             {
                 if let Some(s) = &sel {
@@ -625,7 +676,10 @@ impl GtaMoApp {
                 }
             }
             if ui
-                .add_enabled(sel.is_some(), egui::Button::new("Renombrar"))
+                .add_enabled(
+                    sel.is_some() && !(self.busy || self.playing),
+                    egui::Button::new("Renombrar"),
+                )
                 .clicked()
             {
                 if let Some(s) = &sel {
@@ -637,7 +691,10 @@ impl GtaMoApp {
                 }
             }
             if ui
-                .add_enabled(sel.is_some(), egui::Button::new("Copiar"))
+                .add_enabled(
+                    sel.is_some() && !(self.busy || self.playing),
+                    egui::Button::new("Copiar"),
+                )
                 .clicked()
             {
                 if let Some(s) = &sel {
@@ -649,7 +706,10 @@ impl GtaMoApp {
                 }
             }
             if ui
-                .add_enabled(sel.is_some(), egui::Button::new("Eliminar"))
+                .add_enabled(
+                    sel.is_some() && !(self.busy || self.playing),
+                    egui::Button::new("Eliminar"),
+                )
                 .clicked()
             {
                 if let Some(s) = &sel {
@@ -707,14 +767,14 @@ impl GtaMoApp {
 
     fn ui_dialogs(&mut self, ctx: &egui::Context) {
         if self.input.is_some() {
-            let (title, label) = {
-                let i = self.input.as_ref().unwrap();
-                (i.title.clone(), i.label.clone())
-            };
+            // Take the state so its `value` buffer persists across frames; it is
+            // put back when the dialog stays open.
+            let mut input = self.input.take().expect("checked is_some");
             let mut open = true;
             let mut close = false;
             let mut submit = false;
-            let mut value = String::new();
+            let title = input.title.clone();
+            let label = input.label.clone();
             egui::Window::new(title)
                 .open(&mut open)
                 .collapsible(false)
@@ -722,7 +782,7 @@ impl GtaMoApp {
                 .show(ctx, |ui| {
                     ui.label(label);
                     submit |= ui
-                        .add(egui::TextEdit::singleline(&mut value).desired_width(220.0))
+                        .add(egui::TextEdit::singleline(&mut input.value).desired_width(220.0))
                         .lost_focus()
                         && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.horizontal(|ui| {
@@ -734,12 +794,13 @@ impl GtaMoApp {
                         }
                     });
                 });
-            if submit && !value.trim().is_empty() {
-                if let Some(input) = self.input.take() {
-                    self.apply_input(input.action, value.trim().to_string());
-                }
+            if submit && !input.value.trim().is_empty() {
+                let value = input.value.trim().to_string();
+                self.apply_input(input.action, value);
             } else if close || !open {
-                self.input = None;
+                // descartar
+            } else {
+                self.input = Some(input);
             }
         }
 
