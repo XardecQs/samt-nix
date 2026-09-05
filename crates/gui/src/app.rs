@@ -17,6 +17,8 @@ enum InputAction {
     Create,
     Rename(String),
     Copy(String),
+    NewMod,
+    RenameMod(String),
 }
 
 struct InputState {
@@ -39,6 +41,7 @@ impl InputState {
 
 enum ConfirmAction {
     DeleteProfile(String),
+    DeleteMod(String),
 }
 
 struct ConfirmState {
@@ -69,6 +72,8 @@ pub struct GtaMoApp {
     pending: VecDeque<Job>,
     input: Option<InputState>,
     confirm: Option<ConfirmState>,
+    relations: Option<crate::backend::ModRelations>,
+    relations_for: Option<i64>,
     covers: HashMap<String, egui::TextureHandle>,
     covers_order: VecDeque<String>,
     cover_missing: HashSet<String>,
@@ -94,6 +99,8 @@ impl GtaMoApp {
             pending: VecDeque::new(),
             input: None,
             confirm: None,
+            relations: None,
+            relations_for: None,
             covers: HashMap::new(),
             covers_order: VecDeque::new(),
             cover_missing: HashSet::new(),
@@ -111,8 +118,22 @@ impl GtaMoApp {
                 }
                 self.snapshot = s;
                 self.status = None;
+                self.reload_relations();
             }
             Err(e) => self.status = Some(e),
+        }
+    }
+
+    fn reload_relations(&mut self) {
+        match self.selected_mod {
+            Some(id) => {
+                self.relations = self.backend.mod_relations(id).ok();
+                self.relations_for = Some(id);
+            }
+            None => {
+                self.relations = None;
+                self.relations_for = None;
+            }
         }
     }
 
@@ -515,6 +536,22 @@ impl GtaMoApp {
                         }
                     }
                 });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        !(self.busy || self.playing),
+                        egui::Button::new("+ Nuevo mod"),
+                    )
+                    .on_hover_text("Crear carpeta con plantilla mod.toml y registrar el mod")
+                    .clicked()
+                {
+                    self.input = Some(InputState::new(
+                        "Nuevo mod",
+                        "Nombre de carpeta del mod:",
+                        InputAction::NewMod,
+                    ));
+                }
+            });
         });
         ui.separator();
 
@@ -585,6 +622,9 @@ impl GtaMoApp {
             self.selected_mod = None;
             return;
         };
+        if self.relations_for != self.selected_mod {
+            self.reload_relations();
+        }
 
         ui.horizontal(|ui| {
             ui.heading(&m.name);
@@ -602,6 +642,8 @@ impl GtaMoApp {
             }
         }
 
+        let rel = self.relations.clone();
+        let mut go_to: Option<String> = None;
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
@@ -685,8 +727,97 @@ impl GtaMoApp {
                     ui.add_space(6.0);
                 }
 
+                if let Some(r) = &rel {
+                    if !r.depends.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("Depende de").strong());
+                        for (folder, name, required, enabled) in &r.depends {
+                            let title = if name.is_empty() {
+                                folder.clone()
+                            } else {
+                                format!("{name} ({})", if *required { "requerido" } else { "opcional" })
+                            };
+                            let color = if *enabled {
+                                egui::Color32::from_rgb(130, 200, 130)
+                            } else {
+                                egui::Color32::from_rgb(230, 120, 120)
+                            };
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&title).color(color).size(13.0),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text(format!(
+                                    "{folder} · {} — clic para verlo",
+                                    if *enabled { "activo" } else { "inactivo" }
+                                ))
+                                .clicked()
+                            {
+                                go_to = Some(folder.clone());
+                            }
+                        }
+                    }
+                    if !r.dependents.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("Usado por").strong());
+                        for (folder, name, enabled) in &r.dependents {
+                            let title = if name.is_empty() {
+                                folder.clone()
+                            } else {
+                                name.clone()
+                            };
+                            let color = if *enabled {
+                                egui::Color32::from_rgb(130, 200, 130)
+                            } else {
+                                egui::Color32::from_rgb(190, 190, 190)
+                            };
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&title).color(color).size(13.0),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text(format!("{folder} — clic para verlo"))
+                                .clicked()
+                            {
+                                go_to = Some(folder.clone());
+                            }
+                        }
+                    }
+                }
+
                 ui.horizontal(|ui| {
                     let folder = m.folder.clone();
+                    if ui
+                        .add_enabled(
+                            !(self.busy || self.playing),
+                            egui::Button::new("Renombrar"),
+                        )
+                        .on_hover_text("Cambiar el nombre visible (y el de mod.toml)")
+                        .clicked()
+                    {
+                        self.input = Some(InputState::new(
+                            "Renombrar mod",
+                            "Nuevo nombre:",
+                            InputAction::RenameMod(folder.clone()),
+                        ));
+                    }
+                    if ui
+                        .add_enabled(
+                            !(self.busy || self.playing),
+                            egui::Button::new("Eliminar"),
+                        )
+                        .clicked()
+                    {
+                        self.confirm = Some(ConfirmState {
+                            title: "Eliminar mod".into(),
+                            message: format!("¿Eliminar el mod '{folder}' y sus estados?"),
+                            action: ConfirmAction::DeleteMod(folder.clone()),
+                        });
+                    }
                     if ui.button("Abrir carpeta").clicked() {
                         self.exec(vec!["ctl".into(), "open".into(), folder], false);
                     }
@@ -701,6 +832,12 @@ impl GtaMoApp {
                     }
                 });
             });
+        if let Some(go) = go_to {
+            if let Some(tm) = self.snapshot.mods.iter().find(|x| x.folder == go).cloned() {
+                self.selected_mod = Some(tm.id);
+                self.reload_relations();
+            }
+        }
     }
 
     fn ui_profiles(&mut self, ui: &mut egui::Ui) {
@@ -913,6 +1050,15 @@ impl GtaMoApp {
                     false,
                 );
             }
+            InputAction::NewMod => {
+                self.exec(vec!["ctl".into(), "init".into(), value], false);
+            }
+            InputAction::RenameMod(folder) => {
+                self.exec(
+                    vec!["ctl".into(), "rename".into(), folder, value],
+                    false,
+                );
+            }
         }
     }
 
@@ -926,6 +1072,19 @@ impl GtaMoApp {
                         "delete".into(),
                         slug,
                         "--yes".into(),
+                    ],
+                    false,
+                );
+            }
+            ConfirmAction::DeleteMod(folder) => {
+                self.exec(
+                    vec![
+                        "ctl".into(),
+                        "remove".into(),
+                        folder,
+                        "--yes".into(),
+                        "--profile".into(),
+                        self.snapshot.active_slug.clone(),
                     ],
                     false,
                 );

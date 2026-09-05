@@ -16,6 +16,15 @@ pub enum GuiEvent {
     CommandDone(bool, String),
 }
 
+/// Dependencies and dependents of a mod within the active profile.
+#[derive(Debug, Clone, Default)]
+pub struct ModRelations {
+    /// (folder, name, required, enabled-in-profile)
+    pub depends: Vec<(String, String, bool, bool)>,
+    /// (folder, name, enabled-in-profile)
+    pub dependents: Vec<(String, String, bool)>,
+}
+
 pub struct Backend {
     conn: Option<rusqlite::Connection>,
     pub mods_dir: Option<PathBuf>,
@@ -66,6 +75,29 @@ impl Backend {
 
     pub fn cover_path(&self, folder: &str, cover: &str) -> Option<PathBuf> {
         self.mods_dir.as_ref().map(|d| d.join(folder).join(cover))
+    }
+
+    /// Resolves the dependency graph of a mod within the active profile.
+    pub fn mod_relations(&self, mod_id: i64) -> Result<ModRelations, String> {
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| "Sin conexión a la base de datos".to_string())?;
+        let profile = db::active_profile(conn).map_err(|e| e.to_string())?;
+        let depends = db::get_dependencies_of(conn, profile.id, mod_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(e, req)| (e.folder_name, e.name, req, e.enabled))
+            .collect();
+        let dependents = db::get_dependents_of(conn, profile.id, mod_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|e| (e.folder_name, e.name, e.enabled))
+            .collect();
+        Ok(ModRelations {
+            depends,
+            dependents,
+        })
     }
 
     pub fn snapshot(&self) -> Result<Snapshot, String> {
