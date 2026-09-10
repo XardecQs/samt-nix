@@ -32,6 +32,7 @@ pub struct ModMetaCache {
     pub cover: Option<String>,
     pub mount: Vec<String>,
     pub guides: Vec<String>,
+    pub screenshots: Vec<String>,
     pub tags: Vec<String>,
     /// Bundled components of a composite pack.
     pub components: Vec<crate::meta::MetaComponent>,
@@ -48,6 +49,18 @@ impl ModMetaCache {
 pub struct DepRef {
     pub id: i64,
     pub required: bool,
+}
+
+/// Per-mod dependency health within a profile (for badges and diagnostics).
+#[derive(Debug, Clone, Default)]
+pub struct ModDepStatus {
+    pub required: usize,
+    pub optional: usize,
+    /// Required dependencies installed but disabled in the profile.
+    pub disabled: Vec<String>,
+    /// Required dependencies referenced but not installed (defensive; the FK
+    /// normally makes this impossible).
+    pub missing: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +99,16 @@ pub fn slugify(input: &str) -> String {
 }
 
 pub fn unique_slug(conn: &Connection, base: &str) -> anyhow::Result<String> {
+    unique_slug_excluding(conn, base, None)
+}
+
+/// Like [`unique_slug`] but ignores the row with `exclude_id`, so renaming a
+/// profile to a name that slugs to its own current slug does not append `-2`.
+pub fn unique_slug_excluding(
+    conn: &Connection,
+    base: &str,
+    exclude_id: Option<i64>,
+) -> anyhow::Result<String> {
     let base = slugify(base);
     let base = if base.is_empty() {
         "p".to_string()
@@ -93,22 +116,21 @@ pub fn unique_slug(conn: &Connection, base: &str) -> anyhow::Result<String> {
         base
     };
 
-    let exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM profiles WHERE slug = ?1",
-        params![base],
-        |row| row.get(0),
-    )?;
-    if exists == 0 {
+    let taken = |slug: &str| -> anyhow::Result<bool> {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM profiles WHERE slug = ?1 AND id IS NOT ?2",
+            params![slug, exclude_id],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    };
+
+    if !taken(&base)? {
         return Ok(base);
     }
     for i in 2.. {
         let cand = format!("{base}-{i}");
-        let exists: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM profiles WHERE slug = ?1",
-            params![cand],
-            |row| row.get(0),
-        )?;
-        if exists == 0 {
+        if !taken(&cand)? {
             return Ok(cand);
         }
     }
@@ -204,13 +226,52 @@ pub fn rename_profile(conn: &Connection, id: i64, new_name: &str) -> anyhow::Res
     Ok(())
 }
 
+/// Renames a profile and assigns it a fresh unique slug derived from
+/// `new_name`. Returns `(old_slug, new_slug)` so the caller can move the
+/// profile's runtime directory (`run/profiles/<slug>`).
+pub fn rename_profile_with_slug(
+    conn: &Connection,
+    id: i64,
+    new_name: &str,
+) -> anyhow::Result<(String, String)> {
+    if new_name.trim().is_empty() {
+        anyhow::bail!("El nombre del perfil no puede estar vacío.");
+    }
+    let p = get_profile_by_id(conn, id)?.ok_or_else(|| anyhow::anyhow!("Perfil no encontrado."))?;
+    let new_slug = unique_slug_excluding(conn, new_name, Some(id))?;
+    conn.execute(
+        "UPDATE profiles SET name = ?1, slug = ?2 WHERE id = ?3",
+        params![new_name.trim(), new_slug, id],
+    )?;
+    Ok((p.slug, new_slug))
+}
+
 pub fn delete_profile(conn: &Connection, id: i64) -> anyhow::Result<()> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))?;
     if count <= 1 {
         anyhow::bail!("No se puede eliminar el último perfil.");
     }
+    let was_active: i64 = conn
+        .query_row(
+            "SELECT is_active FROM profiles WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
     conn.execute("PRAGMA foreign_keys = ON", [])?;
     conn.execute("DELETE FROM profiles WHERE id = ?1", params![id])?;
+    if was_active != 0 {
+        if let Ok(first) =
+            conn.query_row("SELECT id FROM profiles ORDER BY id LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        {
+            conn.execute(
+                "UPDATE profiles SET is_active = 1 WHERE id = ?1",
+                params![first],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -351,7 +412,8 @@ pub fn insert_group(conn: &Connection, name: &str, slug: &str) -> anyhow::Result
 pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> anyhow::Result<()> {
     conn.execute(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
-         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10 WHERE id = ?11",
+         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10, screenshots = ?11
+         WHERE id = ?12",
         params![
             cache.mod_id,
             cache.version,
@@ -363,6 +425,7 @@ pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> a
             json_vec(&cache.guides),
             json_vec(&cache.tags),
             json_components(&cache.components),
+            json_vec(&cache.screenshots),
             id,
         ],
     )?;
@@ -600,7 +663,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Applies any pending schema migration. The whole chain runs inside a single
 /// transaction: a failure rolls everything back and `user_version` is only
@@ -632,6 +695,9 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         if version < 6 {
             migrate_to_v6(conn)?;
         }
+        if version < 7 {
+            migrate_to_v7(conn)?;
+        }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     })();
@@ -646,6 +712,20 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
             Err(e)
         }
     }
+}
+
+/// Adds the `screenshots` cache column (JSON list of image paths). Introspection
+/// based and idempotent.
+fn migrate_to_v7(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if !cols.iter().any(|c| c.as_str() == "screenshots") {
+        log::info("Migrando schema: ALTER TABLE mods ADD COLUMN screenshots TEXT");
+        conn.execute("ALTER TABLE mods ADD COLUMN screenshots TEXT", [])?;
+    }
+    Ok(())
 }
 
 /// Deduplicates global group memberships (keeping the lowest rowid) and adds a
@@ -873,6 +953,42 @@ pub fn load_dependencies(conn: &Connection) -> anyhow::Result<HashMap<i64, Vec<D
     Ok(deps)
 }
 
+/// Dependency health of every mod in a profile: counts plus the required
+/// dependencies that are disabled or missing, keyed by mod id.
+pub fn dependency_issues(
+    conn: &Connection,
+    profile_id: i64,
+) -> anyhow::Result<HashMap<i64, ModDepStatus>> {
+    let mods = load_all_mods_for_profile(conn, profile_id)?;
+    let folder_of: HashMap<i64, String> =
+        mods.iter().map(|m| (m.id, m.folder_name.clone())).collect();
+    let enabled_of: HashMap<i64, bool> = mods.iter().map(|m| (m.id, m.enabled)).collect();
+    let deps = load_dependencies(conn)?;
+
+    let mut out: HashMap<i64, ModDepStatus> = HashMap::new();
+    for m in &mods {
+        out.entry(m.id).or_default();
+    }
+    for (mid, refs) in &deps {
+        let entry = out.entry(*mid).or_default();
+        for r in refs {
+            if r.required {
+                entry.required += 1;
+                match folder_of.get(&r.id) {
+                    None => entry.missing.push(format!("id={}", r.id)),
+                    Some(f) if !enabled_of.get(&r.id).copied().unwrap_or(false) => {
+                        entry.disabled.push(f.clone())
+                    }
+                    Some(_) => {}
+                }
+            } else {
+                entry.optional += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn load_enabled_mod_ids_for_profile(
     conn: &Connection,
     profile_id: i64,
@@ -1004,10 +1120,11 @@ pub fn set_mod_order(
 }
 
 /// Rewrites the load order of a whole profile in one transaction. `ordered`
-/// must list every mod id, top priority first; the first entry gets the
-/// highest `load_order` and each following one a strictly lower value.
-/// Entries not present in the profile are created as disabled (kept in the
-/// profile so reordering is total).
+/// lists the top-priority mods first (the first entry gets the highest
+/// `load_order`). Mods already in the profile but missing from `ordered` keep
+/// their relative order and are pushed below the listed ones (negative orders),
+/// so a partial list can never leave a stale high-priority entry on top.
+/// Entries not present in the profile are created as disabled.
 pub fn set_profile_order(
     conn: &Connection,
     profile_id: i64,
@@ -1015,14 +1132,38 @@ pub fn set_profile_order(
 ) -> anyhow::Result<()> {
     conn.execute("BEGIN IMMEDIATE", [])?;
     let result = (|| -> anyhow::Result<()> {
+        let mut listed: HashSet<i64> = HashSet::new();
         let n = ordered.len() as i64;
         for (idx, mod_id) in ordered.iter().enumerate() {
+            listed.insert(*mod_id);
             let order = n - idx as i64;
             conn.execute(
                 "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
                  VALUES (?1, ?2, 0, ?3)
                  ON CONFLICT(profile_id, mod_id) DO UPDATE SET load_order = excluded.load_order",
                 params![profile_id, mod_id, order],
+            )?;
+        }
+
+        // Unlisted mods of the profile, still in their previous relative order,
+        // go below every listed one.
+        let mut stmt = conn.prepare(
+            "SELECT mod_id FROM profile_mods
+             WHERE profile_id = ?1 ORDER BY load_order DESC, mod_id",
+        )?;
+        let existing: Vec<i64> = stmt
+            .query_map(params![profile_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        let mut below = 0i64;
+        for mod_id in existing {
+            if listed.contains(&mod_id) {
+                continue;
+            }
+            below -= 1;
+            conn.execute(
+                "UPDATE profile_mods SET load_order = ?1 WHERE profile_id = ?2 AND mod_id = ?3",
+                params![below, profile_id, mod_id],
             )?;
         }
         Ok(())
@@ -1126,7 +1267,7 @@ fn parse_authors(raw: Option<String>) -> Vec<String> {
 /// database cache when displaying a mod).
 pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
     ModMetaCache {
-        mod_id: meta.id.clone(),
+        mod_id: meta.id.as_deref().map(crate::meta::normalize_mod_id),
         version: meta.version.clone(),
         author: meta.author.clone(),
         url: meta.url.clone(),
@@ -1134,6 +1275,7 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
         cover: meta.cover.clone(),
         mount: meta.mount.clone().unwrap_or_default(),
         guides: meta.guides.clone().unwrap_or_default(),
+        screenshots: meta.screenshots.clone().unwrap_or_default(),
         tags: meta.tags.clone().unwrap_or_default(),
         components: meta.components.clone().unwrap_or_default(),
     }
@@ -1142,7 +1284,7 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
 /// Loads the cached metadata for a mod (empty default if none was discovered).
 pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache> {
     let mut stmt = conn.prepare(
-        "SELECT mod_id, version, author, url, description, cover, mount, guides, tags, components
+        "SELECT mod_id, version, author, url, description, cover, mount, guides, tags, components, screenshots
          FROM mods WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
@@ -1157,6 +1299,7 @@ pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache>
             guides: parse_json_list(row.get(7)?),
             tags: parse_json_list(row.get(8)?),
             components: parse_components(row.get(9)?),
+            screenshots: parse_json_list(row.get(10)?),
         })
     })?;
     Ok(rows.next().transpose()?.unwrap_or_default())
@@ -1170,7 +1313,8 @@ pub fn update_mod_meta(
 ) -> anyhow::Result<()> {
     conn.execute(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
-         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10 WHERE id = ?11",
+         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10, screenshots = ?11
+         WHERE id = ?12",
         params![
             meta.as_ref().and_then(|m| m.id.clone()),
             meta.as_ref().and_then(|m| m.version.clone()),
@@ -1183,6 +1327,7 @@ pub fn update_mod_meta(
             json_list(&meta.as_ref().and_then(|m| m.tags.clone())),
             meta.as_ref()
                 .and_then(|m| json_components(m.components.as_deref().unwrap_or(&[]))),
+            json_list(&meta.as_ref().and_then(|m| m.screenshots.clone())),
             id,
         ],
     )?;
@@ -1313,21 +1458,23 @@ pub fn count_deps_for_mod(conn: &Connection, mod_id: i64) -> anyhow::Result<i64>
 }
 
 /// Resolves a dependency reference from a manifest: first by stable `mod_id`
-/// (`author:slug`), then by folder name (legacy). `None` if not found.
+/// (`author:slug`, normalized to lowercase), then by folder name (legacy).
+/// `None` if not found.
 fn resolve_dep_ref(conn: &Connection, reference: &str) -> Option<i64> {
-    if crate::meta::valid_mod_id(reference) {
-        conn.query_row(
+    let normalized = crate::meta::normalize_mod_id(reference);
+    if crate::meta::valid_mod_id(&normalized) {
+        if let Ok(id) = conn.query_row(
             "SELECT id FROM mods WHERE mod_id = ?1",
-            params![reference],
-            |row| row.get(0),
-        )
-        .ok()
-    } else {
-        get_mod_by_folder(conn, reference)
-            .ok()
-            .flatten()
-            .map(|m| m.id)
+            params![normalized],
+            |row| row.get::<_, i64>(0),
+        ) {
+            return Some(id);
+        }
     }
+    get_mod_by_folder(conn, reference)
+        .ok()
+        .flatten()
+        .map(|m| m.id)
 }
 
 /// Replaces a manifest mod's dependency rows in `mod_dependencies` with the
@@ -1401,7 +1548,13 @@ fn validate_meta_id(
 ) -> Option<crate::meta::ModMeta> {
     let mut meta = meta.clone();
     if let Some(id) = meta.as_ref().and_then(|m| m.id.clone()) {
-        if !crate::meta::valid_mod_id(&id) {
+        let normalized = crate::meta::normalize_mod_id(&id);
+        if normalized != id {
+            log::warn(format!(
+                "    [!] {folder}: id '{id}' normalizado a '{normalized}' (debe ser minúsculas)"
+            ));
+        }
+        if !crate::meta::valid_mod_id(&normalized) {
             log::warn(format!(
                 "    [!] {folder}: id '{id}' inválido (formato autor:slug); se ignora"
             ));
@@ -1410,15 +1563,17 @@ fn validate_meta_id(
             let taken: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM mods WHERE mod_id = ?1 AND id != ?2",
-                    params![id, mod_id],
+                    params![normalized, mod_id],
                     |row| row.get(0),
                 )
                 .unwrap_or(0);
             if taken > 0 {
                 log::warn(format!(
-                    "    [!] {folder}: id '{id}' ya lo usa otro mod; se ignora"
+                    "    [!] {folder}: id '{normalized}' ya lo usa otro mod; se ignora"
                 ));
                 meta.as_mut().unwrap().id = None;
+            } else {
+                meta.as_mut().unwrap().id = Some(normalized);
             }
         }
     }
@@ -1462,11 +1617,15 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
 
     // Phase 1: register mods and store their metadata (id, tags, mount...).
     for folder in &disk_folders {
-        let meta = match crate::meta::read_mod_meta(mods_dir, folder) {
-            Ok(meta) => meta,
+        // A malformed manifest must not wipe the cached metadata: keep whatever
+        // was discovered before and skip this mod's dependency sync.
+        let (meta, meta_error) = match crate::meta::read_mod_meta(mods_dir, folder) {
+            Ok(meta) => (meta, false),
             Err(e) => {
-                log::warn(format!("    [!] {folder}: {e}"));
-                None
+                log::warn(format!(
+                    "    [!] {folder}: {e} (se conserva la metadata cacheada)"
+                ));
+                (None, true)
             }
         };
         if let Some(m) = &meta {
@@ -1526,9 +1685,14 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
         }
 
         if let Some(m) = get_mod_by_folder(conn, folder)? {
-            let validated = validate_meta_id(conn, m.id, folder, &meta);
-            update_mod_meta(conn, m.id, &validated)?;
-            metas.push(Some(validated.unwrap_or_default()));
+            if meta_error {
+                // Keep the cache; pushing `None` also skips the dep sync below.
+                metas.push(None);
+            } else {
+                let validated = validate_meta_id(conn, m.id, folder, &meta);
+                update_mod_meta(conn, m.id, &validated)?;
+                metas.push(Some(validated.unwrap_or_default()));
+            }
         } else {
             metas.push(meta);
         }
@@ -1747,6 +1911,7 @@ mod tests {
             "mod_id",
             "tags",
             "components",
+            "screenshots",
         ] {
             assert!(cols.contains(&c.to_string()), "falta columna {c}");
         }
@@ -1868,6 +2033,127 @@ mod tests {
         assert_eq!(meta.components[0].name.as_deref(), Some("A"));
         assert_eq!(meta.components[0].url.as_deref(), Some("http://a"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_resolves_author_slug_dependencies_case_insensitively() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("gta-mo-slugdeps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("A")).unwrap();
+        std::fs::create_dir_all(dir.join("B")).unwrap();
+        std::fs::write(
+            dir.join("A/mod.toml"),
+            "id = \"x:mod-a\"\n[dependencies]\nrequired = [\"X:MOD-B\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("B/mod.toml"), "id = \"x:mod-b\"\n").unwrap();
+
+        discover_mods(&conn, &dir).unwrap();
+
+        let a = get_mod_by_folder(&conn, "A").unwrap().unwrap();
+        let b = get_mod_by_folder(&conn, "B").unwrap().unwrap();
+        let deps = load_dependencies(&conn).unwrap();
+        let refs = deps.get(&a.id).expect("dependencia autor:slug resuelta");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].id, b.id);
+        assert_eq!(
+            load_mod_meta(&conn, b.id).unwrap().mod_id.as_deref(),
+            Some("x:mod-b"),
+            "el id se normaliza a minúsculas"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_keeps_cache_on_malformed_manifest() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("gta-mo-broken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("M")).unwrap();
+        std::fs::write(
+            dir.join("M/mod.toml"),
+            "id = \"x:mod\"\nname = \"Mod\"\ntags = [\"essential\"]\n",
+        )
+        .unwrap();
+        discover_mods(&conn, &dir).unwrap();
+        let id = get_mod_by_folder(&conn, "M").unwrap().unwrap().id;
+        assert_eq!(
+            load_mod_meta(&conn, id).unwrap().mod_id.as_deref(),
+            Some("x:mod")
+        );
+
+        // A malformed manifest must not wipe the cached metadata.
+        std::fs::write(dir.join("M/mod.toml"), "name = [").unwrap();
+        discover_mods(&conn, &dir).unwrap();
+        let meta = load_mod_meta(&conn, id).unwrap();
+        assert_eq!(meta.mod_id.as_deref(), Some("x:mod"));
+        assert_eq!(meta.tags, vec!["essential".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_profile_assigns_new_slug_without_suffix_on_same_name() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+        let p = active_profile(&conn).unwrap();
+
+        let (old, new) = rename_profile_with_slug(&conn, p.id, "Vanilla Play").unwrap();
+        assert_eq!(old, "default");
+        assert_eq!(new, "vanilla-play");
+        let p2 = get_profile_by_id(&conn, p.id).unwrap().unwrap();
+        assert_eq!(p2.name, "Vanilla Play");
+        assert_eq!(p2.slug, "vanilla-play");
+
+        // Renaming to its own name must not produce "vanilla-play-2".
+        let (_, again) = rename_profile_with_slug(&conn, p.id, "Vanilla Play").unwrap();
+        assert_eq!(again, "vanilla-play");
+    }
+
+    #[test]
+    fn set_profile_order_partial_pushes_unlisted_below() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "m2", "M2").unwrap();
+        add_mod_to_all_profiles(&conn, "m3", "M3").unwrap();
+        let p = active_profile(&conn).unwrap();
+        let id = |f: &str| get_mod_by_folder(&conn, f).unwrap().unwrap().id;
+
+        // Only m3 and m2 are listed; m1 must fall below both.
+        set_profile_order(&conn, p.id, &[id("m3"), id("m2")]).unwrap();
+
+        let order = |f: &str| profile_mod_state(&conn, p.id, id(f)).unwrap().1;
+        assert!(
+            order("m3") > order("m2") && order("m2") > order("m1"),
+            "m1 no listado queda por debajo: m3={} m2={} m1={}",
+            order("m3"),
+            order("m2"),
+            order("m1")
+        );
+    }
+
+    #[test]
+    fn dependency_issues_reports_disabled_required() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "dep1", "Dep1").unwrap();
+        let p = active_profile(&conn).unwrap();
+        let m1 = get_mod_by_folder(&conn, "m1").unwrap().unwrap();
+        let dep = get_mod_by_folder(&conn, "dep1").unwrap().unwrap();
+        add_dependency(&conn, m1.id, dep.id, true).unwrap();
+        set_mod_enabled(&conn, p.id, m1.id, true).unwrap();
+
+        let issues = dependency_issues(&conn, p.id).unwrap();
+        let s = &issues[&m1.id];
+        assert_eq!(s.required, 1);
+        assert_eq!(s.disabled, vec!["dep1".to_string()]);
     }
 
     #[test]

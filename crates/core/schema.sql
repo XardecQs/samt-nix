@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS mods (
     guides TEXT,
     tags TEXT,
     components TEXT,
+    screenshots TEXT,
     CHECK(
         length(folder_name) > 0
         AND folder_name NOT LIKE '%|%'

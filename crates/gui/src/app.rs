@@ -4,13 +4,14 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use eframe::egui;
 
 use crate::backend::{Backend, GuiEvent};
-use crate::model::{filter_and_sort, Filters, Snapshot, SortField};
+use crate::model::{filter_and_sort, Filters, Snapshot, SortField, StatusFilter};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Mods,
     Profiles,
     Groups,
+    Dependencies,
     Conflicts,
     Log,
 }
@@ -21,6 +22,7 @@ enum InputAction {
     Copy(String),
     NewMod,
     RenameMod(String),
+    RenameModFolder(String),
     NewGroup,
     RenameGroup(String),
 }
@@ -142,7 +144,14 @@ impl GtaMoApp {
     fn refresh(&mut self) {
         match self.backend.snapshot() {
             Ok(s) => {
-                if self.selected_profile.is_none() {
+                // Keep the selection only if it still exists (a profile may
+                // have been renamed/deleted); otherwise fall back to active.
+                let valid = self
+                    .selected_profile
+                    .as_deref()
+                    .map(|sel| s.profiles.iter().any(|p| p.slug == sel))
+                    .unwrap_or(false);
+                if !valid {
                     self.selected_profile = Some(s.active_slug.clone());
                 }
                 self.snapshot = s;
@@ -235,16 +244,18 @@ impl GtaMoApp {
                         // Abort any follow-up jobs: a failed write may have left
                         // the DB in an unknown state, so don't keep mutating.
                         self.pending.clear();
-                        self.status = Some(if msg.is_empty() {
-                            "La operación falló (ver Log)".to_string()
-                        } else {
-                            msg
-                        });
-                        self.pump();
-                    } else {
-                        self.pump();
-                        if !self.busy {
-                            self.refresh();
+                    }
+                    self.pump();
+                    if !self.busy {
+                        // Refresh even on failure: some commands (e.g. rename)
+                        // can mutate the DB before reporting an error.
+                        self.refresh();
+                        if !ok {
+                            self.status = Some(if msg.is_empty() {
+                                "La operación falló (ver Log)".to_string()
+                            } else {
+                                msg
+                            });
                         }
                     }
                 }
@@ -277,6 +288,7 @@ impl GtaMoApp {
             && self.filters.search.is_empty()
             && self.filters.tag.is_none()
             && self.filters.group.is_none()
+            && self.filters.status == StatusFilter::All
             && self.filters.sort == SortField::Order
             && self.filters.desc
     }
@@ -294,7 +306,11 @@ impl GtaMoApp {
         if !full_folders.iter().any(|f| f == dragged) {
             return;
         }
-        let mut seq: Vec<String> = full_folders.iter().filter(|f| **f != dragged).cloned().collect();
+        let mut seq: Vec<String> = full_folders
+            .iter()
+            .filter(|f| **f != dragged)
+            .cloned()
+            .collect();
         let insert_at = index.min(seq.len());
         seq.insert(insert_at, dragged.to_string());
         if seq == full_folders {
@@ -315,17 +331,24 @@ impl GtaMoApp {
         cover: &str,
     ) -> Option<egui::TextureHandle> {
         let key = format!("{folder}/{cover}");
+        let path = self.backend.cover_path(folder, cover)?;
+        self.load_image(ctx, key, &path)
+    }
+
+    /// Loads (and LRU-caches) one image from disk as a texture.
+    fn load_image(
+        &mut self,
+        ctx: &egui::Context,
+        key: String,
+        path: &std::path::Path,
+    ) -> Option<egui::TextureHandle> {
         if let Some(t) = self.covers.get(&key) {
             return Some(t.clone());
         }
         if self.cover_missing.contains(&key) {
             return None;
         }
-        let Some(path) = self.backend.cover_path(folder, cover) else {
-            self.cover_missing.insert(key);
-            return None;
-        };
-        let Some(img) = image::ImageReader::open(&path)
+        let Some(img) = image::ImageReader::open(path)
             .ok()
             .and_then(|reader| reader.decode().ok())
         else {
@@ -420,11 +443,36 @@ impl GtaMoApp {
                                 );
                             }
                             for g in &m.groups {
-                                ui.label(
-                                    egui::RichText::new(format!("[{g}]")).small().weak(),
-                                );
+                                ui.label(egui::RichText::new(format!("[{g}]")).small().weak());
                             }
                         });
+                    }
+                    if let Some(dep) = self.snapshot.dep_status.get(&m.id) {
+                        if dep.required > 0 || dep.optional > 0 {
+                            let problems = !dep.disabled.is_empty() || !dep.missing.is_empty();
+                            let color = if problems {
+                                egui::Color32::from_rgb(230, 120, 120)
+                            } else {
+                                egui::Color32::from_rgb(140, 170, 200)
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "⇄ {} req · {} opt",
+                                        dep.required, dep.optional
+                                    ))
+                                    .small()
+                                    .color(color),
+                                );
+                                if problems {
+                                    ui.label(
+                                        egui::RichText::new("⚠ requeridas sin resolver")
+                                            .small()
+                                            .color(egui::Color32::from_rgb(230, 120, 120)),
+                                    );
+                                }
+                            });
+                        }
                     }
                 });
                 if ui.button("Detalle").clicked() {
@@ -438,8 +486,7 @@ impl GtaMoApp {
     /// Indicador de estado propio: cuadrado redondeado de color acento cuando
     /// el mod está activo, gris cuando no. Devuelve `true` cuando se hace clic.
     fn toggle_indicator(ui: &mut egui::Ui, active: bool, interactive: bool) -> bool {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
         let fill = if active {
             egui::Color32::from_rgb(90, 160, 255)
         } else {
@@ -451,8 +498,13 @@ impl GtaMoApp {
             egui::Color32::from_rgb(110, 110, 120)
         };
         let inner = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 14.0));
-        ui.painter()
-            .rect(inner, egui::CornerRadius::same(4), fill, egui::Stroke::new(1.5, stroke_color), egui::StrokeKind::Inside);
+        ui.painter().rect(
+            inner,
+            egui::CornerRadius::same(4),
+            fill,
+            egui::Stroke::new(1.5, stroke_color),
+            egui::StrokeKind::Inside,
+        );
         if active {
             ui.painter().text(
                 inner.center(),
@@ -462,7 +514,9 @@ impl GtaMoApp {
                 egui::Color32::WHITE,
             );
         }
-        let _ = response.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
+        let _ = response
+            .clone()
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
         if !interactive {
             return false;
         }
@@ -535,32 +589,14 @@ impl eframe::App for GtaMoApp {
                         .on_hover_text("Eliminar mods huérfanos (carpetas desaparecidas)")
                         .clicked()
                     {
-                        let slug = self.snapshot.active_slug.clone();
-                        self.exec(
-                            vec![
-                                "launch".into(),
-                                "--clean".into(),
-                                "--profile".into(),
-                                slug,
-                            ],
-                            false,
-                        );
+                        self.exec(vec!["ctl".into(), "clean".into()], false);
                     }
                     if ui
                         .add_enabled(idle, egui::Button::new("Descubrir"))
-                        .on_hover_text("Escanear mods/ y registrar mods nuevos")
+                        .on_hover_text("Escanear mods/ y registrar/actualizar mods y dependencias")
                         .clicked()
                     {
-                        let slug = self.snapshot.active_slug.clone();
-                        self.exec(
-                            vec![
-                                "launch".into(),
-                                "--discover".into(),
-                                "--profile".into(),
-                                slug,
-                            ],
-                            false,
-                        );
+                        self.exec(vec!["ctl".into(), "discover".into()], false);
                     }
                 });
             });
@@ -584,6 +620,24 @@ impl eframe::App for GtaMoApp {
                 {
                     self.tab = Tab::Groups;
                 }
+                let dep_problems: usize = self
+                    .snapshot
+                    .dep_status
+                    .values()
+                    .filter(|s| !s.disabled.is_empty() || !s.missing.is_empty())
+                    .count()
+                    + self.snapshot.dep_cycles.len();
+                let dep_label = if dep_problems > 0 {
+                    format!("Dependencias ({dep_problems})")
+                } else {
+                    "Dependencias".to_string()
+                };
+                if ui
+                    .selectable_label(self.tab == Tab::Dependencies, dep_label)
+                    .clicked()
+                {
+                    self.tab = Tab::Dependencies;
+                }
                 let conflict_label = format!(
                     "Conflictos ({})",
                     self.conflicts.iter().filter(|c| !c.duplicate).count()
@@ -598,6 +652,7 @@ impl eframe::App for GtaMoApp {
                     self.tab = Tab::Log;
                 }
                 if ui.button("↻").on_hover_text("Refrescar").clicked() {
+                    self.backend.reload();
                     self.refresh();
                 }
             });
@@ -614,6 +669,7 @@ impl eframe::App for GtaMoApp {
             Tab::Mods => self.ui_mods(ui),
             Tab::Profiles => self.ui_profiles(ui),
             Tab::Groups => self.ui_groups(ui),
+            Tab::Dependencies => self.ui_dependencies(ui),
             Tab::Conflicts => self.ui_conflicts(ui),
             Tab::Log => self.ui_log(ui),
         });
@@ -705,6 +761,18 @@ impl GtaMoApp {
                 });
             self.filters.group = group;
 
+            egui::ComboBox::from_id_salt("status_filter")
+                .selected_text(self.filters.status.label())
+                .show_ui(ui, |ui| {
+                    for s in [
+                        StatusFilter::All,
+                        StatusFilter::Enabled,
+                        StatusFilter::Disabled,
+                    ] {
+                        ui.selectable_value(&mut self.filters.status, s, s.label());
+                    }
+                });
+
             egui::ComboBox::from_id_salt("sort")
                 .selected_text(self.filters.sort.label())
                 .show_ui(ui, |ui| {
@@ -749,6 +817,7 @@ impl GtaMoApp {
 
         let reorderable = self.can_reorder();
         egui::ScrollArea::vertical()
+            .id_salt("mods_scroll")
             .auto_shrink(false)
             .show(ui, |ui| {
                 if reorderable {
@@ -797,7 +866,10 @@ impl GtaMoApp {
                         let y = if index < row_rects.len() {
                             row_rects[index].0.top()
                         } else {
-                            row_rects.last().map(|(r, _)| r.bottom()).unwrap_or_else(|| ui.clip_rect().bottom())
+                            row_rects
+                                .last()
+                                .map(|(r, _)| r.bottom())
+                                .unwrap_or_else(|| ui.clip_rect().bottom())
                         };
                         let x0 = ui.clip_rect().left() + 4.0;
                         let x1 = ui.clip_rect().right() - 4.0;
@@ -842,9 +914,35 @@ impl GtaMoApp {
             }
         }
 
+        let shots = m.screenshots.clone();
+        if !shots.is_empty() {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(format!("Capturas ({})", shots.len())).strong());
+            egui::ScrollArea::horizontal()
+                .id_salt(("shots", m.id))
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for rel in shots.iter().take(24) {
+                            let key = format!("{}/{}", m.folder, rel);
+                            if let Some(path) = self.backend.cover_path(&m.folder, rel) {
+                                if let Some(tex) = self.load_image(ui.ctx(), key, &path) {
+                                    ui.add(
+                                        egui::Image::new(&tex)
+                                            .fit_to_exact_size(egui::vec2(150.0, 90.0))
+                                            .corner_radius(4),
+                                    );
+                                }
+                            }
+                        }
+                    });
+                });
+        }
+
         let rel = self.relations.clone();
         let mut go_to: Option<String> = None;
         egui::ScrollArea::vertical()
+            .id_salt("detail_scroll")
             .auto_shrink(false)
             .show(ui, |ui| {
                 egui::Grid::new("detail_meta")
@@ -935,7 +1033,10 @@ impl GtaMoApp {
                             let title = if name.is_empty() {
                                 folder.clone()
                             } else {
-                                format!("{name} ({})", if *required { "requerido" } else { "opcional" })
+                                format!(
+                                    "{name} ({})",
+                                    if *required { "requerido" } else { "opcional" }
+                                )
                             };
                             let color = if *enabled {
                                 egui::Color32::from_rgb(130, 200, 130)
@@ -994,13 +1095,13 @@ impl GtaMoApp {
                     if ui
                         .add_enabled(
                             !(self.busy || self.playing),
-                            egui::Button::new("Renombrar"),
+                            egui::Button::new("Renombrar nombre"),
                         )
                         .on_hover_text("Cambiar el nombre visible (y el de mod.toml)")
                         .clicked()
                     {
                         self.input = Some(InputState::new(
-                            "Renombrar mod",
+                            "Renombrar nombre",
                             "Nuevo nombre:",
                             InputAction::RenameMod(folder.clone()),
                         ));
@@ -1008,8 +1109,19 @@ impl GtaMoApp {
                     if ui
                         .add_enabled(
                             !(self.busy || self.playing),
-                            egui::Button::new("Eliminar"),
+                            egui::Button::new("Renombrar carpeta"),
                         )
+                        .on_hover_text("Renombrar la carpeta del mod en disco")
+                        .clicked()
+                    {
+                        self.input = Some(InputState::new(
+                            "Renombrar carpeta",
+                            "Nueva carpeta:",
+                            InputAction::RenameModFolder(folder.clone()),
+                        ));
+                    }
+                    if ui
+                        .add_enabled(!(self.busy || self.playing), egui::Button::new("Eliminar"))
                         .clicked()
                     {
                         self.confirm = Some(ConfirmState {
@@ -1042,7 +1154,10 @@ impl GtaMoApp {
                             .show_ui(ui, |ui| {
                                 for name in &groups {
                                     if ui
-                                        .selectable_label(pick.as_deref() == Some(name.as_str()), name)
+                                        .selectable_label(
+                                            pick.as_deref() == Some(name.as_str()),
+                                            name,
+                                        )
                                         .clicked()
                                     {
                                         pick = Some(name.clone());
@@ -1059,10 +1174,7 @@ impl GtaMoApp {
                                 "Añadir al grupo"
                             };
                             if ui
-                                .add_enabled(
-                                    !(self.busy || self.playing),
-                                    egui::Button::new(label),
-                                )
+                                .add_enabled(!(self.busy || self.playing), egui::Button::new(label))
                                 .on_hover_text("Membresía del perfil activo (no global)")
                                 .clicked()
                             {
@@ -1168,27 +1280,32 @@ impl GtaMoApp {
             }
         });
         ui.separator();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for p in &self.snapshot.profiles {
-                let selected = self.selected_profile.as_deref() == Some(p.slug.as_str());
-                ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(selected, &p.name)
-                        .on_hover_text("Seleccionar")
-                        .clicked()
-                    {
-                        self.selected_profile = Some(p.slug.clone());
-                    }
-                    ui.label(
-                        egui::RichText::new(format!("{} mods · {} activos", p.total, p.enabled))
+        egui::ScrollArea::vertical()
+            .id_salt("profiles_scroll")
+            .show(ui, |ui| {
+                for p in &self.snapshot.profiles {
+                    let selected = self.selected_profile.as_deref() == Some(p.slug.as_str());
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(selected, &p.name)
+                            .on_hover_text("Seleccionar")
+                            .clicked()
+                        {
+                            self.selected_profile = Some(p.slug.clone());
+                        }
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} mods · {} activos",
+                                p.total, p.enabled
+                            ))
                             .weak(),
-                    );
-                    if p.is_active {
-                        ui.label(egui::RichText::new("(activo)").weak());
-                    }
-                });
-            }
-        });
+                        );
+                        if p.is_active {
+                            ui.label(egui::RichText::new("(activo)").weak());
+                        }
+                    });
+                }
+            });
     }
 
     fn ui_groups(&mut self, ui: &mut egui::Ui) {
@@ -1319,6 +1436,96 @@ impl GtaMoApp {
         }
     }
 
+    fn ui_dependencies(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        let mut go_to: Option<String> = None;
+
+        let has_issues = !self.snapshot.dep_cycles.is_empty()
+            || self
+                .snapshot
+                .dep_status
+                .values()
+                .any(|s| !s.disabled.is_empty() || !s.missing.is_empty());
+
+        if !has_issues {
+            ui.label("Sin problemas de dependencias en este perfil.");
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "Las dependencias requeridas de los mods activados están satisfechas.",
+                )
+                .weak()
+                .small(),
+            );
+            return;
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("deps_scroll")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                if !self.snapshot.dep_cycles.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Ciclos de dependencias")
+                            .strong()
+                            .color(egui::Color32::from_rgb(230, 120, 120)),
+                    );
+                    for cyc in &self.snapshot.dep_cycles {
+                        ui.label(
+                            egui::RichText::new(format!("  {}", cyc.join(" → ")))
+                                .monospace()
+                                .small(),
+                        );
+                    }
+                    ui.add_space(8.0);
+                }
+
+                let mods = self.snapshot.mods.clone();
+                for m in &mods {
+                    let Some(s) = self.snapshot.dep_status.get(&m.id) else {
+                        continue;
+                    };
+                    if s.disabled.is_empty() && s.missing.is_empty() {
+                        continue;
+                    }
+                    ui.label(egui::RichText::new(&m.name).strong());
+                    for d in &s.disabled {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("  requiere '{d}' (desactivado)"))
+                                    .color(egui::Color32::from_rgb(230, 170, 90))
+                                    .small(),
+                            );
+                            if ui.small_button("Ver").clicked() {
+                                go_to = Some(d.clone());
+                            }
+                        });
+                    }
+                    for d in &s.missing {
+                        ui.label(
+                            egui::RichText::new(format!("  requiere {d} (no instalado)"))
+                                .color(egui::Color32::from_rgb(230, 120, 120))
+                                .small(),
+                        );
+                    }
+                    ui.separator();
+                }
+            });
+
+        if let Some(folder) = go_to {
+            if let Some(tm) = self
+                .snapshot
+                .mods
+                .iter()
+                .find(|x| x.folder == folder)
+                .cloned()
+            {
+                self.selected_mod = Some(tm.id);
+                self.reload_relations();
+            }
+        }
+    }
+
     fn ui_conflicts(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         if self.conflicts.is_empty() {
@@ -1333,6 +1540,7 @@ impl GtaMoApp {
         let mut open: Option<String> = None;
         let mut open_folder: Option<String> = None;
         egui::ScrollArea::vertical()
+            .id_salt("conflicts_scroll")
             .auto_shrink(false)
             .show(ui, |ui| {
                 for c in &self.conflicts {
@@ -1343,7 +1551,10 @@ impl GtaMoApp {
                             _ => egui::Color32::from_rgb(150, 150, 150),
                         };
                         ui.label(
-                            egui::RichText::new(&c.severity).color(sev_color).strong().small(),
+                            egui::RichText::new(&c.severity)
+                                .color(sev_color)
+                                .strong()
+                                .small(),
                         );
                         ui.monospace(&c.path);
                         if c.duplicate {
@@ -1352,9 +1563,7 @@ impl GtaMoApp {
                     });
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("provee:").weak().small());
-                        ui.label(
-                            egui::RichText::new(c.providers.join(" → ")).small(),
-                        );
+                        ui.label(egui::RichText::new(c.providers.join(" → ")).small());
                         if let Some(winner) = c.providers.first() {
                             let w = winner.clone();
                             if ui.button("Ver ganador").clicked() {
@@ -1370,7 +1579,13 @@ impl GtaMoApp {
             });
 
         if let Some(folder) = open {
-            if let Some(tm) = self.snapshot.mods.iter().find(|x| x.folder == folder).cloned() {
+            if let Some(tm) = self
+                .snapshot
+                .mods
+                .iter()
+                .find(|x| x.folder == folder)
+                .cloned()
+            {
                 self.selected_mod = Some(tm.id);
                 self.reload_relations();
             }
@@ -1392,6 +1607,7 @@ impl GtaMoApp {
         });
         ui.separator();
         egui::ScrollArea::vertical()
+            .id_salt("log_scroll")
             .auto_shrink(false)
             .show(ui, |ui| {
                 for l in &self.log {
@@ -1496,13 +1712,25 @@ impl GtaMoApp {
                 self.exec(vec!["ctl".into(), "init".into(), value], false);
             }
             InputAction::RenameMod(folder) => {
+                self.exec(vec!["ctl".into(), "rename".into(), folder, value], false);
+            }
+            InputAction::RenameModFolder(folder) => {
                 self.exec(
-                    vec!["ctl".into(), "rename".into(), folder, value],
+                    vec![
+                        "ctl".into(),
+                        "rename".into(),
+                        folder,
+                        value,
+                        "--folder".into(),
+                    ],
                     false,
                 );
             }
             InputAction::NewGroup => {
-                self.exec(vec!["ctl".into(), "group".into(), "create".into(), value], false);
+                self.exec(
+                    vec!["ctl".into(), "group".into(), "create".into(), value],
+                    false,
+                );
             }
             InputAction::RenameGroup(ident) => {
                 self.exec(

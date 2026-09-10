@@ -97,7 +97,7 @@ impl DepGraph {
             if state.contains_key(&mid) {
                 continue;
             }
-            if !self.dfs_cycle_check(mid, &mut state, &mut String::new()) {
+            if !self.dfs_cycle_check(mid, &mut state, &mut Vec::new()) {
                 ok = false;
             }
         }
@@ -109,41 +109,31 @@ impl DepGraph {
         &self,
         mid: i64,
         state: &mut HashMap<i64, CycleState>,
-        path: &mut String,
+        path: &mut Vec<i64>,
     ) -> bool {
         state.insert(mid, CycleState::Visiting);
+        path.push(mid);
 
         if let Some(dep_ids) = self.deps.get(&mid) {
             for did in dep_ids {
-                match state.get(did) {
+                match state.get(did).copied() {
                     Some(CycleState::Visiting) => {
-                        let folder = self
-                            .mods
-                            .get(did)
-                            .map(|m| m.folder_name.as_str())
-                            .unwrap_or("?");
+                        let mut chain: Vec<&str> =
+                            path.iter().map(|id| self.mod_folder(*id)).collect();
+                        chain.push(self.mod_folder(*did));
                         crate::log::error(format!(
-                            "Ciclo de dependencias detectado: {path}{folder} -> {folder}"
+                            "Ciclo de dependencias detectado: {}",
+                            chain.join(" -> ")
                         ));
                         return false;
                     }
-                    None => {
-                        let folder = self
-                            .mods
-                            .get(did)
-                            .map(|m| m.folder_name.as_str())
-                            .unwrap_or("?");
-                        path.push_str(folder);
-                        path.push_str(" -> ");
-                        if !self.dfs_cycle_check(*did, state, path) {
-                            return false;
-                        }
-                    }
+                    None if !self.dfs_cycle_check(*did, state, path) => return false,
                     _ => {}
                 }
             }
         }
 
+        path.pop();
         state.insert(mid, CycleState::Visited);
         true
     }
@@ -359,6 +349,110 @@ impl DepGraph {
     }
 }
 
+/// Resolves the overlay priority order (top first) of the enabled mods of a
+/// profile, ignoring disabled/missing dependencies. Shared by the CLI and the
+/// GUI so both agree on the effective order.
+pub fn enabled_order_for_profile(
+    conn: &rusqlite::Connection,
+    profile_id: i64,
+) -> anyhow::Result<Vec<String>> {
+    let all_mods = crate::db::load_all_mods_for_profile(conn, profile_id)?;
+    let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
+    let deps = crate::db::load_dependencies(conn)?;
+    let enabled_ids = crate::db::load_enabled_mod_ids_for_profile(conn, profile_id)?;
+    let mut graph = DepGraph::new(mods_map, deps, enabled_ids);
+    graph.prompt = DepPrompt::Ignore;
+    let _ = graph.validate_dependencies();
+    let _ = graph.detect_cycles();
+    Ok(graph.resolve())
+}
+
+impl DepGraph {
+    /// Returns each required-dependency cycle as a closed chain of mod ids
+    /// (first == last). Used for diagnostics in `ctl health` and the GUI.
+    pub fn find_cycles(&self) -> Vec<Vec<i64>> {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Mark {
+            InStack,
+            Done,
+        }
+
+        fn dfs(
+            graph: &HashMap<i64, Vec<i64>>,
+            node: i64,
+            marks: &mut HashMap<i64, Mark>,
+            stack: &mut Vec<i64>,
+            index: &mut HashMap<i64, usize>,
+            out: &mut Vec<Vec<i64>>,
+        ) {
+            marks.insert(node, Mark::InStack);
+            index.insert(node, stack.len());
+            stack.push(node);
+            if let Some(neighbors) = graph.get(&node) {
+                for n in neighbors {
+                    match marks.get(n) {
+                        Some(Mark::InStack) => {
+                            let start = index.get(n).copied().unwrap_or(0);
+                            let mut chain = stack[start..].to_vec();
+                            chain.push(*n);
+                            out.push(chain);
+                        }
+                        Some(Mark::Done) => {}
+                        None => dfs(graph, *n, marks, stack, index, out),
+                    }
+                }
+            }
+            stack.pop();
+            index.remove(&node);
+            marks.insert(node, Mark::Done);
+        }
+
+        let mut marks: HashMap<i64, Mark> = HashMap::new();
+        let mut stack: Vec<i64> = Vec::new();
+        let mut index: HashMap<i64, usize> = HashMap::new();
+        let mut out: Vec<Vec<i64>> = Vec::new();
+        let mut nodes: Vec<i64> = self.deps.keys().copied().collect();
+        nodes.sort_unstable();
+        for n in nodes {
+            if !marks.contains_key(&n) {
+                dfs(&self.deps, n, &mut marks, &mut stack, &mut index, &mut out);
+            }
+        }
+        out
+    }
+}
+
+/// Folder-name chains of every dependency cycle in a profile (empty when none).
+pub fn dependency_cycles(
+    conn: &rusqlite::Connection,
+    profile_id: i64,
+) -> anyhow::Result<Vec<Vec<String>>> {
+    let all_mods = crate::db::load_all_mods_for_profile(conn, profile_id)?;
+    let folder_of: HashMap<i64, String> = all_mods
+        .iter()
+        .map(|m| (m.id, m.folder_name.clone()))
+        .collect();
+    let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
+    let deps = crate::db::load_dependencies(conn)?;
+    let enabled_ids = crate::db::load_enabled_mod_ids_for_profile(conn, profile_id)?;
+    let graph = DepGraph::new(mods_map, deps, enabled_ids);
+    Ok(graph
+        .find_cycles()
+        .into_iter()
+        .map(|chain| {
+            chain
+                .into_iter()
+                .map(|id| {
+                    folder_of
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("id={id}"))
+                })
+                .collect()
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,7 +532,7 @@ mod tests {
 
     #[test]
     fn enable_recursive_activates_transitive_deps() {
-        let mut m = mods(&[
+        let m = mods(&[
             (1, "mod", true, 30),
             (2, "mid", false, 20),
             (3, "base", false, 10),

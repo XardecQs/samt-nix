@@ -26,9 +26,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     #[command(hide = true, about = "Generate shell completions")]
-    Completions {
-        shell: String,
-    },
+    Completions { shell: String },
     #[command(about = "Mount the overlay and launch the game")]
     Launch(LaunchArgs),
     #[command(about = "Launch from Steam (re-execs inside a user/mount namespace)")]
@@ -186,6 +184,10 @@ pub enum CtlCommand {
         #[arg(long, help = "Also scan for file conflicts between enabled mods")]
         conflicts: bool,
     },
+    #[command(about = "Scan mods/ and refresh metadata/dependencies (no launch required)")]
+    Discover,
+    #[command(about = "Remove orphaned mod entries from the database")]
+    Clean,
     #[command(about = "Report file conflicts between the enabled mods of the profile")]
     Conflicts {
         #[arg(long, help = "Output as JSON")]

@@ -1,4 +1,5 @@
-use gta_mo_core::db::ModMetaCache;
+use gta_mo_core::db::{ModDepStatus, ModMetaCache};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct ProfileView {
@@ -18,6 +19,8 @@ pub struct ModView {
     pub order: i64,
     pub meta: ModMetaCache,
     pub groups: Vec<String>,
+    /// Expanded screenshot paths (relative to the mod folder), for the gallery.
+    pub screenshots: Vec<String>,
 }
 
 impl ModView {
@@ -49,10 +52,14 @@ pub struct Snapshot {
     pub active_slug: String,
     pub all_tags: Vec<String>,
     pub all_groups: Vec<String>,
-    /// Enabled mods of the active profile in overlay priority order (top first).
+    /// Effective overlay priority order of the enabled mods (top first).
     pub resolved: Vec<String>,
     /// (group name, members in the active profile).
     pub group_counts: Vec<(String, usize)>,
+    /// Per-mod dependency health, keyed by mod id.
+    pub dep_status: HashMap<i64, ModDepStatus>,
+    /// Folder chains of every required-dependency cycle in the profile.
+    pub dep_cycles: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,11 +87,29 @@ impl SortField {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusFilter {
+    All,
+    Enabled,
+    Disabled,
+}
+
+impl StatusFilter {
+    pub fn label(&self) -> &'static str {
+        match self {
+            StatusFilter::All => "Todos",
+            StatusFilter::Enabled => "Activados",
+            StatusFilter::Disabled => "Desactivados",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Filters {
     pub search: String,
     pub tag: Option<String>,
     pub group: Option<String>,
+    pub status: StatusFilter,
     pub sort: SortField,
     pub desc: bool,
 }
@@ -95,6 +120,7 @@ impl Default for Filters {
             search: String::new(),
             tag: None,
             group: None,
+            status: StatusFilter::All,
             sort: SortField::Order,
             desc: true,
         }
@@ -103,6 +129,14 @@ impl Default for Filters {
 
 pub fn filter_and_sort(mods: &mut Vec<ModView>, filters: &Filters) {
     mods.retain(|m| {
+        let status_ok = match filters.status {
+            StatusFilter::All => true,
+            StatusFilter::Enabled => m.enabled,
+            StatusFilter::Disabled => !m.enabled,
+        };
+        if !status_ok {
+            return false;
+        }
         if let Some(tag) = &filters.tag {
             if !m.meta.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
                 return false;
@@ -158,6 +192,7 @@ mod tests {
             order,
             meta,
             groups: vec!["Graphics".into()],
+            screenshots: vec![],
         }
     }
 

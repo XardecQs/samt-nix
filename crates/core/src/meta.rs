@@ -18,6 +18,10 @@ pub struct ModMeta {
     pub description: Option<String>,
     pub cover: Option<String>,
     pub guides: Option<Vec<String>>,
+    /// Directory (or list of paths) with extra images for the detail gallery,
+    /// relative to the mod folder. Directories are expanded to their images.
+    #[serde(default, deserialize_with = "de_opt_string_or_list")]
+    pub screenshots: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
     /// Subdirectories (relative to the mod folder) to overlay onto the game
     /// root. Absent or empty means "mount the whole folder" (legacy behavior).
@@ -74,6 +78,69 @@ fn de_author_list<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Err
     })
 }
 
+/// Accepts `screenshots = "dir"` or `screenshots = ["a.png", "dir"]`.
+fn de_opt_string_or_list<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(d)? {
+        None => None,
+        Some(OneOrMany::One(s)) => Some(vec![s]),
+        Some(OneOrMany::Many(v)) => Some(v),
+    })
+}
+
+/// True when `path` looks like an image the gallery can render.
+pub fn is_image_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif")
+    )
+}
+
+/// Resolves the `screenshots` manifest entries to relative image paths inside
+/// the mod folder. Directory entries are expanded to their images (sorted).
+pub fn mod_screenshots(mods_dir: &Path, folder: &str) -> Vec<String> {
+    let Some(meta) = read_mod_meta(mods_dir, folder).ok().flatten() else {
+        return Vec::new();
+    };
+    let Some(entries) = meta.screenshots else {
+        return Vec::new();
+    };
+    let base = mods_dir.join(folder);
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries {
+        let p = base.join(&entry);
+        if p.is_dir() {
+            let mut files: Vec<String> = std::fs::read_dir(&p)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .filter(|e| is_image_file(&e.path()))
+                .map(|e| {
+                    format!(
+                        "{}/{}",
+                        entry.trim_end_matches('/'),
+                        e.file_name().to_string_lossy()
+                    )
+                })
+                .collect();
+            files.sort();
+            out.extend(files);
+        } else if is_image_file(&p) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
 /// A stable mod id must be `author:slug`, both parts lowercase
 /// `[a-z0-9_-]` (non-empty).
 pub fn valid_mod_id(id: &str) -> bool {
@@ -86,6 +153,11 @@ pub fn valid_mod_id(id: &str) -> bool {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     };
     ok_part(author) && ok_part(slug)
+}
+
+/// Normalizes a stable mod id (`author:slug`) to its canonical lowercase form.
+pub fn normalize_mod_id(id: &str) -> String {
+    id.trim().to_lowercase()
 }
 
 /// A tag is a lowercase `[a-z0-9_-]` word.
@@ -187,9 +259,9 @@ pub fn set_mod_dependency(
             toml_edit::Item::Table(toml_edit::Table::new()),
         );
     }
-    let deps = doc["dependencies"].as_table_mut().ok_or_else(|| {
-        anyhow::anyhow!("'dependencies' en {} no es una tabla", path.display())
-    })?;
+    let deps = doc["dependencies"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("'dependencies' en {} no es una tabla", path.display()))?;
     if add {
         let key = if optional { "optional" } else { "required" };
         if !deps.contains_key(key) {
@@ -198,9 +270,9 @@ pub fn set_mod_dependency(
                 toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
             );
         }
-        let arr = deps[key].as_array_mut().ok_or_else(|| {
-            anyhow::anyhow!("'{key}' en {} no es una lista", path.display())
-        })?;
+        let arr = deps[key]
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("'{key}' en {} no es una lista", path.display()))?;
         if !arr.iter().any(|v| v.as_str() == Some(dep_ref)) {
             arr.push(dep_ref.to_string());
         }
@@ -413,6 +485,22 @@ optional = ["xardec:extra"]
 
         let m2 = mod_layers(&dir, "M2");
         assert_eq!(m2, vec![dir.join("M2")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn screenshots_dir_is_expanded_to_images() {
+        let dir = tmp_mods_dir("shots");
+        fs::create_dir_all(dir.join("M/capturas")).unwrap();
+        fs::write(dir.join("M/capturas/b.png"), "x").unwrap();
+        fs::write(dir.join("M/capturas/a.jpg"), "x").unwrap();
+        fs::write(dir.join("M/capturas/nota.txt"), "x").unwrap();
+        fs::write(dir.join("M/mod.toml"), "screenshots = [\"capturas\"]\n").unwrap();
+
+        assert_eq!(
+            mod_screenshots(&dir, "M"),
+            vec!["capturas/a.jpg".to_string(), "capturas/b.png".to_string()]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

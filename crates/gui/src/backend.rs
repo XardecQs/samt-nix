@@ -57,6 +57,12 @@ impl Backend {
         *self = Self::new();
     }
 
+    /// Reopens the database connection so manual refresh always observes
+    /// changes written by an external `gta-mo` process (CLI).
+    pub fn reload(&mut self) {
+        *self = Self::new();
+    }
+
     pub fn new() -> Self {
         let db_path = config::db_path();
         let conn = match db::open_db(&db_path) {
@@ -135,13 +141,13 @@ impl Backend {
         let Ok(group) = db::resolve_group(conn, group_ident) else {
             return Ok(Vec::new());
         };
-        let members = db::mods_in_group(conn, group.id, profile.id)
-            .map_err(|e| e.to_string())?;
-        let folder_of: std::collections::HashMap<i64, String> = db::load_all_mods_for_profile(conn, profile.id)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|m| (m.id, m.folder_name))
-            .collect();
+        let members = db::mods_in_group(conn, group.id, profile.id).map_err(|e| e.to_string())?;
+        let folder_of: std::collections::HashMap<i64, String> =
+            db::load_all_mods_for_profile(conn, profile.id)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|m| (m.id, m.folder_name))
+                .collect();
         Ok(members
             .into_iter()
             .filter_map(|id| folder_of.get(&id).cloned())
@@ -201,6 +207,7 @@ impl Backend {
                     .into_iter()
                     .map(|g| g.name)
                     .collect();
+                let screenshots = gta_mo_core::meta::mod_screenshots(&paths.mods_dir, &folder);
                 ModView {
                     id: m.id,
                     folder,
@@ -209,6 +216,7 @@ impl Backend {
                     order: m.load_order,
                     meta,
                     groups,
+                    screenshots,
                 }
             })
             .collect::<Vec<_>>();
@@ -241,6 +249,8 @@ impl Backend {
             .collect::<Vec<_>>();
 
         let resolved = resolve_enabled_order(conn, &profile).unwrap_or_default();
+        let dep_status = db::dependency_issues(conn, profile.id).unwrap_or_default();
+        let dep_cycles = resolver::dependency_cycles(conn, profile.id).unwrap_or_default();
 
         Ok(Snapshot {
             profiles,
@@ -250,6 +260,8 @@ impl Backend {
             all_groups,
             resolved,
             group_counts,
+            dep_status,
+            dep_cycles,
         })
     }
 
@@ -348,6 +360,11 @@ fn merge_meta_caches(cached: db::ModMetaCache, live: db::ModMetaCache) -> db::Mo
         } else {
             live.guides
         },
+        screenshots: if live.screenshots.is_empty() {
+            cached.screenshots
+        } else {
+            live.screenshots
+        },
         tags: if live.tags.is_empty() {
             cached.tags
         } else {
@@ -371,15 +388,7 @@ fn resolve_enabled_order(
     conn: &rusqlite::Connection,
     profile: &db::Profile,
 ) -> anyhow::Result<Vec<String>> {
-    let all_mods = db::load_all_mods_for_profile(conn, profile.id)?;
-    let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
-    let deps = db::load_dependencies(conn)?;
-    let enabled_ids = db::load_enabled_mod_ids_for_profile(conn, profile.id)?;
-    let mut graph = resolver::DepGraph::new(mods_map, deps, enabled_ids);
-    graph.prompt = resolver::DepPrompt::Ignore;
-    let _ = graph.validate_dependencies();
-    let _ = graph.detect_cycles();
-    Ok(graph.resolve())
+    resolver::enabled_order_for_profile(conn, profile.id)
 }
 
 pub fn find_gta_mo_bin() -> String {
@@ -420,6 +429,7 @@ mod tests {
             cover: Some("c.png".into()),
             mount: vec![],
             guides: vec![],
+            screenshots: vec![],
             tags: vec![],
             components: vec![],
         };

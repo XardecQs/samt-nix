@@ -16,6 +16,10 @@
 # cover = "cover.png"
 # guides = ["guides/instalacion.md"]
 
+# Galería de imágenes extra en el panel de detalle: una carpeta (se expande a
+# sus imágenes) o una lista de rutas.
+# screenshots = ["capturas"]
+
 # Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
 # Cada entrada se trata como la raíz del juego: mount = ["content"] hace que
 # content/d3d9.dll acabe en <raíz del juego>/d3d9.dll y content/models/* en

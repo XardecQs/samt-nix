@@ -170,6 +170,7 @@ tags = ["essential", "bugfix"]    # opcional, para organizar/filtrar
 
 cover = "cover.png"                # ruta relativa dentro del mod
 guides = ["guides/instalacion.md"] # lista de archivos de guía
+screenshots = ["capturas"]         # carpeta (se expande) o lista de imágenes
 
 # Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
 # Sin esta clave se monta la carpeta entera (comportamiento por defecto).
@@ -197,6 +198,9 @@ path = "content/modloader/_ESSENTIALS/SilentPatch"
   the component list and flags it (`pack: true` in `--json`). `guides` entries
   may point to a directory (`guides = ["guides"]`) — `ctl info` expands it to
   its files.
+- `screenshots` accepts a directory or a list of paths; directories are
+  expanded to their images (png/jpg/jpeg/webp/bmp/gif), shown as a gallery in
+  the GUI detail panel (and listed by `ctl info -v`/`--json`).
 - Each `mount` entry is a folder treated as the **game root**: its CONTENTS
   are laid over the game. With `mount = ["content"]`, `content/d3d9.dll` lands
   on `<game root>/d3d9.dll` and `content/models/*` on `<game root>/models/*`.
@@ -218,12 +222,13 @@ Essentials_Pack/
 - The manifest is the canonical source of metadata: `ctl info`, `ctl list`
   (and their `--json` output) read `mod.toml` directly whenever the mods dir is
   known, so editing the file shows up immediately. The database caches the
-  fields as a fallback for config-less `ctl` use. `discover` (on `launch`)
-  imports `id`, `tags` and `[dependencies]` into the database, replacing the
-  dependency rows of manifest mods. `ctl rename` writes the new name back into
-  `mod.toml`, and `ctl dep add/remove` edits the `[dependencies]` section too.
-  Covers and guides stay as files in the mod folder; rendering them in the GUI
-  is planned for a future GUI rewrite.
+  fields as a fallback for config-less `ctl` use. `ctl discover` (also run
+  automatically on `launch` when `auto_discover` is on) imports `id`, `tags`
+  and `[dependencies]` into the database, replacing the dependency rows of
+  manifest mods. `ctl rename` writes the new name back into `mod.toml`, and
+  `ctl dep add/remove` edits the `[dependencies]` section too. Covers and
+  screenshots stay as files in the mod folder; the GUI renders them in the
+  detail panel.
 
 ## Groups
 
@@ -288,9 +293,12 @@ gta-mo ctl remove <id|folder>
 gta-mo ctl enable <id|folder> [--profile <name>]
 gta-mo ctl disable <id|folder> [--profile <name>]
 gta-mo ctl order <id|folder> <n> [--profile <name>]
+gta-mo ctl reorder <folder>... [--profile <name>]
 gta-mo ctl rename <id|folder> <name> [--folder]
 gta-mo ctl info <id|folder> [-v] [--json] [--profile <name>]
 gta-mo ctl open <id|folder> [--url]
+gta-mo ctl discover                          # scan mods/ and refresh metadata + [dependencies]
+gta-mo ctl clean                             # remove orphaned mod entries from the database
 gta-mo ctl dep add <mod> <dependency> [--optional]
 gta-mo ctl dep remove <mod> <dependency>
 gta-mo ctl profile list [--json]

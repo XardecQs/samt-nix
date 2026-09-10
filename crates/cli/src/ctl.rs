@@ -96,6 +96,8 @@ struct ModJson {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     guides: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    screenshots: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     tags: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     deps: Vec<DepJson>,
@@ -191,6 +193,8 @@ pub fn run(
         super::CtlCommand::Export { path } => cmd_export(conn, path.as_deref()),
         super::CtlCommand::Import { path, force } => cmd_import(conn, path, *force),
         super::CtlCommand::Health { conflicts } => cmd_health(conn, profile_ident, *conflicts),
+        super::CtlCommand::Discover => cmd_discover(conn),
+        super::CtlCommand::Clean => cmd_clean(conn),
         super::CtlCommand::Conflicts { json } => cmd_conflicts(conn, profile_ident, *json),
         super::CtlCommand::Which { path } => cmd_which(conn, profile_ident, path),
         super::CtlCommand::Dep { action } => match action {
@@ -250,6 +254,33 @@ fn mods_dir_from_config() -> Option<std::path::PathBuf> {
         .map(|cfg| gta_mo_core::config::RuntimePaths::from_config(&cfg).mods_dir)
 }
 
+/// Scans `mods/` and refreshes metadata + manifest dependencies. Unlike
+/// `launch --discover`, this never requires Proton or the overlay tools, so it
+/// works even when the game is not launchable yet.
+fn cmd_discover(conn: &Connection) -> anyhow::Result<()> {
+    let mods_dir = mods_dir_from_config().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No se pudo resolver el directorio de mods (revisa game_root/mods_dir en la config)."
+        )
+    })?;
+    let (new_count, orphan_count) = db::discover_mods(conn, &mods_dir)?;
+    log::info(format!(
+        "Descubrimiento completado: {new_count} nuevo(s), {orphan_count} huérfano(s)."
+    ));
+    Ok(())
+}
+
+/// Removes orphaned mod entries (folders no longer on disk) from the database.
+fn cmd_clean(conn: &Connection) -> anyhow::Result<()> {
+    let mods_dir = mods_dir_from_config().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No se pudo resolver el directorio de mods (revisa game_root/mods_dir en la config)."
+        )
+    })?;
+    db::clean_orphans(conn, &mods_dir)?;
+    Ok(())
+}
+
 /// Expands `guides` entries that point to a directory into their files, so a
 /// manifest can use `guides = ["guides"]` to include a whole folder.
 fn expand_guides(mods_dir: &std::path::Path, folder: &str, guides: Vec<String>) -> Vec<String> {
@@ -295,6 +326,9 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # Carátula y guías (rutas relativas dentro de esta carpeta)
 # cover = "cover.png"
 # guides = ["guides/instalacion.md"]
+
+# Galería de imágenes extra: una carpeta (se expande) o una lista de rutas.
+# screenshots = ["capturas"]
 
 # Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
 # Sin esta clave se monta la carpeta entera (comportamiento por defecto).
@@ -469,11 +503,43 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
         }
         super::ProfileAction::Rename { ident, new_name } => {
             let p = db::resolve_profile(conn, ident)?;
-            let old = p.name.clone();
-            db::rename_profile(conn, p.id, new_name)?;
+            let old_name = p.name.clone();
+            let (old_slug, new_slug) = db::rename_profile_with_slug(conn, p.id, new_name)?;
+
+            // Move run/profiles/<slug> so the runtime directory follows the name.
+            if old_slug != new_slug {
+                if let Ok(cfg) = gta_mo_core::config::load_config() {
+                    let root = gta_mo_core::config::RuntimePaths::from_config(&cfg).profiles_root;
+                    let old_dir = root.join(&old_slug);
+                    let new_dir = root.join(&new_slug);
+                    if new_dir.exists() {
+                        log::warn(format!(
+                            "El directorio '{}' ya existe; no se mueve.",
+                            new_dir.display()
+                        ));
+                    } else if old_dir.exists() {
+                        if let Err(e) = std::fs::rename(&old_dir, &new_dir) {
+                            let _ = conn.execute(
+                                "UPDATE profiles SET name = ?1, slug = ?2 WHERE id = ?3",
+                                params![old_name, old_slug, p.id],
+                            );
+                            return Err(anyhow::anyhow!(
+                                "No se pudo mover '{}' a '{}': {e}",
+                                old_dir.display(),
+                                new_dir.display()
+                            ));
+                        }
+                        log::info(format!(
+                            "Directorio movido: {} -> {}.",
+                            old_dir.display(),
+                            new_dir.display()
+                        ));
+                    }
+                }
+            }
+
             log::info(format!(
-                "Perfil renombrado de '{old}' a '{new_name}' (slug '{}' sin cambios).",
-                p.slug
+                "Perfil renombrado de '{old_name}' a '{new_name}' (slug: {old_slug} -> {new_slug})."
             ));
             Ok(())
         }
@@ -954,6 +1020,7 @@ fn cmd_list(
                 cover: meta.cover,
                 mount: meta.mount,
                 guides: meta.guides,
+                screenshots: meta.screenshots,
                 tags: meta.tags,
                 deps,
                 dependents,
@@ -1078,11 +1145,15 @@ fn cmd_enable(conn: &Connection, profile: &db::Profile, ident: &str) -> anyhow::
     let (already_enabled, _) = db::profile_mod_state(conn, profile.id, id)?;
 
     let before: std::collections::HashSet<i64> =
-        db::load_enabled_mod_ids_for_profile(conn, profile.id)?.into_iter().collect();
+        db::load_enabled_mod_ids_for_profile(conn, profile.id)?
+            .into_iter()
+            .collect();
     let mut visited = std::collections::HashSet::new();
     db::enable_mod_with_deps(conn, profile.id, id, &mut visited)?;
     let after: std::collections::HashSet<i64> =
-        db::load_enabled_mod_ids_for_profile(conn, profile.id)?.into_iter().collect();
+        db::load_enabled_mod_ids_for_profile(conn, profile.id)?
+            .into_iter()
+            .collect();
 
     let mut new_folders: Vec<String> = after
         .difference(&before)
@@ -1211,8 +1282,10 @@ fn cmd_rename(conn: &Connection, ident: &str, new_name: &str, folder: bool) -> a
     }
 
     let old_name = m.name.clone();
-    db::set_mod_name(conn, id, new_name)?;
 
+    // The manifest is the source of truth, so write it first: if it fails the
+    // DB is left untouched and the command reports a clean error (instead of
+    // half-applying and then failing).
     let mut manifest_updated = false;
     if let Ok(cfg) = gta_mo_core::config::load_config() {
         let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
@@ -1221,6 +1294,18 @@ fn cmd_rename(conn: &Connection, ident: &str, new_name: &str, folder: bool) -> a
             gta_mo_core::meta::set_meta_name(&paths.mods_dir, &m.folder_name, new_name)?;
             manifest_updated = true;
         }
+    }
+
+    if let Err(e) = db::set_mod_name(conn, id, new_name) {
+        // Roll back the manifest so both stay consistent.
+        if manifest_updated {
+            if let Ok(cfg) = gta_mo_core::config::load_config() {
+                let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+                let _ =
+                    gta_mo_core::meta::set_meta_name(&paths.mods_dir, &m.folder_name, &old_name);
+            }
+        }
+        return Err(e);
     }
 
     if manifest_updated {
@@ -1318,6 +1403,10 @@ fn cmd_info(
         Some(dir) => expand_guides(dir, &m.folder_name, meta.guides.clone()),
         None => meta.guides.clone(),
     };
+    let screenshots = match mods_dir.as_deref() {
+        Some(dir) => gta_mo_core::meta::mod_screenshots(dir, &m.folder_name),
+        None => meta.screenshots.clone(),
+    };
     let profiles = db::mod_enabled_in_profiles(conn, id)?;
     let groups = db::groups_of_mod_in_profile(conn, id, profile.id)?;
 
@@ -1337,6 +1426,7 @@ fn cmd_info(
             cover: Option<String>,
             mount: Vec<String>,
             guides: Vec<String>,
+            screenshots: Vec<String>,
             tags: Vec<String>,
             pack: bool,
             components: Vec<ComponentJson>,
@@ -1419,6 +1509,7 @@ fn cmd_info(
             cover: meta.cover,
             mount: meta.mount,
             guides,
+            screenshots,
             tags: meta.tags,
             pack,
             components: components_json,
@@ -1498,6 +1589,17 @@ fn cmd_info(
                 render_table(
                     vec!["Guías".to_string()],
                     guides.iter().map(|g| vec![g.clone()]).collect(),
+                )
+            );
+        }
+
+        if !screenshots.is_empty() {
+            println!("\n  {}", "Capturas:".bold());
+            println!(
+                "{}",
+                render_table(
+                    vec!["Imagen".to_string()],
+                    screenshots.iter().map(|g| vec![g.clone()]).collect(),
                 )
             );
         }
@@ -1881,6 +1983,8 @@ struct ExportMod {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     guides: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    screenshots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     components: Vec<gta_mo_core::meta::MetaComponent>,
@@ -1899,6 +2003,7 @@ impl ExportMod {
             cover: cache.cover.clone(),
             mount: cache.mount.clone(),
             guides: cache.guides.clone(),
+            screenshots: cache.screenshots.clone(),
             tags: cache.tags.clone(),
             components: cache.components.clone(),
         }
@@ -1914,6 +2019,7 @@ impl ExportMod {
             cover: self.cover.clone(),
             mount: self.mount.clone(),
             guides: self.guides.clone(),
+            screenshots: self.screenshots.clone(),
             tags: self.tags.clone(),
             components: self.components.clone(),
         }
@@ -2092,6 +2198,7 @@ fn do_import(conn: &Connection, data: &ExportFile) -> anyhow::Result<()> {
         active_id = Some(id);
     }
     let first_active = active_id.or_else(|| profile_ids.values().next().copied());
+    conn.execute("UPDATE profiles SET is_active = 0", [])?;
     if let Some(id) = first_active {
         conn.execute(
             "UPDATE profiles SET is_active = 1 WHERE id = ?1",
@@ -2150,15 +2257,7 @@ fn do_import(conn: &Connection, data: &ExportFile) -> anyhow::Result<()> {
 // ---------- Health / conflicts ----------
 
 fn resolve_enabled_order(conn: &Connection, profile: &db::Profile) -> anyhow::Result<Vec<String>> {
-    let all_mods = db::load_all_mods_for_profile(conn, profile.id)?;
-    let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
-    let deps = db::load_dependencies(conn)?;
-    let enabled_ids = db::load_enabled_mod_ids_for_profile(conn, profile.id)?;
-    let mut graph = gta_mo_core::resolver::DepGraph::new(mods_map, deps, enabled_ids);
-    graph.prompt = gta_mo_core::resolver::DepPrompt::Ignore;
-    let _ = graph.validate_dependencies();
-    let _ = graph.detect_cycles();
-    Ok(graph.resolve())
+    gta_mo_core::resolver::enabled_order_for_profile(conn, profile.id)
 }
 
 fn cmd_conflicts(conn: &Connection, profile_ident: Option<&str>, json: bool) -> anyhow::Result<()> {

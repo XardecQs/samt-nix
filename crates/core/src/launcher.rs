@@ -324,11 +324,7 @@ impl LaunchEngine {
     }
 
     pub fn run(opts: &LaunchOptions, mut log: impl FnMut(&str)) -> anyhow::Result<LaunchResult> {
-        Self::check_system_deps()?;
-
         let cfg = config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
-        Self::validate_paths(&cfg)?;
-
         let paths = config::RuntimePaths::from_config(&cfg);
 
         let lock_file = config::lockfile_path();
@@ -359,6 +355,11 @@ impl LaunchEngine {
                 log: "Limpieza completada.".into(),
             });
         }
+
+        // Only an actual launch needs Proton and the overlay tools; discover and
+        // clean must work without them (e.g. from the GUI's "Descubrir" button).
+        Self::check_system_deps()?;
+        Self::validate_paths(&cfg)?;
 
         let profile = Self::resolve_profile(&cfg, &conn, opts.profile.as_deref())?;
         let profile_id = profile.id;
