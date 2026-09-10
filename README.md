@@ -437,11 +437,19 @@ The binary finds `gta-mo` via `GTA_MO_BIN`, `PATH`, or the dev
 `target/debug/gta-mo`. The Nix package is wrapped so it always finds the
 installed `gta-mo`.
 
-Features (milestone 1): mods list with search/tag/group filters and sorting,
-enable/disable and load-order controls, a rich detail panel (author, Mod ID,
-URL, tags, groups, mount, description, cover, components), profiles tab with
-create/use/rename/copy/delete, a launch button (`--deps-enable`), a streaming
-Log tab, and a status bar (active profile, enabled count, conflict count).
+Features: mods list with search/tag/group/enabled-status filters and sorting,
+enable/disable and drag&drop load-order controls (with an insertion bar), a rich
+detail panel (author, Mod ID, URL, tags, groups, mount, description, cover,
+screenshot gallery, components), profiles tab with create/use/rename/copy/delete
+(renaming also moves `run/profiles/<slug>`), groups tab, a **Dependencies** tab
+that flags required dependencies that are disabled/missing, a Conflicts tab
+(background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run),
+Discover/Clean actions, a streaming Log tab, and a status bar.
+
+The package installs a desktop entry and icon (`data/gta-mo-gui.desktop`,
+`data/icons/.../gta-mo-gui.svg`); with `enableGui` it appears in your
+application menu. The UI icons come from the bundled [Lucide](https://lucide.dev)
+font (see `crates/gui/assets/lucide/`).
 
 To develop it: `nix develop`, then `cargo run -p gta-mo-gui`.
 
@@ -461,3 +469,6 @@ The original bash implementation is preserved in [`bash-legacy/`](bash-legacy/).
 ## License
 
 GPL-3.0-or-later — see [`LICENSE`](LICENSE).
+
+The bundled GUI icon font is a subset of the [Lucide](https://lucide.dev) font,
+licensed under ISC — see `crates/gui/assets/lucide/LICENSE`.

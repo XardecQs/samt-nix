@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=GTA SA Mod Organizer
+GenericName=Mod Manager
+Comment=Manage and launch GTA San Andreas mods with fuse-overlayfs
+Exec=gta-mo-gui
+Icon=gta-mo-gui
+Terminal=false
+Categories=Game;Utility;
+Keywords=GTA;San Andreas;mods;mod manager;overlayfs;
+StartupNotify=true
+StartupWMClass=gta-mo-gui

@@ -18,6 +18,7 @@
       root = ./.;
       fileset = nixpkgs.lib.fileset.unions [
         ./crates
+        ./data
         ./Cargo.toml
         ./Cargo.lock
         ./README.md
@@ -104,6 +105,11 @@
           wrapProgram "$out/bin/gta-mo-gui" \
             --prefix PATH : ${self.packages.${pkgs.stdenv.hostPlatform.system}.gta-mod-organizer}/bin \
             --suffix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiRuntimeLibs}"
+
+          install -Dm644 data/gta-mo-gui.desktop \
+            "$out/share/applications/gta-mo-gui.desktop"
+          install -Dm644 data/icons/hicolor/scalable/apps/gta-mo-gui.svg \
+            "$out/share/icons/hicolor/scalable/apps/gta-mo-gui.svg"
         '';
 
         meta = {

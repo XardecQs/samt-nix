@@ -103,6 +103,7 @@ impl GtaMoApp {
         let ui_scale = crate::settings::GuiSettings::load().ui_scale;
         cc.egui_ctx
             .set_pixels_per_point(cc.egui_ctx.pixels_per_point() * ui_scale);
+        crate::icons::install(&cc.egui_ctx);
         let backend = Backend::new();
         let (tx, rx) = channel();
         let mut app = Self {
@@ -264,6 +265,11 @@ impl GtaMoApp {
     }
 
     fn set_enabled(&mut self, id: i64, enabled: bool) {
+        // Optimistic local update: reflect the click immediately; the CLI
+        // persists it and the next refresh confirms (or reverts on failure).
+        if let Some(m) = self.snapshot.mods.iter_mut().find(|m| m.id == id) {
+            m.enabled = enabled;
+        }
         let slug = self.snapshot.active_slug.clone();
         let id_s = id.to_string();
         let mut args = vec!["ctl".to_string()];
@@ -281,11 +287,11 @@ impl GtaMoApp {
         self.exec(args, false);
     }
 
-    /// Drag&drop reordering is only meaningful on the full, priority-sorted
-    /// list (no search/tag/group filters) and while nothing is running.
-    fn can_reorder(&self) -> bool {
-        !(self.busy || self.playing)
-            && self.filters.search.is_empty()
+    /// Whether the list is in the default, priority-sorted view where drag&drop
+    /// reordering is meaningful. Independent of whether a command is running, so
+    /// the handles and the hint never shift the layout mid-operation.
+    fn reorder_layout(&self) -> bool {
+        self.filters.search.is_empty()
             && self.filters.tag.is_none()
             && self.filters.group.is_none()
             && self.filters.status == StatusFilter::All
@@ -293,28 +299,49 @@ impl GtaMoApp {
             && self.filters.desc
     }
 
+    /// Whether reordering is actually allowed right now (nothing running).
+    fn can_reorder(&self) -> bool {
+        !(self.busy || self.playing) && self.reorder_layout()
+    }
+
     /// Applies a drag&drop move: `dragged` is placed at index `index` of the
     /// full priority-sorted list (0 = top). One bulk `ctl reorder` call
-    /// persists the whole new order.
+    /// persists the whole new order; the local snapshot is updated immediately
+    /// so the list does not snap back while the command runs.
     fn reorder_drop_at(&mut self, dragged: &str, index: usize) {
         if !self.can_reorder() {
             return;
         }
         let mut full = self.snapshot.mods.clone();
         full.sort_by_key(|m| std::cmp::Reverse(m.order));
-        let full_folders: Vec<String> = full.iter().map(|m| m.folder.clone()).collect();
-        if !full_folders.iter().any(|f| f == dragged) {
+        let Some(orig) = full.iter().position(|m| m.folder == dragged) else {
             return;
-        }
+        };
+        let full_folders: Vec<String> = full.iter().map(|m| m.folder.clone()).collect();
         let mut seq: Vec<String> = full_folders
             .iter()
             .filter(|f| **f != dragged)
             .cloned()
             .collect();
-        let insert_at = index.min(seq.len());
+        // `index` is measured on the full list; account for the removed item so
+        // downward drags land exactly where the insertion bar was.
+        let insert_at = if orig < index { index - 1 } else { index };
+        let insert_at = insert_at.min(seq.len());
         seq.insert(insert_at, dragged.to_string());
         if seq == full_folders {
             return;
+        }
+
+        // Optimistic local update.
+        let n = seq.len() as i64;
+        let mut order_of: HashMap<&str, i64> = HashMap::with_capacity(seq.len());
+        for (i, folder) in seq.iter().enumerate() {
+            order_of.insert(folder.as_str(), n - i as i64);
+        }
+        for m in &mut self.snapshot.mods {
+            if let Some(o) = order_of.get(m.folder.as_str()) {
+                m.order = *o;
+            }
         }
 
         let mut args: Vec<String> = vec!["ctl".into(), "reorder".into()];
@@ -379,7 +406,7 @@ impl GtaMoApp {
         &mut self,
         ui: &mut egui::Ui,
         m: &crate::model::ModView,
-        reorderable: bool,
+        show_handle: bool,
     ) -> egui::Response {
         let idle = !(self.busy || self.playing);
         let fill = if m.enabled {
@@ -394,16 +421,20 @@ impl GtaMoApp {
         let row = frame.show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                if reorderable {
-                    let handle = egui::Id::new(("mod_handle", m.id));
-                    ui.dnd_drag_source(handle, m.folder.clone(), |ui| {
-                        ui.add(
-                            egui::Button::new("⠿")
-                                .frame(false)
-                                .small()
-                                .min_size(egui::vec2(22.0, 24.0)),
-                        )
-                        .on_hover_text("Arrastra para reordenar");
+                if show_handle {
+                    // Kept visible (only disabled) while a command runs so the
+                    // row layout never changes.
+                    ui.add_enabled_ui(idle, |ui| {
+                        let handle = egui::Id::new(("mod_handle", m.id));
+                        ui.dnd_drag_source(handle, m.folder.clone(), |ui| {
+                            ui.add(
+                                egui::Button::new(crate::icons::MENU)
+                                    .frame(false)
+                                    .small()
+                                    .min_size(egui::vec2(22.0, 24.0)),
+                            )
+                            .on_hover_text("Arrastra para reordenar");
+                        });
                     });
                 }
                 if Self::toggle_indicator(ui, m.enabled, idle) {
@@ -458,24 +489,32 @@ impl GtaMoApp {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     egui::RichText::new(format!(
-                                        "⇄ {} req · {} opt",
-                                        dep.required, dep.optional
+                                        "{} {} req · {} opt",
+                                        crate::icons::SWAP_H,
+                                        dep.required,
+                                        dep.optional
                                     ))
                                     .small()
                                     .color(color),
                                 );
                                 if problems {
                                     ui.label(
-                                        egui::RichText::new("⚠ requeridas sin resolver")
-                                            .small()
-                                            .color(egui::Color32::from_rgb(230, 120, 120)),
+                                        egui::RichText::new(format!(
+                                            "{} requeridas sin resolver",
+                                            crate::icons::WARN
+                                        ))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(230, 120, 120)),
                                     );
                                 }
                             });
                         }
                     }
                 });
-                if ui.button("Detalle").clicked() {
+                if ui
+                    .button(format!("{} Detalle", crate::icons::PANEL_RIGHT))
+                    .clicked()
+                {
                     self.selected_mod = Some(m.id);
                 }
             });
@@ -509,7 +548,7 @@ impl GtaMoApp {
             ui.painter().text(
                 inner.center(),
                 egui::Align2::CENTER_CENTER,
-                "✓",
+                crate::icons::CHECK,
                 egui::FontId::proportional(12.0),
                 egui::Color32::WHITE,
             );
@@ -563,7 +602,11 @@ impl eframe::App for GtaMoApp {
                     .on_hover_text("Mostrar el orden de capas sin montar ni lanzar (--dry-run)");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let idle = !self.busy && !self.playing;
-                    let label = if self.playing { "Jugando…" } else { "Jugar" };
+                    let label = if self.playing {
+                        format!("{} Jugando…", crate::icons::PLAY)
+                    } else {
+                        format!("{} Jugar", crate::icons::PLAY)
+                    };
                     if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
                         let slug = self.snapshot.active_slug.clone();
                         self.log.clear();
@@ -585,14 +628,20 @@ impl eframe::App for GtaMoApp {
                         self.exec(args, !self.launch_dry_run);
                     }
                     if ui
-                        .add_enabled(idle, egui::Button::new("Limpiar"))
+                        .add_enabled(
+                            idle,
+                            egui::Button::new(format!("{} Limpiar", crate::icons::ERASER)),
+                        )
                         .on_hover_text("Eliminar mods huérfanos (carpetas desaparecidas)")
                         .clicked()
                     {
                         self.exec(vec!["ctl".into(), "clean".into()], false);
                     }
                     if ui
-                        .add_enabled(idle, egui::Button::new("Descubrir"))
+                        .add_enabled(
+                            idle,
+                            egui::Button::new(format!("{} Descubrir", crate::icons::SEARCH)),
+                        )
                         .on_hover_text("Escanear mods/ y registrar/actualizar mods y dependencias")
                         .clicked()
                     {
@@ -605,17 +654,29 @@ impl eframe::App for GtaMoApp {
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.selectable_label(self.tab == Tab::Mods, "Mods").clicked() {
+                if ui
+                    .selectable_label(
+                        self.tab == Tab::Mods,
+                        format!("{} Mods", crate::icons::LIST),
+                    )
+                    .clicked()
+                {
                     self.tab = Tab::Mods;
                 }
                 if ui
-                    .selectable_label(self.tab == Tab::Profiles, "Perfiles")
+                    .selectable_label(
+                        self.tab == Tab::Profiles,
+                        format!("{} Perfiles", crate::icons::USERS),
+                    )
                     .clicked()
                 {
                     self.tab = Tab::Profiles;
                 }
                 if ui
-                    .selectable_label(self.tab == Tab::Groups, "Grupos")
+                    .selectable_label(
+                        self.tab == Tab::Groups,
+                        format!("{} Grupos", crate::icons::FOLDER),
+                    )
                     .clicked()
                 {
                     self.tab = Tab::Groups;
@@ -628,9 +689,9 @@ impl eframe::App for GtaMoApp {
                     .count()
                     + self.snapshot.dep_cycles.len();
                 let dep_label = if dep_problems > 0 {
-                    format!("Dependencias ({dep_problems})")
+                    format!("{} Dependencias ({dep_problems})", crate::icons::SWAP_H)
                 } else {
-                    "Dependencias".to_string()
+                    format!("{} Dependencias", crate::icons::SWAP_H)
                 };
                 if ui
                     .selectable_label(self.tab == Tab::Dependencies, dep_label)
@@ -639,7 +700,8 @@ impl eframe::App for GtaMoApp {
                     self.tab = Tab::Dependencies;
                 }
                 let conflict_label = format!(
-                    "Conflictos ({})",
+                    "{} Conflictos ({})",
+                    crate::icons::WARN,
                     self.conflicts.iter().filter(|c| !c.duplicate).count()
                 );
                 if ui
@@ -648,10 +710,17 @@ impl eframe::App for GtaMoApp {
                 {
                     self.tab = Tab::Conflicts;
                 }
-                if ui.selectable_label(self.tab == Tab::Log, "Log").clicked() {
+                if ui
+                    .selectable_label(self.tab == Tab::Log, format!("{} Log", crate::icons::INFO))
+                    .clicked()
+                {
                     self.tab = Tab::Log;
                 }
-                if ui.button("↻").on_hover_text("Refrescar").clicked() {
+                if ui
+                    .button(crate::icons::REFRESH)
+                    .on_hover_text("Refrescar")
+                    .clicked()
+                {
                     self.backend.reload();
                     self.refresh();
                 }
@@ -797,7 +866,7 @@ impl GtaMoApp {
                 if ui
                     .add_enabled(
                         !(self.busy || self.playing),
-                        egui::Button::new("+ Nuevo mod"),
+                        egui::Button::new(format!("{} Nuevo mod", crate::icons::PLUS)),
                     )
                     .on_hover_text("Crear carpeta con plantilla mod.toml y registrar el mod")
                     .clicked()
@@ -815,15 +884,17 @@ impl GtaMoApp {
         let mut filtered = self.snapshot.mods.clone();
         filter_and_sort(&mut filtered, &self.filters);
 
-        let reorderable = self.can_reorder();
+        let show_handles = self.reorder_layout();
+        let interactive = !(self.busy || self.playing);
         egui::ScrollArea::vertical()
             .id_salt("mods_scroll")
             .auto_shrink(false)
             .show(ui, |ui| {
-                if reorderable {
+                if show_handles {
                     ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(crate::icons::MENU).weak());
                         ui.label(
-                            egui::RichText::new("Arrastra el asidero ⠿ para reordenar")
+                            egui::RichText::new("Arrastra para reordenar")
                                 .weak()
                                 .small(),
                         );
@@ -834,14 +905,14 @@ impl GtaMoApp {
                 // (rect, folder) de cada fila, para el indicador de inserción.
                 let mut row_rects: Vec<(egui::Rect, String)> = Vec::new();
                 for m in &filtered {
-                    let row = self.draw_mod_row(ui, m, reorderable);
-                    if reorderable {
+                    let row = self.draw_mod_row(ui, m, show_handles);
+                    if show_handles {
                         row_rects.push((row.rect, m.folder.clone()));
                     }
                     ui.separator();
                 }
 
-                if reorderable && !row_rects.is_empty() {
+                if interactive && show_handles && !row_rects.is_empty() {
                     let ctx = ui.ctx();
                     // ¿Hay un arrastre activo desde un asidero?
                     let active: Option<String> = filtered
@@ -901,7 +972,7 @@ impl GtaMoApp {
         ui.horizontal(|ui| {
             ui.heading(&m.name);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Cerrar").clicked() {
+                if ui.button(format!("{} Cerrar", crate::icons::X)).clicked() {
                     self.selected_mod = None;
                 }
             });
@@ -917,7 +988,14 @@ impl GtaMoApp {
         let shots = m.screenshots.clone();
         if !shots.is_empty() {
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(format!("Capturas ({})", shots.len())).strong());
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} Capturas ({})",
+                    crate::icons::IMAGE,
+                    shots.len()
+                ))
+                .strong(),
+            );
             egui::ScrollArea::horizontal()
                 .id_salt(("shots", m.id))
                 .max_height(120.0)
@@ -1095,7 +1173,7 @@ impl GtaMoApp {
                     if ui
                         .add_enabled(
                             !(self.busy || self.playing),
-                            egui::Button::new("Renombrar nombre"),
+                            egui::Button::new(format!("{} Renombrar nombre", crate::icons::PENCIL)),
                         )
                         .on_hover_text("Cambiar el nombre visible (y el de mod.toml)")
                         .clicked()
@@ -1109,7 +1187,10 @@ impl GtaMoApp {
                     if ui
                         .add_enabled(
                             !(self.busy || self.playing),
-                            egui::Button::new("Renombrar carpeta"),
+                            egui::Button::new(format!(
+                                "{} Renombrar carpeta",
+                                crate::icons::FOLDER_OPEN
+                            )),
                         )
                         .on_hover_text("Renombrar la carpeta del mod en disco")
                         .clicked()
@@ -1121,7 +1202,10 @@ impl GtaMoApp {
                         ));
                     }
                     if ui
-                        .add_enabled(!(self.busy || self.playing), egui::Button::new("Eliminar"))
+                        .add_enabled(
+                            !(self.busy || self.playing),
+                            egui::Button::new(format!("{} Eliminar", crate::icons::TRASH)),
+                        )
                         .clicked()
                     {
                         self.confirm = Some(ConfirmState {
@@ -1130,12 +1214,18 @@ impl GtaMoApp {
                             action: ConfirmAction::DeleteMod(folder.clone()),
                         });
                     }
-                    if ui.button("Abrir carpeta").clicked() {
+                    if ui
+                        .button(format!("{} Abrir carpeta", crate::icons::FOLDER_OPEN))
+                        .clicked()
+                    {
                         self.exec(vec!["ctl".into(), "open".into(), folder], false);
                     }
                     if m.meta.url.is_some() {
                         let folder = m.folder.clone();
-                        if ui.button("Abrir URL").clicked() {
+                        if ui
+                            .button(format!("{} Abrir URL", crate::icons::LINK))
+                            .clicked()
+                        {
                             self.exec(
                                 vec!["ctl".into(), "open".into(), folder, "--url".into()],
                                 false,
@@ -1169,9 +1259,9 @@ impl GtaMoApp {
                             let in_group = m.groups.iter().any(|g| g == &group);
                             let action = if in_group { "remove" } else { "add" };
                             let label = if in_group {
-                                "Quitar del grupo"
+                                format!("{} Quitar del grupo", crate::icons::X)
                             } else {
-                                "Añadir al grupo"
+                                format!("{} Añadir al grupo", crate::icons::TAG)
                             };
                             if ui
                                 .add_enabled(!(self.busy || self.playing), egui::Button::new(label))
@@ -1209,7 +1299,10 @@ impl GtaMoApp {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!(self.busy || self.playing), egui::Button::new("Nuevo"))
+                .add_enabled(
+                    !(self.busy || self.playing),
+                    egui::Button::new(format!("{} Nuevo", crate::icons::PLUS)),
+                )
                 .clicked()
             {
                 self.input = Some(InputState::new(
@@ -1222,7 +1315,7 @@ impl GtaMoApp {
             if ui
                 .add_enabled(
                     sel.is_some() && !(self.busy || self.playing),
-                    egui::Button::new("Usar"),
+                    egui::Button::new(format!("{} Usar", crate::icons::CIRCLE_CHECK)),
                 )
                 .clicked()
             {
@@ -1236,7 +1329,7 @@ impl GtaMoApp {
             if ui
                 .add_enabled(
                     sel.is_some() && !(self.busy || self.playing),
-                    egui::Button::new("Renombrar"),
+                    egui::Button::new(format!("{} Renombrar", crate::icons::PENCIL)),
                 )
                 .clicked()
             {
@@ -1266,7 +1359,7 @@ impl GtaMoApp {
             if ui
                 .add_enabled(
                     sel.is_some() && !(self.busy || self.playing),
-                    egui::Button::new("Eliminar"),
+                    egui::Button::new(format!("{} Eliminar", crate::icons::TRASH)),
                 )
                 .clicked()
             {
@@ -1314,7 +1407,7 @@ impl GtaMoApp {
             if ui
                 .add_enabled(
                     !(self.busy || self.playing),
-                    egui::Button::new("Nuevo grupo"),
+                    egui::Button::new(format!("{} Nuevo grupo", crate::icons::PLUS)),
                 )
                 .clicked()
             {
@@ -1328,7 +1421,7 @@ impl GtaMoApp {
             if ui
                 .add_enabled(
                     sel.is_some() && !(self.busy || self.playing),
-                    egui::Button::new("Renombrar"),
+                    egui::Button::new(format!("{} Renombrar", crate::icons::PENCIL)),
                 )
                 .clicked()
             {
@@ -1343,7 +1436,7 @@ impl GtaMoApp {
             if ui
                 .add_enabled(
                     sel.is_some() && !(self.busy || self.playing),
-                    egui::Button::new("Eliminar"),
+                    egui::Button::new(format!("{} Eliminar", crate::icons::TRASH)),
                 )
                 .clicked()
             {
@@ -1382,7 +1475,7 @@ impl GtaMoApp {
                 if ui
                     .add_enabled(
                         !(self.busy || self.playing),
-                        egui::Button::new("Activar grupo"),
+                        egui::Button::new(format!("{} Activar grupo", crate::icons::CIRCLE_CHECK)),
                     )
                     .on_hover_text("Activa todos sus mods en el perfil activo (con deps)")
                     .clicked()
@@ -1403,7 +1496,7 @@ impl GtaMoApp {
                 if ui
                     .add_enabled(
                         !(self.busy || self.playing),
-                        egui::Button::new("Desactivar grupo"),
+                        egui::Button::new(format!("{} Desactivar grupo", crate::icons::X)),
                     )
                     .clicked()
                 {
@@ -1496,7 +1589,10 @@ impl GtaMoApp {
                                     .color(egui::Color32::from_rgb(230, 170, 90))
                                     .small(),
                             );
-                            if ui.small_button("Ver").clicked() {
+                            if ui
+                                .small_button(format!("{} Ver", crate::icons::EXTERNAL_LINK))
+                                .clicked()
+                            {
                                 go_to = Some(d.clone());
                             }
                         });
@@ -1598,10 +1694,16 @@ impl GtaMoApp {
     fn ui_log(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("Limpiar").clicked() {
+            if ui
+                .button(format!("{} Limpiar", crate::icons::ERASER))
+                .clicked()
+            {
                 self.log.clear();
             }
-            if ui.button("Copiar").clicked() {
+            if ui
+                .button(format!("{} Copiar", crate::icons::SAVE))
+                .clicked()
+            {
                 ui.ctx().copy_text(self.log.join("\n"));
             }
         });
