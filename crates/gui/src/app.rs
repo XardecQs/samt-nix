@@ -22,7 +22,7 @@ enum Tab {
 
 /// Below this logical width the layout switches to the single-column
 /// (phone-like) mode: bottom navigation + detail as an overlay page.
-const NARROW_BREAKPOINT: f32 = 760.0;
+pub(crate) const NARROW_BREAKPOINT: f32 = 760.0;
 
 /// Which header controls have overflowed into the ⋮ menu, so they are drawn
 /// there instead of the header (each control appears in exactly one place).
@@ -796,12 +796,20 @@ impl eframe::App for GtaMoApp {
         // Escape closes the top dialog before the detail overlay can see it, so
         // closing a dialog never also closes the detail behind it.
         if self.lightbox.is_none()
-            && (self.input.is_some() || self.confirm.is_some() || self.manifest_editor.is_some())
+            && (self.input.is_some()
+                || self.confirm.is_some()
+                || self.manifest_editor.is_some()
+                || self.show_preferences
+                || self.show_about
+                || self.show_shortcuts)
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             self.input = None;
             self.confirm = None;
             self.manifest_editor = None;
+            self.show_preferences = false;
+            self.show_about = false;
+            self.show_shortcuts = false;
         }
 
         // Force a reflow after a window resize so every layout (including the
@@ -3396,7 +3404,7 @@ fn contain_rect(bounds: egui::Rect, size: egui::Vec2) -> egui::Rect {
 /// Renders a centered, full-screen "page" overlay, in the same style as the
 /// detail overlay. Unlike a floating `egui::Window` it lives in the foreground
 /// layer (so it always appears above other overlays) and is not resizable.
-fn overlay_page<R>(
+pub(crate) fn overlay_page<R>(
     ctx: &egui::Context,
     id: &str,
     narrow: bool,
@@ -3424,7 +3432,7 @@ fn overlay_page<R>(
 
 /// Pinned overlay header: title (truncated) plus a right-aligned back button.
 /// Returns `true` when the button was clicked.
-fn overlay_header(ui: &mut egui::Ui, title: &str, back_label: &str) -> bool {
+pub(crate) fn overlay_header(ui: &mut egui::Ui, title: &str, back_label: &str) -> bool {
     let mut back = false;
     egui::Sides::new()
         .height(30.0)

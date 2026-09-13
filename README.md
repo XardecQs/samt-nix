@@ -505,8 +505,9 @@ The interface reflows by window width (breakpoint 760 px):
 The mod detail always opens as a **full-screen overlay page** (8 px margins) with
 a pinned header and a back button (libadwaita `NavigationSplitView` style), so
 the back button is always visible. The dialogs (new/rename/copy, tag editor,
-`mod.toml` editor, delete confirmation) use the same full-screen overlay style,
-so they always appear above the detail page and are never floating windows.
+`mod.toml` editor, delete confirmation, Preferences, About, Keyboard shortcuts)
+use the same full-screen overlay style, so they always appear above the detail
+page and are never floating windows.
 
 Each control appears in exactly one place per layout (no duplicated
 preferences/theme menus).

@@ -4,40 +4,26 @@ use crate::settings::{Density, GuiSettings};
 use crate::theme::{Accent, ThemePref};
 use eframe::egui;
 
-/// Shows the preferences modal. `open` is set to `false` when it should close.
-/// Returns `true` when a preference changed (the caller persists + re-applies).
+/// Shows the preferences overlay page. `open` is set to `false` when it should
+/// close. Returns `true` when a preference changed (caller persists + applies).
 pub fn show(ctx: &egui::Context, settings: &mut GuiSettings, open: &mut bool) -> bool {
     let mut changed = false;
     let mut close = false;
-    let resp = egui::Modal::new(egui::Id::new("gta_mo_preferences"))
-        .frame(egui::Frame::popup(ctx.style().as_ref()))
-        .show(ctx, |ui| {
-            let max_w = (ctx.screen_rect().width() - 60.0).clamp(220.0, 480.0);
-            let max_h = (ctx.screen_rect().height() - 120.0).clamp(160.0, 460.0);
-            ui.set_min_width(max_w);
-            ui.horizontal(|ui| {
-                ui.heading("Preferencias");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Cerrar").clicked() {
-                        close = true;
-                    }
-                });
+    let narrow = ctx.screen_rect().width() < crate::app::NARROW_BREAKPOINT;
+    crate::app::overlay_page(ctx, "gta_mo_preferences", narrow, 560.0, |ui| {
+        if crate::app::overlay_header(ui, "Preferencias", "Cerrar") {
+            close = true;
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                changed |= appearance(ui, settings);
+                ui.add_space(10.0);
+                changed |= behavior(ui, settings);
+                ui.add_space(10.0);
+                advanced(ui);
             });
-            ui.separator();
-
-            egui::ScrollArea::vertical()
-                .max_height(max_h)
-                .show(ui, |ui| {
-                    changed |= appearance(ui, settings);
-                    ui.add_space(10.0);
-                    changed |= behavior(ui, settings);
-                    ui.add_space(10.0);
-                    advanced(ui);
-                });
-        });
-    if resp.should_close() {
-        close = true;
-    }
+    });
     if close {
         *open = false;
     }

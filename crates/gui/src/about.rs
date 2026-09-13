@@ -8,48 +8,39 @@ const LICENSE: &str = "GPL-3.0-or-later";
 
 pub fn show_about(ctx: &egui::Context, settings: &GuiSettings, open: &mut bool) {
     let mut close = false;
-    let resp = egui::Modal::new(egui::Id::new("gta_mo_about"))
-        .frame(egui::Frame::popup(ctx.style().as_ref()))
-        .show(ctx, |ui| {
-            ui.set_min_width((ctx.screen_rect().width() - 60.0).clamp(220.0, 420.0));
-            ui.vertical_centered(|ui| {
-                ui.add_space(4.0);
-                ui.heading("GTA SA Mod Organizer");
-                ui.label(
-                    egui::RichText::new(format!("Versión {}", env!("CARGO_PKG_VERSION"))).weak(),
-                );
-                ui.add_space(8.0);
-            });
-            ui.separator();
-            ui.label("Organizador de mods para GTA San Andreas en Linux, con fuse-overlayfs.");
-            ui.add_space(6.0);
-            egui::Grid::new("about_info")
-                .num_columns(2)
-                .spacing([14.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Licencia");
-                    ui.label(LICENSE);
-                    ui.end_row();
-                    ui.label("Proyecto");
-                    ui.hyperlink_to("GitHub", REPO_URL);
-                    ui.end_row();
-                    ui.label("Iconos");
-                    ui.hyperlink_to("Lucide (ISC)", "https://lucide.dev");
-                    ui.end_row();
-                });
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button("Copiar diagnóstico").clicked() {
-                    ui.ctx().copy_text(diagnostics(settings));
-                }
-                if ui.button("Cerrar").clicked() {
-                    close = true;
-                }
-            });
+    let narrow = ctx.screen_rect().width() < crate::app::NARROW_BREAKPOINT;
+    crate::app::overlay_page(ctx, "gta_mo_about", narrow, 520.0, |ui| {
+        if crate::app::overlay_header(ui, "Acerca de", "Cerrar") {
+            close = true;
+        }
+        ui.vertical_centered(|ui| {
+            ui.add_space(4.0);
+            ui.heading("GTA SA Mod Organizer");
+            ui.label(egui::RichText::new(format!("Versión {}", env!("CARGO_PKG_VERSION"))).weak());
+            ui.add_space(8.0);
         });
-    if resp.should_close() {
-        close = true;
-    }
+        ui.separator();
+        ui.label("Organizador de mods para GTA San Andreas en Linux, con fuse-overlayfs.");
+        ui.add_space(6.0);
+        egui::Grid::new("about_info")
+            .num_columns(2)
+            .spacing([14.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Licencia");
+                ui.label(LICENSE);
+                ui.end_row();
+                ui.label("Proyecto");
+                ui.hyperlink_to("GitHub", REPO_URL);
+                ui.end_row();
+                ui.label("Iconos");
+                ui.hyperlink_to("Lucide (ISC)", "https://lucide.dev");
+                ui.end_row();
+            });
+        ui.add_space(10.0);
+        if ui.button("Copiar diagnóstico").clicked() {
+            ui.ctx().copy_text(diagnostics(settings));
+        }
+    });
     if close {
         *open = false;
     }
@@ -86,30 +77,26 @@ fn diagnostics(settings: &GuiSettings) -> String {
 
 pub fn show_shortcuts(ctx: &egui::Context, open: &mut bool) {
     let mut close = false;
-    let resp = egui::Modal::new(egui::Id::new("gta_mo_shortcuts"))
-        .frame(egui::Frame::popup(ctx.style().as_ref()))
-        .show(ctx, |ui| {
-            ui.set_min_width((ctx.screen_rect().width() - 60.0).clamp(220.0, 360.0));
-            ui.heading("Atajos de teclado");
-            ui.separator();
-            egui::Grid::new("shortcuts")
-                .num_columns(2)
-                .spacing([18.0, 6.0])
-                .show(ui, |ui| {
-                    for (keys, action) in SHORTCUTS {
-                        ui.monospace(*keys);
-                        ui.label(*action);
-                        ui.end_row();
-                    }
-                });
-            ui.add_space(8.0);
-            if ui.button("Cerrar").clicked() {
-                close = true;
-            }
-        });
-    if resp.should_close() {
-        close = true;
-    }
+    let narrow = ctx.screen_rect().width() < crate::app::NARROW_BREAKPOINT;
+    crate::app::overlay_page(ctx, "gta_mo_shortcuts", narrow, 480.0, |ui| {
+        if crate::app::overlay_header(ui, "Atajos de teclado", "Cerrar") {
+            close = true;
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                egui::Grid::new("shortcuts")
+                    .num_columns(2)
+                    .spacing([18.0, 6.0])
+                    .show(ui, |ui| {
+                        for (keys, action) in SHORTCUTS {
+                            ui.monospace(*keys);
+                            ui.label(*action);
+                            ui.end_row();
+                        }
+                    });
+            });
+    });
     if close {
         *open = false;
     }
