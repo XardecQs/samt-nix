@@ -7,6 +7,7 @@ mod fonts;
 mod icons;
 mod lightbox;
 mod model;
+mod motion;
 mod preferences;
 mod settings;
 mod theme;
@@ -31,7 +32,7 @@ fn load_icon() -> Option<egui::IconData> {
 fn main() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1050.0, 700.0])
-        .with_min_inner_size([720.0, 480.0])
+        .with_min_inner_size([360.0, 420.0])
         .with_title("GTA SA Mod Organizer")
         // Must match StartupWMClass in the .desktop entry.
         .with_app_id("gta-mo-gui");

@@ -475,22 +475,35 @@ the keyboard shortcuts include `Ctrl+F` (search), `Ctrl+R` (refresh) and
 
 The interface reflows by window width (breakpoint 760 px):
 
-- **Wide**: left navigation sidebar; the mod detail opens as a **floating,
-  movable/resizable window** (its title bar has the name and close button).
-- **Narrow (vertical/phone)**: a bottom navigation bar with only **Mods**,
-  Perfiles and Log plus a "más" menu for the rest (Grupos, Dependencias,
-  Conflictos, actions, Debug/dry-run, Preferencias, Acerca de, atajos y tema).
-  The mod detail opens as a **full-screen overlay page** with a back button
-  (libadwaita `NavigationSplitView` style). The header keeps only the profile
-  selector and the launch button, and the Mods tab puts the search on its own
-  line with a compact **Filtros** menu plus "Nuevo mod".
+- **Wide**: left navigation sidebar, with a single ⋮ menu for preferences/about/
+  theme.
+- **Narrow (vertical/phone)**: a **gradual bottom bar** that keeps Mods,
+  Perfiles and Log always visible and shows Grupos/Dependencias/Conflictos while
+  their measured width fits (labels are dropped at the smallest sizes); a "más"
+  menu holds the rest (actions, Debug/dry-run, Preferencias, Acerca de, atajos y
+  tema). The header keeps only the profile selector and the launch button, and
+  the Mods tab puts the search on its own line with a compact **Filtros** menu
+  plus "Nuevo mod".
+
+The mod detail always opens as a **full-screen overlay page** (8 px margins) with
+a pinned header and a back button (libadwaita `NavigationSplitView` style), so
+the back button is always visible.
 
 Each control appears in exactly one place per layout (no duplicated
 preferences/theme menus).
 
 In the detail panel, clicking the cover or any screenshot opens a **full-screen
 image viewer** with previous/next arrows, a counter and page dots (also `←`/`→`
-and `Esc`, or click the backdrop).
+and `Esc`, or click the backdrop). The viewer and its controls scale to fit the
+window on both axes, and the image animates from its thumbnail (shared-element
+"hero" transition).
+
+### Motion
+
+Animations are physics-based (springs) and gated by **"Reducir movimiento"**:
+spring-driven hover/toggle states, staggered list rows, the cover hero
+transition, overlay reveal and a subtle counter pulse. There is no background
+blur (egui cannot do it without a custom shader).
 
 ### Icons
 
