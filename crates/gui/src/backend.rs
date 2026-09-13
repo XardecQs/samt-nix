@@ -2,7 +2,7 @@ use gta_mo_core::config;
 use gta_mo_core::conflicts;
 use gta_mo_core::db;
 use gta_mo_core::resolver;
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -317,6 +317,7 @@ impl Backend {
         &self,
         args: Vec<String>,
         launch: bool,
+        stdin: Option<String>,
         pid_slot: Arc<Mutex<Option<u32>>>,
         tx: Sender<GuiEvent>,
     ) {
@@ -328,6 +329,9 @@ impl Backend {
             cmd.args(&args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if stdin.is_some() {
+                cmd.stdin(Stdio::piped());
+            }
             if launch {
                 // New process group so `stop_child_group` can signal the whole
                 // tree (umu-run, Proton, the game).
@@ -346,6 +350,12 @@ impl Backend {
             if launch {
                 if let Ok(mut slot) = pid_slot.lock() {
                     *slot = Some(child.id());
+                }
+            }
+            if let Some(text) = stdin {
+                if let Some(mut si) = child.stdin.take() {
+                    let _ = si.write_all(text.as_bytes());
+                    // Dropping `si` closes the pipe so the CLI sees EOF.
                 }
             }
             if let Some(out) = child.stdout.take() {

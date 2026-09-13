@@ -44,6 +44,7 @@ enum InputAction {
     NewMod,
     RenameMod(String),
     RenameModFolder(String),
+    SetTags(String),
     NewGroup,
     RenameGroup(String),
 }
@@ -66,6 +67,13 @@ impl InputState {
     }
 }
 
+/// State of the raw `mod.toml` editor dialog.
+struct ManifestEditor {
+    folder: String,
+    content: String,
+    error: Option<String>,
+}
+
 #[allow(clippy::enum_variant_names)]
 enum ConfirmAction {
     DeleteProfile(String),
@@ -84,6 +92,8 @@ struct ConfirmState {
 struct Job {
     args: Vec<String>,
     launch: bool,
+    /// Optional text to send to the CLI's stdin (e.g. a manifest to save).
+    stdin: Option<String>,
 }
 
 pub struct GtaMoApp {
@@ -103,6 +113,7 @@ pub struct GtaMoApp {
     pending: VecDeque<Job>,
     input: Option<InputState>,
     confirm: Option<ConfirmState>,
+    manifest_editor: Option<ManifestEditor>,
     relations: Option<crate::backend::ModRelations>,
     relations_for: Option<i64>,
     conflicts: Vec<crate::backend::ConflictView>,
@@ -168,6 +179,7 @@ impl GtaMoApp {
             pending: VecDeque::new(),
             input: None,
             confirm: None,
+            manifest_editor: None,
             relations: None,
             relations_for: None,
             conflicts: Vec::new(),
@@ -291,7 +303,21 @@ impl GtaMoApp {
     /// executed strictly one at a time to avoid racing SQLite writes between
     /// concurrent `gta-mo ctl` processes.
     fn exec(&mut self, args: Vec<String>, launch: bool) {
-        self.pending.push_back(Job { args, launch });
+        self.pending.push_back(Job {
+            args,
+            launch,
+            stdin: None,
+        });
+        self.pump();
+    }
+
+    /// Queues a command whose stdin is the given text (e.g. `ctl manifest set`).
+    fn exec_stdin(&mut self, args: Vec<String>, stdin: String) {
+        self.pending.push_back(Job {
+            args,
+            launch: false,
+            stdin: Some(stdin),
+        });
         self.pump();
     }
 
@@ -304,7 +330,7 @@ impl GtaMoApp {
             self.playing = job.launch;
             let tx = self.tx.clone();
             self.backend
-                .run_cli_async(job.args, job.launch, self.child_pid.clone(), tx);
+                .run_cli_async(job.args, job.launch, job.stdin, self.child_pid.clone(), tx);
         } else {
             self.playing = false;
         }
@@ -1558,11 +1584,37 @@ impl GtaMoApp {
                             resp.on_hover_text(u);
                             ui.end_row();
                         }
-                        if !m.meta.tags.is_empty() {
-                            ui.label("Tags:");
-                            ui.label(m.meta.tags.join(", "));
-                            ui.end_row();
-                        }
+                        ui.label("Tags:");
+                        ui.horizontal(|ui| {
+                            let text = if m.meta.tags.is_empty() {
+                                "(sin tags)".to_string()
+                            } else {
+                                m.meta.tags.join(", ")
+                            };
+                            ui.add(egui::Label::new(text).truncate());
+                            if ui
+                                .add_enabled(
+                                    !(self.busy || self.playing) && m.has_manifest,
+                                    egui::Button::new(format!("{} Editar", crate::icons::PENCIL))
+                                        .small(),
+                                )
+                                .on_hover_text(if m.has_manifest {
+                                    "Editar las etiquetas en mod.toml"
+                                } else {
+                                    "El mod no tiene mod.toml (créalo primero)"
+                                })
+                                .clicked()
+                            {
+                                let mut st = InputState::new(
+                                    "Editar tags",
+                                    "Tags (separados por comas o espacios):",
+                                    InputAction::SetTags(m.folder.clone()),
+                                );
+                                st.value = m.meta.tags.join(", ");
+                                self.input = Some(st);
+                            }
+                        });
+                        ui.end_row();
                         if !m.groups.is_empty() {
                             ui.label("Grupos:");
                             ui.label(m.groups.join(", "));
@@ -1693,6 +1745,43 @@ impl GtaMoApp {
                             .clicked()
                     {
                         self.exec(vec!["ctl".into(), "init".into(), folder.clone()], false);
+                    }
+                    if m.has_manifest
+                        && ui
+                            .add_enabled(
+                                !(self.busy || self.playing),
+                                egui::Button::new(format!(
+                                    "{} Editar mod.toml",
+                                    crate::icons::PENCIL
+                                )),
+                            )
+                            .on_hover_text("Editar el manifiesto completo (raw)")
+                            .clicked()
+                    {
+                        match self.backend.mods_dir_path() {
+                            Some(dir) => {
+                                let path = dir.join(&folder).join("mod.toml");
+                                match std::fs::read_to_string(&path) {
+                                    Ok(content) => {
+                                        self.manifest_editor = Some(ManifestEditor {
+                                            folder: folder.clone(),
+                                            content,
+                                            error: None,
+                                        });
+                                    }
+                                    Err(e) => self.toasts.push(
+                                        ui.ctx(),
+                                        crate::toasts::ToastKind::Error,
+                                        format!("No se pudo leer mod.toml: {e}"),
+                                    ),
+                                }
+                            }
+                            None => self.toasts.push(
+                                ui.ctx(),
+                                crate::toasts::ToastKind::Error,
+                                "No se pudo resolver el directorio de mods",
+                            ),
+                        }
                     }
                     if ui
                         .add_enabled(
@@ -2629,7 +2718,10 @@ impl GtaMoApp {
                         }
                     });
                 });
-            if submit && !input.value.trim().is_empty() {
+            if submit
+                && (!input.value.trim().is_empty()
+                    || matches!(input.action, InputAction::SetTags(_)))
+            {
                 let value = input.value.trim().to_string();
                 self.apply_input(input.action, value);
             } else if close || !open {
@@ -2668,6 +2760,75 @@ impl GtaMoApp {
                 }
             } else if close || !open {
                 self.confirm = None;
+            }
+        }
+
+        if self.manifest_editor.is_some() {
+            let mut ed = self.manifest_editor.take().expect("checked is_some");
+            let mut open = true;
+            let mut save = false;
+            let mut reload = false;
+            egui::Window::new(format!("mod.toml — {}", ed.folder))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .default_size([640.0, 480.0])
+                .show(ctx, |ui| {
+                    if let Some(err) = &ed.error {
+                        ui.colored_label(theme::active(ui.ctx()).danger, err);
+                        ui.add_space(4.0);
+                    }
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut ed.content)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(18),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Guardar").clicked() {
+                            save = true;
+                        }
+                        if ui.button("Recargar").clicked() {
+                            reload = true;
+                        }
+                    });
+                });
+            if reload {
+                if let Some(dir) = self.backend.mods_dir_path() {
+                    match std::fs::read_to_string(dir.join(&ed.folder).join("mod.toml")) {
+                        Ok(c) => {
+                            ed.content = c;
+                            ed.error = None;
+                        }
+                        Err(e) => ed.error = Some(format!("No se pudo leer: {e}")),
+                    }
+                }
+            }
+            let mut saved = false;
+            if save {
+                // Validate locally for immediate feedback (the CLI re-validates).
+                match toml::from_str::<gta_mo_core::meta::ModMeta>(&ed.content) {
+                    Ok(_) => {
+                        self.exec_stdin(
+                            vec![
+                                "ctl".into(),
+                                "manifest".into(),
+                                "set".into(),
+                                ed.folder.clone(),
+                            ],
+                            ed.content.clone(),
+                        );
+                        saved = true;
+                    }
+                    Err(e) => ed.error = Some(format!("TOML inválido: {e}")),
+                }
+            }
+            if !open || saved {
+                self.manifest_editor = None;
+            } else {
+                self.manifest_editor = Some(ed);
             }
         }
     }
@@ -2709,6 +2870,16 @@ impl GtaMoApp {
                     ],
                     false,
                 );
+            }
+            InputAction::SetTags(folder) => {
+                let tags: Vec<String> = value
+                    .split([',', ' ', '\t', '\n'])
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let mut args = vec!["ctl".into(), "tag".into(), "set".into(), folder];
+                args.extend(tags);
+                self.exec(args, false);
             }
             InputAction::NewGroup => {
                 self.exec(

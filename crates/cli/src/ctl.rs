@@ -211,6 +211,14 @@ pub fn run(
                 dep_ident,
             } => cmd_dep_rm(conn, mod_ident, dep_ident),
         },
+        super::CtlCommand::Tag { action } => match action {
+            super::TagAction::Set { ident, tags } => cmd_tag_set(conn, ident, tags),
+            super::TagAction::Add { ident, tags } => cmd_tag_add(conn, ident, tags),
+            super::TagAction::Remove { ident, tags } => cmd_tag_remove(conn, ident, tags),
+        },
+        super::CtlCommand::Manifest { action } => match action {
+            super::ManifestAction::Set { ident } => cmd_manifest_set(conn, ident),
+        },
         super::CtlCommand::Profile { action } => cmd_profile(conn, action),
         super::CtlCommand::Group { action } => cmd_group(conn, action, profile_ident),
     }
@@ -1976,6 +1984,133 @@ fn dep_writeback(
         optional,
         add,
     )?;
+    Ok(())
+}
+
+// ---------- Tags / manifest editing ----------
+
+/// Normalizes and validates tag arguments (trim, drop a leading `#`, lowercase,
+/// deduplicate). Errors on a malformed tag.
+fn normalize_tags(raw: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for t in raw {
+        let t = t.trim().trim_start_matches('#').trim().to_lowercase();
+        if t.is_empty() {
+            continue;
+        }
+        if !gta_mo_core::meta::valid_tag(&t) {
+            anyhow::bail!("Tag inválido: '{t}' (usa minúsculas, dígitos, '-' o '_').");
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    Ok(out)
+}
+
+fn mods_dir_or_bail() -> anyhow::Result<std::path::PathBuf> {
+    mods_dir_from_config().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No se pudo resolver el directorio de mods (revisa game_root/mods_dir en la config)."
+        )
+    })
+}
+
+/// Refreshes the cached metadata of a mod after editing its `mod.toml`.
+fn refresh_meta_cache(
+    conn: &Connection,
+    mods_dir: &std::path::Path,
+    id: i64,
+    folder: &str,
+) -> anyhow::Result<()> {
+    let meta = gta_mo_core::meta::read_mod_meta(mods_dir, folder)?;
+    db::update_mod_meta(conn, id, &meta)?;
+    Ok(())
+}
+
+fn tags_display(tags: &[String]) -> String {
+    if tags.is_empty() {
+        "(ninguno)".to_string()
+    } else {
+        tags.iter()
+            .map(|t| format!("#{t}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn cmd_tag_set(conn: &Connection, ident: &str, tags: &[String]) -> anyhow::Result<()> {
+    let m = resolve_mod(conn, ident)?;
+    let mods_dir = mods_dir_or_bail()?;
+    let tags = normalize_tags(tags)?;
+    gta_mo_core::meta::set_meta_tags(&mods_dir, &m.folder_name, &tags)?;
+    refresh_meta_cache(conn, &mods_dir, m.id, &m.folder_name)?;
+    log::info(format!(
+        "'{}': tags -> {}",
+        m.folder_name,
+        tags_display(&tags)
+    ));
+    Ok(())
+}
+
+fn cmd_tag_add(conn: &Connection, ident: &str, tags: &[String]) -> anyhow::Result<()> {
+    let m = resolve_mod(conn, ident)?;
+    let mods_dir = mods_dir_or_bail()?;
+    let add = normalize_tags(tags)?;
+    let mut current = gta_mo_core::meta::read_mod_meta(&mods_dir, &m.folder_name)?
+        .and_then(|meta| meta.tags)
+        .unwrap_or_default();
+    for t in add {
+        if !current.contains(&t) {
+            current.push(t);
+        }
+    }
+    gta_mo_core::meta::set_meta_tags(&mods_dir, &m.folder_name, &current)?;
+    refresh_meta_cache(conn, &mods_dir, m.id, &m.folder_name)?;
+    log::info(format!(
+        "'{}': tags -> {}",
+        m.folder_name,
+        tags_display(&current)
+    ));
+    Ok(())
+}
+
+fn cmd_tag_remove(conn: &Connection, ident: &str, tags: &[String]) -> anyhow::Result<()> {
+    let m = resolve_mod(conn, ident)?;
+    let mods_dir = mods_dir_or_bail()?;
+    let remove = normalize_tags(tags)?;
+    let current = gta_mo_core::meta::read_mod_meta(&mods_dir, &m.folder_name)?
+        .and_then(|meta| meta.tags)
+        .unwrap_or_default();
+    let kept: Vec<String> = current
+        .into_iter()
+        .filter(|t| !remove.contains(t))
+        .collect();
+    gta_mo_core::meta::set_meta_tags(&mods_dir, &m.folder_name, &kept)?;
+    refresh_meta_cache(conn, &mods_dir, m.id, &m.folder_name)?;
+    log::info(format!(
+        "'{}': tags -> {}",
+        m.folder_name,
+        tags_display(&kept)
+    ));
+    Ok(())
+}
+
+/// Replaces a mod's whole `mod.toml` with the manifest read from stdin.
+fn cmd_manifest_set(conn: &Connection, ident: &str) -> anyhow::Result<()> {
+    use std::io::Read;
+    let m = resolve_mod(conn, ident)?;
+    let mods_dir = mods_dir_or_bail()?;
+    let mut content = String::new();
+    std::io::stdin()
+        .read_to_string(&mut content)
+        .map_err(|e| anyhow::anyhow!("No se pudo leer stdin: {e}"))?;
+    if content.trim().is_empty() {
+        anyhow::bail!("No se recibió ningún mod.toml por stdin.");
+    }
+    gta_mo_core::meta::write_manifest_validated(&mods_dir, &m.folder_name, &content)?;
+    refresh_meta_cache(conn, &mods_dir, m.id, &m.folder_name)?;
+    log::info(format!("'{}': mod.toml actualizado.", m.folder_name));
     Ok(())
 }
 

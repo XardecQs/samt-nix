@@ -203,6 +203,16 @@ pub enum CtlCommand {
         #[command(subcommand)]
         action: DepAction,
     },
+    #[command(about = "Edit a mod's tags in its mod.toml")]
+    Tag {
+        #[command(subcommand)]
+        action: TagAction,
+    },
+    #[command(about = "Edit a mod's mod.toml manifest")]
+    Manifest {
+        #[command(subcommand)]
+        action: ManifestAction,
+    },
     #[command(about = "Manage profiles")]
     Profile {
         #[command(subcommand)]
@@ -257,6 +267,34 @@ pub enum DepAction {
         mod_ident: String,
         dep_ident: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum TagAction {
+    #[command(about = "Replace all tags")]
+    Set {
+        ident: String,
+        #[arg(value_name = "TAG", num_args = 0..)]
+        tags: Vec<String>,
+    },
+    #[command(about = "Add tags (keeping the existing ones)")]
+    Add {
+        ident: String,
+        #[arg(value_name = "TAG", num_args = 1..)]
+        tags: Vec<String>,
+    },
+    #[command(about = "Remove tags")]
+    Remove {
+        ident: String,
+        #[arg(value_name = "TAG", num_args = 1..)]
+        tags: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ManifestAction {
+    #[command(about = "Replace the mod.toml with the manifest read from stdin")]
+    Set { ident: String },
 }
 
 #[derive(Subcommand)]

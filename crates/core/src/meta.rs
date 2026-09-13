@@ -274,6 +274,45 @@ pub fn set_meta_name(mods_dir: &Path, folder: &str, name: &str) -> anyhow::Resul
     write_manifest(&path, &doc.to_string())
 }
 
+/// Replaces the `tags` array of a `mod.toml` (keeping comments and other
+/// fields). An empty list removes the key. Errors when the mod has no manifest.
+pub fn set_meta_tags(mods_dir: &Path, folder: &str, tags: &[String]) -> anyhow::Result<()> {
+    let path = mods_dir.join(folder).join("mod.toml");
+    if !path.exists() {
+        anyhow::bail!(
+            "El mod '{folder}' no tiene mod.toml; créalo primero (botón Crear mod.toml)."
+        );
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut doc: toml_edit::DocumentMut = content.parse()?;
+    if tags.is_empty() {
+        doc.as_table_mut().remove("tags");
+    } else {
+        let mut arr = toml_edit::Array::new();
+        for t in tags {
+            arr.push(t.as_str());
+        }
+        doc["tags"] = toml_edit::value(arr);
+    }
+    write_manifest(&path, &doc.to_string())
+}
+
+/// Replaces a mod's whole `mod.toml` with `content`, after validating that it
+/// parses as a manifest. Errors when the mod has no manifest to replace.
+pub fn write_manifest_validated(
+    mods_dir: &Path,
+    folder: &str,
+    content: &str,
+) -> anyhow::Result<()> {
+    let path = mods_dir.join(folder).join("mod.toml");
+    if !path.exists() {
+        anyhow::bail!("El mod '{folder}' no tiene mod.toml.");
+    }
+    // Validate before touching the file.
+    toml::from_str::<ModMeta>(content).map_err(|e| anyhow::anyhow!("mod.toml inválido: {e}"))?;
+    write_manifest(&path, content)
+}
+
 /// Adds/removes `dep_ref` from the `[dependencies]` section of a `mod.toml`
 /// (creating the table/array if needed, keeping comments and other fields).
 /// No-op when the mod has no manifest.
@@ -587,6 +626,54 @@ optional = ["xardec:extra"]
 
         // no manifest -> no-op
         set_meta_name(&dir, "NoSuchMod", "x").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_meta_tags_replaces_and_clears() {
+        let dir = tmp_mods_dir("tags");
+        fs::create_dir_all(dir.join("M")).unwrap();
+        fs::write(
+            dir.join("M/mod.toml"),
+            "# c\nname = \"M\"\ntags = [\"old\"]\nversion = \"1.0\"\n",
+        )
+        .unwrap();
+
+        set_meta_tags(&dir, "M", &["essential".into(), "bugfix".into()]).unwrap();
+        let meta = read_mod_meta(&dir, "M").unwrap().unwrap();
+        assert_eq!(
+            meta.tags.as_deref(),
+            Some(&["essential".to_string(), "bugfix".to_string()][..])
+        );
+        let content = fs::read_to_string(dir.join("M/mod.toml")).unwrap();
+        assert!(content.contains("# c") && content.contains("version = \"1.0\""));
+
+        // empty -> key removed
+        set_meta_tags(&dir, "M", &[]).unwrap();
+        assert!(read_mod_meta(&dir, "M").unwrap().unwrap().tags.is_none());
+
+        // no manifest -> error
+        assert!(set_meta_tags(&dir, "NoSuchMod", &["x".into()]).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_manifest_validated_rejects_bad_toml() {
+        let dir = tmp_mods_dir("manifest");
+        fs::create_dir_all(dir.join("M")).unwrap();
+        fs::write(dir.join("M/mod.toml"), "name = \"M\"\n").unwrap();
+
+        // Malformed TOML is rejected and the file is untouched.
+        assert!(write_manifest_validated(&dir, "M", "name = [").is_err());
+        assert_eq!(
+            fs::read_to_string(dir.join("M/mod.toml")).unwrap(),
+            "name = \"M\"\n"
+        );
+
+        write_manifest_validated(&dir, "M", "name = \"New\"\nversion = \"2.0\"\n").unwrap();
+        let meta = read_mod_meta(&dir, "M").unwrap().unwrap();
+        assert_eq!(meta.name.as_deref(), Some("New"));
+        assert_eq!(meta.version.as_deref(), Some("2.0"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

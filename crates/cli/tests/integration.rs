@@ -55,6 +55,28 @@ impl TempDb {
         );
         String::from_utf8_lossy(&out.stdout).to_string()
     }
+
+    fn run_stdin(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut cmd = Command::new(BIN);
+        cmd.env("GTA_MO_DB", &self.db);
+        if let Some(cfg) = &self.config {
+            cmd.env("GTA_MO_CONFIG", cfg);
+        }
+        cmd.args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
 }
 
 impl Drop for TempDb {
@@ -729,4 +751,59 @@ fn reorder_rewrites_profile_order() {
         order("m1"),
         order("m2")
     );
+}
+
+#[test]
+fn tag_set_writes_to_mod_toml() {
+    let t = TempDb::new("tags");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "m1"]);
+    t.run_ok(&["ctl", "tag", "set", "m1", "essential", "bugfix"]);
+
+    let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    let tags: Vec<&str> = v["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
+    assert_eq!(tags, vec!["essential", "bugfix"]);
+
+    t.run_ok(&["ctl", "tag", "remove", "m1", "bugfix"]);
+    let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    assert_eq!(v["tags"].as_array().unwrap().len(), 1);
+
+    // An invalid tag is rejected.
+    let out = t.run(&["ctl", "tag", "set", "m1", "Bad Tag"]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn manifest_set_replaces_and_validates() {
+    let t = TempDb::new("manifest");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "m1"]);
+    let out = t.run_stdin(
+        &["ctl", "manifest", "set", "m1"],
+        "name = \"New Name\"\ntags = [\"x\"]\n",
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    assert_eq!(v["name"].as_str().unwrap(), "New Name");
+
+    // Malformed TOML fails and leaves the previous manifest intact.
+    let out = t.run_stdin(&["ctl", "manifest", "set", "m1"], "name = [");
+    assert!(!out.status.success());
+    let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    assert_eq!(v["name"].as_str().unwrap(), "New Name");
 }

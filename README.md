@@ -308,6 +308,10 @@ gta-mo ctl discover                          # scan mods/ and refresh metadata +
 gta-mo ctl clean                             # remove orphaned mod entries from the database
 gta-mo ctl dep add <mod> <dependency> [--optional]
 gta-mo ctl dep remove <mod> <dependency>
+gta-mo ctl tag set <mod> [<tag>...]           # replace tags (no tags = clear)
+gta-mo ctl tag add <mod> <tag>...
+gta-mo ctl tag remove <mod> <tag>...
+gta-mo ctl manifest set <mod>                 # replace mod.toml with stdin content
 gta-mo ctl profile list [--json]
 gta-mo ctl profile create <name>
 gta-mo ctl profile delete <name>
@@ -446,8 +450,9 @@ installed `gta-mo`.
 Features: mods list with search/tag/group/enabled-status filters and sorting,
 enable/disable and drag&drop load-order controls (with an insertion bar), a rich
 detail panel (author, Mod ID, URL, tags, groups, mount, description, cover,
-screenshot gallery, components, and a one-click **Crear mod.toml** for mods
-without a manifest), profiles tab with create/use/rename/copy/delete
+screenshot gallery, components, a one-click **Crear mod.toml** for mods
+without a manifest, a **tag editor** and a raw **mod.toml editor**), profiles
+tab with create/use/rename/copy/delete
 (renaming also moves `run/profiles/<slug>`), groups tab, a **Dependencies** tab
 that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run) that
