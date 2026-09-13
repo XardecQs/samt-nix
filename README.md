@@ -475,11 +475,18 @@ the keyboard shortcuts include `Ctrl+F` (search), `Ctrl+R` (refresh) and
 
 The interface reflows by window width (breakpoint 760 px):
 
-- **Wide**: left navigation sidebar plus a resizable right-side detail panel.
-- **Narrow (vertical/phone)**: a bottom navigation bar, and the mod detail opens
-  as a full-screen overlay page with a back button (libadwaita
-  `NavigationSplitView` style). The header collapses its extra controls into the
-  ⋮ menu and the filter row wraps.
+- **Wide**: left navigation sidebar; the mod detail opens as a **floating,
+  movable/resizable window** (its title bar has the name and close button).
+- **Narrow (vertical/phone)**: a bottom navigation bar with only **Mods**,
+  Perfiles and Log plus a "más" menu for the rest (Grupos, Dependencias,
+  Conflictos, actions, Debug/dry-run, Preferencias, Acerca de, atajos y tema).
+  The mod detail opens as a **full-screen overlay page** with a back button
+  (libadwaita `NavigationSplitView` style). The header keeps only the profile
+  selector and the launch button, and the Mods tab puts the search on its own
+  line with a compact **Filtros** menu plus "Nuevo mod".
+
+Each control appears in exactly one place per layout (no duplicated
+preferences/theme menus).
 
 In the detail panel, clicking the cover or any screenshot opens a **full-screen
 image viewer** with previous/next arrows, a counter and page dots (also `←`/`→`

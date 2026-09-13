@@ -38,15 +38,6 @@ impl ThemePref {
             ThemePref::Dark => egui::ThemePreference::Dark,
         }
     }
-
-    /// Cycles Sistema → Claro → Oscuro → Sistema.
-    pub fn next(self) -> ThemePref {
-        match self {
-            ThemePref::System => ThemePref::Light,
-            ThemePref::Light => ThemePref::Dark,
-            ThemePref::Dark => ThemePref::System,
-        }
-    }
 }
 
 /// Accent color, inspired by GNOME 47 and macOS system colors.
@@ -515,12 +506,5 @@ mod tests {
             let p = active(ctx);
             assert_ne!(p.accent, Color32::TRANSPARENT);
         });
-    }
-
-    #[test]
-    fn theme_pref_cycles() {
-        assert_eq!(ThemePref::System.next(), ThemePref::Light);
-        assert_eq!(ThemePref::Light.next(), ThemePref::Dark);
-        assert_eq!(ThemePref::Dark.next(), ThemePref::System);
     }
 }
