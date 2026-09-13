@@ -1827,6 +1827,14 @@ fn cmd_info(
     Ok(())
 }
 
+/// True when `u` is an `http://`/`https://` URL. `ctl open --url` only hands
+/// these to `xdg-open`, so a mod manifest cannot invoke arbitrary URI handlers
+/// (`file://`, custom `x-scheme-handler`, …).
+fn is_http_url(u: &str) -> bool {
+    let l = u.trim().to_ascii_lowercase();
+    l.starts_with("http://") || l.starts_with("https://")
+}
+
 fn cmd_open(conn: &Connection, ident: &str, url: bool) -> anyhow::Result<()> {
     let m = resolve_mod(conn, ident)?;
     let cfg =
@@ -1837,7 +1845,15 @@ fn cmd_open(conn: &Connection, ident: &str, url: bool) -> anyhow::Result<()> {
         let meta =
             gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder_name)?.unwrap_or_default();
         match meta.url {
-            Some(u) => u,
+            Some(u) => {
+                if !is_http_url(&u) {
+                    anyhow::bail!(
+                        "La URL del mod '{}' no usa http/https y no se abrirá por seguridad: {u}",
+                        m.folder_name
+                    );
+                }
+                u
+            }
             None => anyhow::bail!("El mod '{}' no tiene URL en su mod.toml.", m.folder_name),
         }
     } else {
@@ -2471,4 +2487,22 @@ fn cmd_health(
         cmd_conflicts(conn, profile_ident, false)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_http_url;
+
+    #[test]
+    fn only_http_urls_are_accepted() {
+        assert!(is_http_url("http://example.com"));
+        assert!(is_http_url("https://example.com/a?b=1#c"));
+        assert!(is_http_url("  HTTPS://Example.ORG  "));
+        // esquemas peligrosos o no web se rechazan
+        assert!(!is_http_url("file:///etc/passwd"));
+        assert!(!is_http_url("javascript:alert(1)"));
+        assert!(!is_http_url("ftp://example.com"));
+        assert!(!is_http_url("http:example.com"));
+        assert!(!is_http_url(""));
+    }
 }

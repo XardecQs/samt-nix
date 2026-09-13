@@ -40,50 +40,69 @@ impl ThemePref {
     }
 }
 
-/// Accent color, inspired by GNOME 47 and macOS system colors.
+/// Accent color palette (macOS-inspired system colors).
+///
+/// The `#[serde(alias = …)]` attributes map the previous palette's names onto
+/// their nearest new color, so an existing `gui.toml` keeps parsing instead of
+/// resetting every setting to defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Accent {
     #[default]
-    Blue,
-    Violet,
-    Green,
-    Orange,
-    Pink,
-    Graphite,
+    #[serde(alias = "blue")]
+    Azure,
+    #[serde(alias = "violet")]
+    Purple,
+    #[serde(alias = "pink")]
+    Magenta,
+    Red,
+    #[serde(alias = "orange")]
+    Amber,
+    Yellow,
+    #[serde(alias = "green")]
+    Leaf,
+    #[serde(alias = "graphite")]
+    Gray,
 }
 
 impl Accent {
     pub fn label(self) -> &'static str {
         match self {
-            Accent::Blue => "Azul",
-            Accent::Violet => "Violeta",
-            Accent::Green => "Verde",
-            Accent::Orange => "Naranja",
-            Accent::Pink => "Rosa",
-            Accent::Graphite => "Grafito",
+            Accent::Azure => "Azul",
+            Accent::Purple => "Púrpura",
+            Accent::Magenta => "Magenta",
+            Accent::Red => "Rojo",
+            Accent::Amber => "Ámbar",
+            Accent::Yellow => "Amarillo",
+            Accent::Leaf => "Verde",
+            Accent::Gray => "Gris",
         }
     }
 
-    pub const ALL: [Accent; 6] = [
-        Accent::Blue,
-        Accent::Violet,
-        Accent::Green,
-        Accent::Orange,
-        Accent::Pink,
-        Accent::Graphite,
+    pub const ALL: [Accent; 8] = [
+        Accent::Azure,
+        Accent::Purple,
+        Accent::Magenta,
+        Accent::Red,
+        Accent::Amber,
+        Accent::Yellow,
+        Accent::Leaf,
+        Accent::Gray,
     ];
 
-    /// Base accent for a theme: brighter on dark, deeper on light, so the
-    /// accent keeps a usable contrast against both backgrounds.
+    /// Base accent for a theme: the requested bright color on dark, a deeper
+    /// variant on light so the accent keeps a usable contrast (WCAG AA) against
+    /// both the background and the panel surface.
     fn base(self, dark: bool) -> Color32 {
         let (d, l) = match self {
-            Accent::Blue => ((88, 162, 255), (21, 101, 192)),
-            Accent::Violet => ((167, 139, 250), (109, 40, 217)),
-            Accent::Green => ((74, 222, 128), (21, 128, 61)),
-            Accent::Orange => ((251, 176, 64), (194, 100, 12)),
-            Accent::Pink => ((244, 114, 182), (190, 24, 93)),
-            Accent::Graphite => ((176, 176, 186), (71, 71, 82)),
+            Accent::Azure => ((0, 122, 255), (0, 90, 200)),
+            Accent::Purple => ((165, 80, 167), (130, 45, 135)),
+            Accent::Magenta => ((247, 79, 158), (190, 25, 115)),
+            Accent::Red => ((255, 83, 87), (195, 30, 35)),
+            Accent::Amber => ((248, 130, 26), (170, 80, 0)),
+            Accent::Yellow => ((255, 198, 0), (140, 100, 0)),
+            Accent::Leaf => ((98, 186, 70), (45, 115, 35)),
+            Accent::Gray => ((140, 140, 140), (90, 90, 90)),
         };
         let c = if dark { d } else { l };
         Color32::from_rgb(c.0, c.1, c.2)
@@ -99,6 +118,9 @@ impl Accent {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ThemeConfig {
     pub accent: Accent,
+    /// Custom accent color; when present it overrides `accent` (used as-is in
+    /// both themes).
+    pub custom: Option<Color32>,
     pub high_contrast: bool,
 }
 
@@ -129,13 +151,15 @@ pub struct Palette {
     pub focus_ring: Color32,
     /// Translucent fill for the active/enabled row.
     pub row_active_fill: Color32,
+    /// Even subtler accent tint, used for enabled mods in the list.
+    pub mod_row_active_fill: Color32,
 }
 
 impl Palette {
     pub fn build(theme: egui::Theme, cfg: ThemeConfig) -> Self {
         let dark = theme == egui::Theme::Dark;
         let hc = cfg.high_contrast;
-        let accent = cfg.accent.base(dark);
+        let accent = cfg.custom.unwrap_or_else(|| cfg.accent.base(dark));
         let on_accent = if contrast_ratio(accent, Color32::WHITE) >= 4.5 {
             Color32::WHITE
         } else {
@@ -170,12 +194,8 @@ impl Palette {
                 info: accent,
                 selection: accent,
                 focus_ring: lighten(accent, 0.25),
-                row_active_fill: Color32::from_rgba_unmultiplied(
-                    accent.r(),
-                    accent.g(),
-                    accent.b(),
-                    26,
-                ),
+                row_active_fill: tint(accent, 26),
+                mod_row_active_fill: tint(accent, 12),
             }
         } else {
             Palette {
@@ -205,12 +225,8 @@ impl Palette {
                 info: accent,
                 selection: accent,
                 focus_ring: darken(accent, 0.10),
-                row_active_fill: Color32::from_rgba_unmultiplied(
-                    accent.r(),
-                    accent.g(),
-                    accent.b(),
-                    30,
-                ),
+                row_active_fill: tint(accent, 30),
+                mod_row_active_fill: tint(accent, 14),
             }
         }
     }
@@ -246,7 +262,7 @@ impl Palette {
         v.hyperlink_color = self.accent;
         v.warn_fg_color = self.warning;
         v.error_fg_color = self.danger;
-        v.window_stroke = Stroke::new(1.0, self.border);
+        v.window_stroke = Stroke::new(1.0_f32, self.border);
         v.window_corner_radius = egui::CornerRadius::same(10);
         v.menu_corner_radius = egui::CornerRadius::same(8);
         v.window_shadow = subtle_shadow(self.dark_mode);
@@ -255,13 +271,13 @@ impl Palette {
         v.button_frame = true;
 
         v.selection.bg_fill = self.selection;
-        v.selection.stroke = Stroke::new(1.0, self.on_accent);
+        v.selection.stroke = Stroke::new(1.0_f32, self.on_accent);
 
         let w = &mut v.widgets;
         w.noninteractive.bg_fill = self.surface_raised;
         w.noninteractive.weak_bg_fill = self.surface;
-        w.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
-        w.noninteractive.fg_stroke = Stroke::new(1.0, self.text);
+        w.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.border);
+        w.noninteractive.fg_stroke = Stroke::new(1.0_f32, self.text);
         w.noninteractive.corner_radius = radius;
 
         w.inactive.bg_fill = self.surface_raised;
@@ -270,8 +286,8 @@ impl Palette {
         } else {
             Color32::from_rgb(232, 232, 238)
         };
-        w.inactive.bg_stroke = Stroke::new(1.0, self.border);
-        w.inactive.fg_stroke = Stroke::new(1.0, self.text);
+        w.inactive.bg_stroke = Stroke::new(1.0_f32, self.border);
+        w.inactive.fg_stroke = Stroke::new(1.0_f32, self.text);
         w.inactive.corner_radius = small_radius;
 
         w.hovered.bg_fill = lighten(
@@ -282,8 +298,8 @@ impl Palette {
             w.inactive.weak_bg_fill,
             if self.dark_mode { 0.10 } else { -0.05 },
         );
-        w.hovered.bg_stroke = Stroke::new(1.0, self.focus_ring);
-        w.hovered.fg_stroke = Stroke::new(1.0, self.text);
+        w.hovered.bg_stroke = Stroke::new(1.0_f32, self.focus_ring);
+        w.hovered.fg_stroke = Stroke::new(1.0_f32, self.text);
         w.hovered.corner_radius = small_radius;
         w.hovered.expansion = 1.0;
 
@@ -298,14 +314,14 @@ impl Palette {
         };
         w.active.bg_fill = pressed;
         w.active.weak_bg_fill = pressed;
-        w.active.bg_stroke = Stroke::new(1.0, self.accent);
-        w.active.fg_stroke = Stroke::new(1.0, self.text);
+        w.active.bg_stroke = Stroke::new(1.0_f32, self.accent);
+        w.active.fg_stroke = Stroke::new(1.0_f32, self.text);
         w.active.corner_radius = small_radius;
 
         w.open.bg_fill = w.inactive.bg_fill;
         w.open.weak_bg_fill = w.hovered.weak_bg_fill;
-        w.open.bg_stroke = Stroke::new(1.0, self.border);
-        w.open.fg_stroke = Stroke::new(1.0, self.text);
+        w.open.bg_stroke = Stroke::new(1.0_f32, self.border);
+        w.open.fg_stroke = Stroke::new(1.0_f32, self.text);
 
         v
     }
@@ -382,6 +398,26 @@ fn darken(c: Color32, amount: f32) -> Color32 {
     lighten(c, -amount)
 }
 
+/// Opaque color with a translucent alpha (unmultiplied), for tinted fills.
+fn tint(c: Color32, a: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+}
+
+/// Parses `#rrggbb` (or `rrggbb`) into an opaque color.
+pub fn parse_hex(s: &str) -> Option<Color32> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(s, 16).ok()?;
+    Some(Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+/// Formats an opaque color as `#rrggbb`.
+pub fn format_hex(c: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +437,7 @@ mod tests {
             for hc in [false, true] {
                 let cfg = ThemeConfig {
                     accent,
+                    custom: None,
                     high_contrast: hc,
                 };
                 for p in for_config(cfg) {
@@ -430,6 +467,7 @@ mod tests {
         for accent in Accent::ALL {
             for p in for_config(ThemeConfig {
                 accent,
+                custom: None,
                 high_contrast: false,
             }) {
                 for (name, fg) in [
@@ -456,6 +494,7 @@ mod tests {
         for accent in Accent::ALL {
             for p in for_config(ThemeConfig {
                 accent,
+                custom: None,
                 high_contrast: false,
             }) {
                 let r = contrast_ratio(p.on_accent, p.accent);
@@ -477,6 +516,7 @@ mod tests {
             for hc in [false, true] {
                 let cfg = ThemeConfig {
                     accent,
+                    custom: None,
                     high_contrast: hc,
                 };
                 for p in for_config(cfg) {
@@ -506,5 +546,31 @@ mod tests {
             let p = active(ctx);
             assert_ne!(p.accent, Color32::TRANSPARENT);
         });
+    }
+
+    #[test]
+    fn hex_roundtrip_and_validation() {
+        assert_eq!(parse_hex("#007aff"), Some(Color32::from_rgb(0, 122, 255)));
+        assert_eq!(parse_hex("007AFF"), Some(Color32::from_rgb(0, 122, 255)));
+        assert_eq!(format_hex(Color32::from_rgb(0, 122, 255)), "#007aff");
+        assert_eq!(parse_hex("#nope"), None);
+        assert_eq!(parse_hex("#12345"), None);
+        assert_eq!(parse_hex(""), None);
+        let c = Color32::from_rgb(255, 198, 0);
+        assert_eq!(parse_hex(&format_hex(c)), Some(c));
+    }
+
+    #[test]
+    fn custom_accent_overrides_preset() {
+        let custom = Color32::from_rgb(1, 2, 3);
+        let p = Palette::build(
+            egui::Theme::Dark,
+            ThemeConfig {
+                accent: Accent::Azure,
+                custom: Some(custom),
+                high_contrast: false,
+            },
+        );
+        assert_eq!(p.accent, custom);
     }
 }

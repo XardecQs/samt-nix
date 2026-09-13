@@ -21,6 +21,8 @@ pub struct ModView {
     pub groups: Vec<String>,
     /// Expanded screenshot paths (relative to the mod folder), for the gallery.
     pub screenshots: Vec<String>,
+    /// Whether the mod folder has a `mod.toml` manifest on disk.
+    pub has_manifest: bool,
 }
 
 impl ModView {
@@ -195,6 +197,7 @@ mod tests {
             meta,
             groups: vec!["Graphics".into()],
             screenshots: vec![],
+            has_manifest: true,
         }
     }
 

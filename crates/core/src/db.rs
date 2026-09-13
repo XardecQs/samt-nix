@@ -156,25 +156,42 @@ pub fn create_profile(conn: &Connection, name: &str) -> anyhow::Result<i64> {
     if name.trim().is_empty() {
         anyhow::bail!("El nombre del perfil no puede estar vacío.");
     }
-    let slug = unique_slug(conn, name)?;
-    conn.execute(
-        "INSERT INTO profiles (name, slug) VALUES (?1, ?2)",
-        params![name.trim(), slug],
-    )?;
-    let id = conn.last_insert_rowid();
-
-    let mut stmt = conn.prepare("SELECT id FROM mods ORDER BY id")?;
-    let ids = stmt
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for (i, mid) in ids.iter().enumerate() {
+    // All-or-nothing: the profile row plus one state row per existing mod are
+    // inserted inside a single transaction, so a failure cannot leave a profile
+    // without its `profile_mods` rows.
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> anyhow::Result<i64> {
+        let slug = unique_slug(conn, name)?;
         conn.execute(
-            "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
-             VALUES (?1, ?2, 0, ?3)",
-            params![id, mid, (i as i64 + 1) * 10],
+            "INSERT INTO profiles (name, slug) VALUES (?1, ?2)",
+            params![name.trim(), slug],
         )?;
+        let id = conn.last_insert_rowid();
+
+        let mut stmt = conn.prepare("SELECT id FROM mods ORDER BY id")?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for (i, mid) in ids.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
+                 VALUES (?1, ?2, 0, ?3)",
+                params![id, mid, (i as i64 + 1) * 10],
+            )?;
+        }
+        Ok(id)
+    })();
+    match result {
+        Ok(id) => {
+            conn.execute("COMMIT", [])?;
+            Ok(id)
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e)
+        }
     }
-    Ok(id)
 }
 
 fn row_to_profile(row: &rusqlite::Row) -> rusqlite::Result<Profile> {
@@ -1613,9 +1630,6 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
         ));
     }
 
-    let mut new_count = 0usize;
-    let mut orphan_count = 0usize;
-
     let mut disk_folders: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(mods_dir) {
         for entry in entries.flatten() {
@@ -1636,120 +1650,142 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
         }
     }
 
-    let all_mods = load_all_mods(conn)?;
-    let db_folders: Vec<String> = all_mods.iter().map(|m| m.folder_name.clone()).collect();
-    let db_folders_set: HashSet<&String> = db_folders.iter().collect();
-    let mods_by_folder: HashMap<&str, &ModIdentity> = all_mods
-        .iter()
-        .map(|m| (m.folder_name.as_str(), m))
-        .collect();
+    // All database changes (registration, metadata, dependency sync, orphan
+    // disabling) run inside a single transaction, so a failure midway rolls
+    // back instead of leaving a partially discovered state. The function stays
+    // idempotent either way.
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let result = (|| -> anyhow::Result<(usize, usize)> {
+        let mut new_count = 0usize;
+        let mut orphan_count = 0usize;
 
-    let mut metas: Vec<Option<crate::meta::ModMeta>> = Vec::with_capacity(disk_folders.len());
+        let all_mods = load_all_mods(conn)?;
+        let db_folders: Vec<String> = all_mods.iter().map(|m| m.folder_name.clone()).collect();
+        let db_folders_set: HashSet<&String> = db_folders.iter().collect();
+        let mods_by_folder: HashMap<&str, &ModIdentity> = all_mods
+            .iter()
+            .map(|m| (m.folder_name.as_str(), m))
+            .collect();
 
-    // Phase 1: register mods and store their metadata (id, tags, mount...).
-    for folder in &disk_folders {
-        // A malformed manifest must not wipe the cached metadata: keep whatever
-        // was discovered before and skip this mod's dependency sync.
-        let (meta, meta_error) = match crate::meta::read_mod_meta(mods_dir, folder) {
-            Ok(meta) => (meta, false),
-            Err(e) => {
-                log::warn(format!(
-                    "    [!] {folder}: {e} (se conserva la metadata cacheada)"
-                ));
-                (None, true)
-            }
-        };
-        if let Some(m) = &meta {
-            if let Some(mount) = &m.mount {
-                for entry in mount {
-                    if !crate::meta::valid_mount_entry(entry) {
-                        log::warn(format!(
-                            "    [!] {folder}: 'mount' con entrada inválida '{entry}' (se ignora)"
-                        ));
-                    } else if !mods_dir.join(folder).join(entry).is_dir() {
-                        log::warn(format!(
-                            "    [!] {folder}: 'mount' '{}' no existe en el disco",
-                            entry
-                        ));
-                    }
+        let mut metas: Vec<Option<crate::meta::ModMeta>> = Vec::with_capacity(disk_folders.len());
+
+        // Phase 1: register mods and store their metadata (id, tags, mount...).
+        for folder in &disk_folders {
+            // A malformed manifest must not wipe the cached metadata: keep
+            // whatever was discovered before and skip this mod's dep sync.
+            let (meta, meta_error) = match crate::meta::read_mod_meta(mods_dir, folder) {
+                Ok(meta) => (meta, false),
+                Err(e) => {
+                    log::warn(format!(
+                        "    [!] {folder}: {e} (se conserva la metadata cacheada)"
+                    ));
+                    (None, true)
                 }
-            }
-            if let Some(components) = &m.components {
-                for c in components {
-                    if c.name.as_deref().unwrap_or("").trim().is_empty() {
-                        log::warn(format!(
-                            "    [!] {folder}: componente sin nombre; se ignora"
-                        ));
-                    }
-                    if let Some(p) = &c.path {
-                        if !crate::meta::valid_mount_entry(p) {
+            };
+            if let Some(m) = &meta {
+                if let Some(mount) = &m.mount {
+                    for entry in mount {
+                        if !crate::meta::valid_mount_entry(entry) {
                             log::warn(format!(
-                                "    [!] {folder}: componente '{}' con path inválido '{}'",
-                                c.name.as_deref().unwrap_or("?"),
-                                p
+                                "    [!] {folder}: 'mount' con entrada inválida '{entry}' (se ignora)"
+                            ));
+                        } else if !mods_dir.join(folder).join(entry).is_dir() {
+                            log::warn(format!(
+                                "    [!] {folder}: 'mount' '{}' no existe en el disco",
+                                entry
                             ));
                         }
                     }
                 }
-            }
-        }
-
-        if !db_folders_set.contains(folder) {
-            let display_name = meta
-                .as_ref()
-                .and_then(|m| m.name.clone())
-                .unwrap_or_else(|| folder.replace('_', " "));
-
-            match add_mod_to_all_profiles(conn, folder, &display_name) {
-                Ok(_id) => {
-                    log::info(format!("    [+] Nuevo: {folder} -> '{display_name}'"));
-                    new_count += 1;
+                if let Some(components) = &m.components {
+                    for c in components {
+                        if c.name.as_deref().unwrap_or("").trim().is_empty() {
+                            log::warn(format!(
+                                "    [!] {folder}: componente sin nombre; se ignora"
+                            ));
+                        }
+                        if let Some(p) = &c.path {
+                            if !crate::meta::valid_mount_entry(p) {
+                                log::warn(format!(
+                                    "    [!] {folder}: componente '{}' con path inválido '{}'",
+                                    c.name.as_deref().unwrap_or("?"),
+                                    p
+                                ));
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    log::warn(format!("    [!] Error al insertar: {folder}: {e}"));
+            }
+
+            if !db_folders_set.contains(folder) {
+                let display_name = meta
+                    .as_ref()
+                    .and_then(|m| m.name.clone())
+                    .unwrap_or_else(|| folder.replace('_', " "));
+
+                match add_mod_to_all_profiles(conn, folder, &display_name) {
+                    Ok(_id) => {
+                        log::info(format!("    [+] Nuevo: {folder} -> '{display_name}'"));
+                        new_count += 1;
+                    }
+                    Err(e) => {
+                        log::warn(format!("    [!] Error al insertar: {folder}: {e}"));
+                    }
+                }
+            } else if let Some(m) = mods_by_folder.get(folder.as_str()) {
+                if let Some(name) = meta.as_ref().and_then(|m| m.name.clone()) {
+                    set_mod_name(conn, m.id, &name)?;
                 }
             }
-        } else if let Some(m) = mods_by_folder.get(folder.as_str()) {
-            if let Some(name) = meta.as_ref().and_then(|m| m.name.clone()) {
-                set_mod_name(conn, m.id, &name)?;
-            }
-        }
 
-        if let Some(m) = get_mod_by_folder(conn, folder)? {
-            if meta_error {
-                // Keep the cache; pushing `None` also skips the dep sync below.
-                metas.push(None);
+            if let Some(m) = get_mod_by_folder(conn, folder)? {
+                if meta_error {
+                    // Keep the cache; pushing `None` also skips the dep sync.
+                    metas.push(None);
+                } else {
+                    let validated = validate_meta_id(conn, m.id, folder, &meta);
+                    update_mod_meta(conn, m.id, &validated)?;
+                    metas.push(Some(validated.unwrap_or_default()));
+                }
             } else {
-                let validated = validate_meta_id(conn, m.id, folder, &meta);
-                update_mod_meta(conn, m.id, &validated)?;
-                metas.push(Some(validated.unwrap_or_default()));
-            }
-        } else {
-            metas.push(meta);
-        }
-    }
-
-    // Phase 2: sync `[dependencies]` once every mod is registered, so a
-    // reference to a mod discovered later in the same pass still resolves.
-    for (folder, meta) in disk_folders.iter().zip(metas.iter()) {
-        if let Some(m) = get_mod_by_folder(conn, folder)? {
-            sync_mod_dependencies(conn, m.id, meta)?;
-        }
-    }
-
-    let disk_folders_set: HashSet<&String> = disk_folders.iter().collect();
-    for db_folder in &db_folders {
-        if !disk_folders_set.contains(db_folder) {
-            if let Some(m) = all_mods.iter().find(|m| &m.folder_name == db_folder) {
-                let _ = disable_mod_all_profiles(conn, m.id);
-                log::warn(format!(
-                    "    [!] Huérfano desactivado: '{}' (carpeta eliminada del disco)",
-                    db_folder
-                ));
-                orphan_count += 1;
+                metas.push(meta);
             }
         }
-    }
+
+        // Phase 2: sync `[dependencies]` once every mod is registered, so a
+        // reference to a mod discovered later in the same pass still resolves.
+        for (folder, meta) in disk_folders.iter().zip(metas.iter()) {
+            if let Some(m) = get_mod_by_folder(conn, folder)? {
+                sync_mod_dependencies(conn, m.id, meta)?;
+            }
+        }
+
+        let disk_folders_set: HashSet<&String> = disk_folders.iter().collect();
+        for db_folder in &db_folders {
+            if !disk_folders_set.contains(db_folder) {
+                if let Some(m) = all_mods.iter().find(|m| &m.folder_name == db_folder) {
+                    let _ = disable_mod_all_profiles(conn, m.id);
+                    log::warn(format!(
+                        "    [!] Huérfano desactivado: '{}' (carpeta eliminada del disco)",
+                        db_folder
+                    ));
+                    orphan_count += 1;
+                }
+            }
+        }
+
+        Ok((new_count, orphan_count))
+    })();
+    let (new_count, orphan_count) = match result {
+        Ok(v) => {
+            conn.execute("COMMIT", [])?;
+            v
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(e);
+        }
+    };
 
     if new_count > 0 {
         log::info(format!("[+] {new_count} mod(s) nuevo(s) registrado(s)."));

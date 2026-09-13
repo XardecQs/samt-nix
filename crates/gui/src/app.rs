@@ -22,6 +22,11 @@ enum Tab {
 /// (phone-like) mode: bottom navigation + detail as an overlay page.
 const NARROW_BREAKPOINT: f32 = 760.0;
 
+/// Límites al decodificar imágenes de mods (no confiables): evita bombas de
+/// descompresión. 8192px de lado y 64 MiB de asignación por imagen.
+const MAX_IMAGE_DIM: u32 = 8192;
+const MAX_IMAGE_ALLOC: u64 = 64 * 1024 * 1024;
+
 enum InputAction {
     Create,
     Rename(String),
@@ -115,6 +120,7 @@ pub struct GtaMoApp {
     detail_opened: Option<std::time::Instant>,
     last_enabled: usize,
     enabled_pulse: Option<std::time::Instant>,
+    last_screen_size: egui::Vec2,
 }
 
 impl GtaMoApp {
@@ -174,6 +180,7 @@ impl GtaMoApp {
             detail_opened: None,
             last_enabled: 0,
             enabled_pulse: None,
+            last_screen_size: egui::Vec2::ZERO,
         };
         app.refresh();
         app
@@ -451,10 +458,18 @@ impl GtaMoApp {
         if self.cover_missing.contains(&key) {
             return None;
         }
-        let Some(img) = image::ImageReader::open(path)
-            .ok()
-            .and_then(|reader| reader.decode().ok())
-        else {
+        // Portadas/capturas provienen de mod.toml no confiable: acota dimensiones
+        // y memoria para que una imagen maliciosa (bomba de descompresión) no
+        // agote la RAM del proceso.
+        let decoded = image::ImageReader::open(path).ok().and_then(|mut reader| {
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(MAX_IMAGE_DIM);
+            limits.max_image_height = Some(MAX_IMAGE_DIM);
+            limits.max_alloc = Some(MAX_IMAGE_ALLOC);
+            reader.limits(limits);
+            reader.decode().ok()
+        });
+        let Some(img) = decoded else {
             self.cover_missing.insert(key);
             return None;
         };
@@ -487,7 +502,7 @@ impl GtaMoApp {
         let idle = !(self.busy || self.playing);
         let palette = theme::active(ui.ctx());
         let fill = if m.enabled {
-            palette.row_active_fill
+            palette.mod_row_active_fill
         } else {
             egui::Color32::TRANSPARENT
         };
@@ -610,16 +625,16 @@ impl GtaMoApp {
             egui::Id::new(("toggle", id)),
             if active { 1.0 } else { 0.0 },
         );
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
         let off = ui.visuals().widgets.inactive.weak_bg_fill;
         let fill = lerp_color(off, palette.accent, t);
         let stroke_color = lerp_color(palette.border, palette.on_accent, t);
-        let inner = egui::Rect::from_center_size(rect.center(), egui::vec2(14.0, 14.0));
+        let inner = egui::Rect::from_center_size(rect.center(), egui::vec2(17.0, 17.0));
         ui.painter().rect(
             inner,
-            egui::CornerRadius::same(4),
+            egui::CornerRadius::same(5),
             fill,
-            egui::Stroke::new(1.5, stroke_color),
+            egui::Stroke::new(1.5_f32, stroke_color),
             egui::StrokeKind::Inside,
         );
         if t > 0.01 {
@@ -627,7 +642,7 @@ impl GtaMoApp {
                 inner.center(),
                 egui::Align2::CENTER_CENTER,
                 crate::icons::CHECK,
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(13.5),
                 palette.on_accent.gamma_multiply(t),
             );
         }
@@ -645,6 +660,15 @@ impl eframe::App for GtaMoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_events(ctx);
         self.handle_lightbox_input(ctx);
+
+        // Force a reflow after a window resize so every layout (including the
+        // image viewer) is recomputed with the new size instead of reusing a
+        // stale one.
+        let screen_size = ctx.screen_rect().size();
+        if screen_size != self.last_screen_size {
+            self.last_screen_size = screen_size;
+            ctx.request_repaint();
+        }
         let narrow = ctx.screen_rect().width() < NARROW_BREAKPOINT;
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
@@ -805,16 +829,20 @@ impl eframe::App for GtaMoApp {
             let palette = theme::active(ctx);
             let frame = egui::Frame::new()
                 .fill(palette.surface)
-                .stroke(egui::Stroke::new(1.0, palette.border))
+                .stroke(egui::Stroke::new(1.0_f32, palette.border))
                 .corner_radius(egui::CornerRadius::same(10))
                 .inner_margin(egui::Margin::same(12));
+            // Full width when narrow, a centered card (max 900) otherwise; the
+            // size is derived from the current window (minus the frame margins)
+            // so it can never overflow the resized window.
+            let card_w = (screen.width() - 40.0)
+                .min(if narrow { f32::INFINITY } else { 900.0 })
+                .max(220.0);
+            let card_h = (screen.height() - 40.0).max(220.0);
             let resp = egui::Modal::new(egui::Id::new("detail_overlay"))
                 .frame(frame)
                 .show(ctx, |ui| {
-                    ui.set_min_size(egui::vec2(
-                        (screen.width() - 16.0).max(200.0),
-                        (screen.height() - 16.0).max(200.0),
-                    ));
+                    ui.set_min_size(egui::vec2(card_w, card_h));
                     ui.set_opacity(0.2 + 0.8 * reveal);
                     ui.add_space((1.0 - reveal) * 8.0);
                     self.ui_detail(ui);
@@ -1009,7 +1037,7 @@ impl GtaMoApp {
                             };
                             if ui.button(text).clicked() {
                                 self.tab = *tab;
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                         ui.separator();
@@ -1018,14 +1046,14 @@ impl GtaMoApp {
                             .clicked()
                         {
                             self.exec(vec!["ctl".into(), "discover".into()], false);
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui
                             .button(format!("{} Limpiar", crate::icons::ERASER))
                             .clicked()
                         {
                             self.exec(vec!["ctl".into(), "clean".into()], false);
-                            ui.close_menu();
+                            ui.close();
                         }
                         ui.separator();
                         ui.checkbox(&mut self.launch_debug, "Debug");
@@ -1322,7 +1350,7 @@ impl GtaMoApp {
                         let x1 = ui.clip_rect().right() - 4.0;
                         ui.painter().line_segment(
                             [egui::pos2(x0, y), egui::pos2(x1, y)],
-                            egui::Stroke::new(2.0, theme::active(ui.ctx()).accent),
+                            egui::Stroke::new(2.0_f32, theme::active(ui.ctx()).accent),
                         );
                     } else if let Some(folder) = prev_dragging {
                         // Suelta: persiste el orden con la posición señalada.
@@ -1346,18 +1374,25 @@ impl GtaMoApp {
         }
 
         // Pinned header: the back button stays visible even when the content is
-        // taller than the window.
-        ui.horizontal(|ui| {
-            ui.heading(&m.name);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(format!("{} Atrás", crate::icons::CHEVRON_LEFT))
-                    .clicked()
-                {
-                    self.selected_mod = None;
-                }
-            });
-        });
+        // taller than the window, and the title truncates on narrow windows.
+        egui::Sides::new()
+            .height(30.0)
+            .shrink_left()
+            .truncate()
+            .show(
+                ui,
+                |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(&m.name).heading()).truncate());
+                },
+                |ui| {
+                    if ui
+                        .button(format!("{} Atrás", crate::icons::CHEVRON_LEFT))
+                        .clicked()
+                    {
+                        self.selected_mod = None;
+                    }
+                },
+            );
         ui.separator();
 
         let rel = self.relations.clone();
@@ -1369,8 +1404,10 @@ impl GtaMoApp {
             .max_height(viewport_h)
             .show(ui, |ui| {
                 self.ui_detail_images(ui, &m);
+                let max_col = (ui.available_width() - 90.0).max(120.0);
                 egui::Grid::new("detail_meta")
                     .num_columns(2)
+                    .max_col_width(max_col)
                     .spacing([12.0, 4.0])
                     .show(ui, |ui| {
                         if let Some(id) = &m.meta.mod_id {
@@ -1390,7 +1427,23 @@ impl GtaMoApp {
                         }
                         if let Some(u) = &m.meta.url {
                             ui.label("URL:");
-                            ui.hyperlink_to(u.clone(), u.clone());
+                            let resp = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(u)
+                                        .underline()
+                                        .color(theme::active(ui.ctx()).accent),
+                                )
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                            );
+                            if resp.clicked() {
+                                let folder = m.folder.clone();
+                                self.exec(
+                                    vec!["ctl".into(), "open".into(), folder, "--url".into()],
+                                    false,
+                                );
+                            }
+                            resp.on_hover_text(u);
                             ui.end_row();
                         }
                         if !m.meta.tags.is_empty() {
@@ -1514,8 +1567,21 @@ impl GtaMoApp {
                     }
                 }
 
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let folder = m.folder.clone();
+                    if !m.has_manifest
+                        && ui
+                            .add_enabled(
+                                !(self.busy || self.playing),
+                                egui::Button::new(format!("{} Crear mod.toml", crate::icons::SAVE)),
+                            )
+                            .on_hover_text(
+                                "Crear una plantilla mod.toml para este mod (sin manifiesto)",
+                            )
+                            .clicked()
+                    {
+                        self.exec(vec!["ctl".into(), "init".into(), folder.clone()], false);
+                    }
                     if ui
                         .add_enabled(
                             !(self.busy || self.playing),
@@ -2213,68 +2279,43 @@ impl GtaMoApp {
             ctx.request_repaint();
         }
 
-        // Fit the whole viewer (header, image and controls) into the window on
-        // both axes, with margins. The footer reserves as many dot rows as
-        // needed, so nothing overflows horizontally.
-        let w = (screen.width() - 24.0).max(180.0);
-        let h = (screen.height() - 24.0).max(140.0);
-        let header_h = 26.0;
-        let dot_slot = 14.0;
-        let per_row = (((w - 8.0) / dot_slot).floor() as usize).max(1);
-        let dot_rows = if total > 1 {
-            total.div_ceil(per_row) as f32
-        } else {
-            0.0
-        };
-        let footer_h = if total > 1 {
-            34.0 + dot_rows * dot_slot
-        } else {
-            0.0
-        };
-        let img_area = egui::vec2(
-            (w - 8.0).max(64.0),
-            (h - header_h - 10.0 - footer_h).max(48.0),
-        );
+        // "Compact" (small window / phone-like): the image takes the whole
+        // window and the controls float over it. Otherwise a header row leaves
+        // room for the title. Everything is derived from the *current* window
+        // each frame, so resizing always re-centers correctly.
+        let compact = screen.width() < 600.0 || screen.height() < 520.0;
+        let margin = if compact { 6.0 } else { 16.0 };
+        let header_h = if compact { 0.0 } else { 34.0 };
+        let view = egui::Rect::from_min_max(screen.min + egui::vec2(0.0, header_h), screen.max);
 
         let mut close = false;
         let mut nav = 0i32;
         let mut pick: Option<usize> = None;
-        let resp = egui::Modal::new(egui::Id::new("gta_mo_lightbox"))
-            .backdrop_color(egui::Color32::from_black_alpha(220))
-            .frame(
-                egui::Frame::new()
-                    .fill(egui::Color32::TRANSPARENT)
-                    .inner_margin(egui::Margin::same(8)),
-            )
+        // Manual full-screen overlay: unlike a `Modal`, its geometry is derived
+        // from the current window every frame, so it always re-centers on resize
+        // and can go edge-to-edge in compact mode.
+        egui::Area::new(egui::Id::new("gta_mo_lightbox"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen.min)
+            .constrain_to(screen)
             .show(ctx, |ui| {
-                ui.set_min_size(egui::vec2(w, h));
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button(crate::icons::X)
-                            .on_hover_text("Cerrar (Esc)")
-                            .clicked()
-                        {
-                            close = true;
-                        }
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&label).color(palette.text).strong(),
-                                )
-                                .truncate(),
-                            );
-                        });
-                    });
-                });
-                ui.add_space(4.0);
+                ui.set_min_size(screen.size());
+
+                // Backdrop. Clicking outside the image/controls closes.
+                let backdrop =
+                    ui.interact(screen, egui::Id::new("lb_backdrop"), egui::Sense::click());
+                ui.painter()
+                    .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(235));
+                if backdrop.clicked() {
+                    close = true;
+                }
+
+                // Image: fit "contain" inside the current view, centered.
+                let area = view.shrink(margin);
                 match &tex {
                     Some(tex) => {
                         let size = tex.size_vec2();
-                        let scale =
-                            (img_area.x / size.x.max(1.0)).min(img_area.y / size.y.max(1.0));
-                        let (viewport, _) = ui.allocate_exact_size(img_area, egui::Sense::hover());
-                        let target = egui::Rect::from_center_size(viewport.center(), size * scale);
+                        let target = contain_rect(area, size);
                         let rect = match source {
                             Some(s) if hero < 1.0 => egui::Rect::from_min_max(
                                 crate::motion::lerp_pos(s.left_top(), target.left_top(), hero),
@@ -2292,63 +2333,151 @@ impl GtaMoApp {
                             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             egui::Color32::WHITE,
                         );
-                        if total > 1 {
-                            ui.vertical_centered(|ui| {
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .button(crate::icons::CHEVRON_LEFT)
-                                        .on_hover_text("Anterior (←)")
-                                        .clicked()
-                                    {
-                                        nav = -1;
-                                    }
-                                    ui.label(format!("{} / {}", index + 1, total));
-                                    if ui
-                                        .button(crate::icons::CHEVRON_RIGHT)
-                                        .on_hover_text("Siguiente (→)")
-                                        .clicked()
-                                    {
-                                        nav = 1;
-                                    }
-                                });
-                                ui.add_space(2.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    for i in 0..total {
-                                        let selected = i == index;
-                                        let (r, resp) = ui.allocate_exact_size(
-                                            egui::vec2(dot_slot, dot_slot),
-                                            egui::Sense::click(),
-                                        );
-                                        ui.painter().circle_filled(
-                                            r.center(),
-                                            if selected { 5.0 } else { 3.0 },
-                                            if selected {
-                                                palette.accent
-                                            } else {
-                                                palette.text_muted
-                                            },
-                                        );
-                                        if resp.clicked() {
-                                            pick = Some(i);
-                                        }
-                                    }
-                                });
-                            });
-                        }
+                        // Clicks on the image itself do nothing (only the margins
+                        // close), matching the previous modal behaviour.
+                        let _ = ui.interact(rect, egui::Id::new("lb_image"), egui::Sense::click());
                     }
                     None => {
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new("No se pudo cargar la imagen")
-                                    .color(palette.danger),
+                        ui.painter().text(
+                            area.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "No se pudo cargar la imagen",
+                            egui::FontId::proportional(15.0),
+                            palette.danger,
+                        );
+                    }
+                }
+
+                // Side navigation zones (big tap targets, arrows overlaid). The
+                // hover feedback is a small circle around the arrow instead of a
+                // fill of the whole zone.
+                if total > 1 {
+                    let left_rect =
+                        egui::Rect::from_min_max(view.min, egui::pos2(view.center().x, view.max.y));
+                    let right_rect =
+                        egui::Rect::from_min_max(egui::pos2(view.center().x, view.min.y), view.max);
+                    for (rect, id, icon, delta) in [
+                        (left_rect, "lb_prev", crate::icons::CHEVRON_LEFT, -1i32),
+                        (right_rect, "lb_next", crate::icons::CHEVRON_RIGHT, 1i32),
+                    ] {
+                        let resp = ui.interact(rect, egui::Id::new(id), egui::Sense::click());
+                        let cx = if delta < 0 {
+                            rect.left() + 26.0
+                        } else {
+                            rect.right() - 26.0
+                        };
+                        let cy = rect.center().y;
+                        if resp.hovered() {
+                            ui.painter().circle_filled(
+                                egui::pos2(cx, cy),
+                                if compact { 24.0 } else { 20.0 },
+                                egui::Color32::from_black_alpha(130),
                             );
-                        });
+                        }
+                        ui.painter().text(
+                            egui::pos2(cx, cy),
+                            egui::Align2::CENTER_CENTER,
+                            icon,
+                            egui::FontId::proportional(if compact { 26.0 } else { 22.0 }),
+                            egui::Color32::WHITE,
+                        );
+                        if resp.clicked() {
+                            nav = delta;
+                        }
+                    }
+                }
+
+                // Title (top-left) and close button (top-right).
+                let top = screen.top() + if compact { 4.0 } else { 8.0 };
+                let title_rect = egui::Rect::from_min_size(
+                    egui::pos2(screen.left() + margin, top),
+                    egui::vec2((screen.width() - 2.0 * margin - 48.0).max(40.0), 26.0),
+                );
+                // Subtle pill so the title stays legible over a bright image.
+                ui.painter().rect_filled(
+                    title_rect.expand(4.0),
+                    egui::CornerRadius::same(6),
+                    egui::Color32::from_black_alpha(90),
+                );
+                ui.put(
+                    title_rect,
+                    egui::Label::new(
+                        egui::RichText::new(&label)
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    )
+                    .truncate(),
+                );
+                if ui
+                    .put(
+                        egui::Rect::from_min_size(
+                            egui::pos2(screen.right() - margin - 30.0, top - 1.0),
+                            egui::vec2(30.0, 28.0),
+                        ),
+                        egui::Button::new(crate::icons::X),
+                    )
+                    .on_hover_text("Cerrar (Esc)")
+                    .clicked()
+                {
+                    close = true;
+                }
+
+                // Counter + dots, floating over the bottom.
+                if total > 1 {
+                    let dot_slot = 14.0;
+                    let per_row = (((screen.width() - 24.0) / dot_slot).floor() as usize).max(1);
+                    let dot_rows = total.div_ceil(per_row).min(3);
+                    let footer_h = 18.0 + dot_rows as f32 * dot_slot;
+                    let footer = egui::Rect::from_min_max(
+                        egui::pos2(screen.left() + 8.0, screen.bottom() - footer_h - 6.0),
+                        egui::pos2(screen.right() - 8.0, screen.bottom() - 6.0),
+                    );
+                    ui.painter().rect_filled(
+                        footer,
+                        egui::CornerRadius::same(10),
+                        egui::Color32::from_black_alpha(120),
+                    );
+                    ui.painter().text(
+                        egui::pos2(footer.center().x, footer.top() + 10.0),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{} / {}", index + 1, total),
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::WHITE,
+                    );
+                    let mut y = footer.top() + 22.0;
+                    let mut x = footer.center().x - (per_row.min(total) as f32 * dot_slot) / 2.0
+                        + dot_slot / 2.0;
+                    for i in 0..total {
+                        if i > 0 && i % per_row == 0 {
+                            let remain = (total - i).min(per_row) as f32;
+                            x = footer.center().x - (remain * dot_slot) / 2.0 + dot_slot / 2.0;
+                            y += dot_slot;
+                        }
+                        if y > footer.bottom() {
+                            break;
+                        }
+                        let center = egui::pos2(x, y);
+                        let dot =
+                            egui::Rect::from_center_size(center, egui::vec2(dot_slot, dot_slot));
+                        let resp =
+                            ui.interact(dot, egui::Id::new(("lb_dot", i)), egui::Sense::click());
+                        let selected = i == index;
+                        ui.painter().circle_filled(
+                            center,
+                            if selected { 5.0 } else { 3.0 },
+                            if selected {
+                                palette.accent
+                            } else {
+                                egui::Color32::from_white_alpha(150)
+                            },
+                        );
+                        if resp.clicked() {
+                            pick = Some(i);
+                        }
+                        x += dot_slot;
                     }
                 }
             });
-        if resp.should_close() {
-            close = true;
-        }
         if let Some(i) = pick {
             lb.index = i;
         } else if nav != 0 && total > 1 {
@@ -2632,6 +2761,13 @@ fn nav_item(
     resp.clicked()
 }
 
+/// Largest rectangle with the `size` aspect ratio that fits centered inside
+/// `bounds` (the "contain" fit used by the image viewer).
+fn contain_rect(bounds: egui::Rect, size: egui::Vec2) -> egui::Rect {
+    let scale = (bounds.width() / size.x.max(1.0)).min(bounds.height() / size.y.max(1.0));
+    egui::Rect::from_center_size(bounds.center(), size * scale)
+}
+
 /// Linear interpolation between two colors (per-channel, sRGB).
 fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
@@ -2742,21 +2878,21 @@ fn app_menu_items(app: &mut GtaMoApp, ui: &mut egui::Ui, new_theme: &mut Option<
         .clicked()
     {
         app.show_preferences = true;
-        ui.close_menu();
+        ui.close();
     }
     if ui
         .button(format!("{} Acerca de", crate::icons::INFO))
         .clicked()
     {
         app.show_about = true;
-        ui.close_menu();
+        ui.close();
     }
     if ui
         .button(format!("{} Atajos de teclado", crate::icons::KEYBOARD))
         .clicked()
     {
         app.show_shortcuts = true;
-        ui.close_menu();
+        ui.close();
     }
     ui.separator();
     ui.label(egui::RichText::new("Tema").small().weak());
@@ -2769,7 +2905,41 @@ fn app_menu_items(app: &mut GtaMoApp, ui: &mut egui::Ui, new_theme: &mut Option<
             .clicked()
         {
             *new_theme = Some(pref);
-            ui.close_menu();
+            ui.close();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contain_rect;
+    use eframe::egui;
+
+    #[test]
+    fn contain_rect_fits_and_centers() {
+        let bounds = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+
+        // Wide image: limited by width, fills it exactly and stays centered.
+        let r = contain_rect(bounds, egui::vec2(400.0, 100.0));
+        assert!((r.width() - 200.0).abs() < 0.01);
+        assert!((r.height() - 50.0).abs() < 0.01);
+        assert!((r.center().x - bounds.center().x).abs() < 0.01);
+        assert!((r.center().y - bounds.center().y).abs() < 0.01);
+
+        // Tall image: limited by height.
+        let r = contain_rect(bounds, egui::vec2(100.0, 400.0));
+        assert!((r.height() - 100.0).abs() < 0.01);
+        assert!((r.width() - 25.0).abs() < 0.01);
+
+        // Never exceeds the bounds.
+        for size in [
+            egui::vec2(1.0, 1.0),
+            egui::vec2(1000.0, 3.0),
+            egui::vec2(3.0, 1000.0),
+        ] {
+            let r = contain_rect(bounds, size);
+            assert!(r.width() <= bounds.width() + 0.01);
+            assert!(r.height() <= bounds.height() + 0.01);
         }
     }
 }

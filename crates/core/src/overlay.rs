@@ -29,6 +29,9 @@ fn unmount(merged: &Path, lazy: bool) -> bool {
 
 pub struct OverlayMount {
     merged: PathBuf,
+    /// Write end of the guard pipe. Kept open for the life of this process; the
+    /// guard child unmounts when it closes (including on a crash/SIGKILL).
+    guard_fd: Option<std::os::fd::RawFd>,
 }
 
 impl OverlayMount {
@@ -71,39 +74,65 @@ impl OverlayMount {
 
         Ok(OverlayMount {
             merged: merged.to_path_buf(),
+            guard_fd: None,
         })
     }
 
     /// Spawns a detached helper that unmounts `merged` shortly after this
     /// process dies, so a killed or crashed gta-mo does not leave the overlay
-    /// mounted. Done with fork() instead of a `sh -c` wrapper; the child just
-    /// polls for the parent's death and then runs fusermount.
+    /// mounted. Done with fork() instead of a `sh -c` wrapper; the child blocks
+    /// on the read end of a pipe until the parent closes the write end (on exit
+    /// or death), so there is no PID-reuse race.
     pub fn start_guard(&mut self) {
         let merged = self.merged.clone();
-        let self_pid = std::process::id() as libc::pid_t;
-        let _fusermount = fusermount_bin().to_owned();
+
+        let mut fds = [0 as libc::c_int; 2];
+        // O_CLOEXEC: children that exec (umu-run) must not keep the write end
+        // alive, or the guard would never see the parent's death.
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+            crate::log::warn(
+                "No se pudo crear el proceso guardián; un cierre forzado puede dejar el overlay montado.",
+            );
+            return;
+        }
+        let (read_fd, write_fd) = (fds[0], fds[1]);
 
         let pid = unsafe { libc::fork() };
         if pid < 0 {
+            unsafe {
+                libc::close(read_fd);
+                libc::close(write_fd);
+            }
             crate::log::warn(
                 "No se pudo crear el proceso guardián; un cierre forzado puede dejar el overlay montado.",
             );
             return;
         }
         if pid == 0 {
-            unsafe { libc::setsid() };
+            // Child: close the write end and block until the parent's write end
+            // is closed (normal exit, crash or SIGKILL), then unmount.
+            unsafe {
+                libc::close(write_fd);
+                libc::setsid();
+            }
+            let mut buf = [0u8; 1];
             loop {
-                if unsafe { libc::kill(self_pid, 0) } != 0 {
+                let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+                if n <= 0 {
                     break;
                 }
-                thread::sleep(Duration::from_secs(1));
             }
+            unsafe { libc::close(read_fd) };
             thread::sleep(Duration::from_secs(2));
             if !unmount(&merged, false) {
                 unmount(&merged, true);
             }
             std::process::exit(0);
         }
+
+        // Parent: keep only the write end, open for the rest of this process.
+        unsafe { libc::close(read_fd) };
+        self.guard_fd = Some(write_fd);
     }
 
     pub fn merged_path(&self) -> &Path {
@@ -148,6 +177,11 @@ impl Drop for OverlayMount {
         if Self::is_mounted(&self.merged) && !Self::unmount_retry(&self.merged, 15, 2000) {
             crate::log::warn("Desmontaje bloqueado, intentando lazy unmount...");
             unmount(&self.merged, true);
+        }
+        // Release the guard: its read() sees EOF and finishes (harmless
+        // second unmount attempt if this one already succeeded).
+        if let Some(fd) = self.guard_fd.take() {
+            unsafe { libc::close(fd) };
         }
     }
 }

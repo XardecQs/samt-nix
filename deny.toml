@@ -1,0 +1,49 @@
+# cargo-deny configuration.
+# Checked in CI with `cargo deny --all-features check`.
+
+[graph]
+all-features = true
+targets = []
+
+[advisories]
+version = 2
+# `unmaintained` only fails for direct (workspace) dependencies; transitive
+# unmaintained crates (e.g. paste via wgpu/metal, ttf-parser via egui) are
+# reported as warnings by `cargo audit` but cannot be fixed here.
+unmaintained = "workspace"
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "GPL-3.0-or-later",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+exceptions = [
+    # Bundled egui fonts carry both the OFL and the Ubuntu font license.
+    { allow = ["OFL-1.1", "Ubuntu-font-1.0"], name = "epaint_default_fonts" },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

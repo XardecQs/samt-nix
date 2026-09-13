@@ -31,6 +31,9 @@ pub struct GuiSettings {
     pub theme: ThemePref,
     #[serde(default)]
     pub accent: Accent,
+    /// Custom accent color as `#rrggbb`; when present it overrides `accent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_accent: Option<String>,
     #[serde(default)]
     pub high_contrast: bool,
     #[serde(default)]
@@ -49,6 +52,7 @@ impl Default for GuiSettings {
             ui_scale: default_ui_scale(),
             theme: ThemePref::default(),
             accent: Accent::default(),
+            custom_accent: None,
             high_contrast: false,
             reduce_motion: false,
             density: Density::default(),
@@ -75,6 +79,10 @@ impl GuiSettings {
     pub fn theme_config(&self) -> crate::theme::ThemeConfig {
         crate::theme::ThemeConfig {
             accent: self.accent,
+            custom: self
+                .custom_accent
+                .as_deref()
+                .and_then(crate::theme::parse_hex),
             high_contrast: self.high_contrast,
         }
     }
@@ -123,15 +131,17 @@ mod tests {
         let s: GuiSettings = toml::from_str("ui_scale = 1.0\n").unwrap();
         assert_eq!(s.ui_scale, 1.0);
         assert_eq!(s.theme, ThemePref::System);
-        assert_eq!(s.accent, Accent::Blue);
+        assert_eq!(s.accent, Accent::Azure);
         assert!(s.show_covers);
+        assert!(s.custom_accent.is_none());
     }
 
     #[test]
     fn roundtrips() {
         let s = GuiSettings {
             theme: ThemePref::Dark,
-            accent: Accent::Violet,
+            accent: Accent::Purple,
+            custom_accent: Some("#a550a7".into()),
             reduce_motion: true,
             density: Density::Compact,
             ..Default::default()
@@ -139,8 +149,20 @@ mod tests {
         let text = toml::to_string(&s).unwrap();
         let back: GuiSettings = toml::from_str(&text).unwrap();
         assert_eq!(back.theme, ThemePref::Dark);
-        assert_eq!(back.accent, Accent::Violet);
+        assert_eq!(back.accent, Accent::Purple);
+        assert_eq!(back.custom_accent.as_deref(), Some("#a550a7"));
         assert!(back.reduce_motion);
         assert_eq!(back.density, Density::Compact);
+    }
+
+    #[test]
+    fn legacy_accent_names_still_parse() {
+        // Old gui.toml values map to the nearest new accent without resetting
+        // the rest of the settings.
+        let s: GuiSettings = toml::from_str("accent = \"violet\"\nui_scale = 1.3\n").unwrap();
+        assert_eq!(s.accent, Accent::Purple);
+        assert_eq!(s.ui_scale, 1.3);
+        let s: GuiSettings = toml::from_str("accent = \"graphite\"\n").unwrap();
+        assert_eq!(s.accent, Accent::Gray);
     }
 }

@@ -215,6 +215,7 @@ impl Backend {
                     .map(|g| g.name)
                     .collect();
                 let screenshots = gta_mo_core::meta::mod_screenshots(&paths.mods_dir, &folder);
+                let has_manifest = paths.mods_dir.join(&folder).join("mod.toml").is_file();
                 Ok(ModView {
                     id: m.id,
                     folder,
@@ -224,6 +225,7 @@ impl Backend {
                     meta,
                     groups,
                     screenshots,
+                    has_manifest,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;

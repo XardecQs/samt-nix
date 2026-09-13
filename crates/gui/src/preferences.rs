@@ -12,7 +12,9 @@ pub fn show(ctx: &egui::Context, settings: &mut GuiSettings, open: &mut bool) ->
     let resp = egui::Modal::new(egui::Id::new("gta_mo_preferences"))
         .frame(egui::Frame::popup(ctx.style().as_ref()))
         .show(ctx, |ui| {
-            ui.set_min_width(480.0);
+            let max_w = (ctx.screen_rect().width() - 60.0).clamp(220.0, 480.0);
+            let max_h = (ctx.screen_rect().height() - 120.0).clamp(160.0, 460.0);
+            ui.set_min_width(max_w);
             ui.horizontal(|ui| {
                 ui.heading("Preferencias");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -24,7 +26,7 @@ pub fn show(ctx: &egui::Context, settings: &mut GuiSettings, open: &mut bool) ->
             ui.separator();
 
             egui::ScrollArea::vertical()
-                .max_height(460.0)
+                .max_height(max_h)
                 .show(ui, |ui| {
                     changed |= appearance(ui, settings);
                     ui.add_space(10.0);
@@ -66,25 +68,48 @@ fn appearance(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
             ui.end_row();
 
             ui.label("Color de acento");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                let custom = s.custom_accent.is_some();
                 for a in Accent::ALL {
-                    let selected = s.accent == a;
+                    let selected = !custom && s.accent == a;
                     let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+                        ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
                     let painter = ui.painter();
                     painter.circle_filled(rect.center(), 10.0, a.swatch());
                     if selected {
                         painter.circle_stroke(
                             rect.center(),
-                            11.5,
-                            egui::Stroke::new(2.0, ui.visuals().text_color()),
+                            12.0,
+                            egui::Stroke::new(2.0_f32, ui.visuals().text_color()),
                         );
                     }
                     if resp.clicked() {
+                        s.custom_accent = None;
                         s.accent = a;
                         changed = true;
                     }
                     resp.on_hover_text(a.label());
+                }
+
+                // Botón extra: color personalizado (se usa tal cual en ambos temas).
+                let mut rgb = s
+                    .custom_accent
+                    .as_deref()
+                    .and_then(crate::theme::parse_hex)
+                    .map(|c| [c.r(), c.g(), c.b()])
+                    .unwrap_or_else(|| {
+                        let d = s.accent.swatch();
+                        [d.r(), d.g(), d.b()]
+                    });
+                if ui
+                    .color_edit_button_srgb(&mut rgb)
+                    .on_hover_text("Color personalizado")
+                    .changed()
+                {
+                    s.custom_accent = Some(crate::theme::format_hex(egui::Color32::from_rgb(
+                        rgb[0], rgb[1], rgb[2],
+                    )));
+                    changed = true;
                 }
             });
             ui.end_row();

@@ -251,6 +251,30 @@ fn init_creates_folder_template_and_registers() {
 }
 
 #[test]
+fn open_url_rejects_non_http_schemes() {
+    let t = TempDb::new("openurl");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "m"]);
+    // Un esquema peligroso debe rechazarse antes de invocar xdg-open.
+    std::fs::write(
+        game_root.join("mods/m/mod.toml"),
+        "name = \"M\"\nurl = \"file:///etc/passwd\"\n",
+    )
+    .unwrap();
+
+    let out = t.run(&["ctl", "open", "m", "--url"]);
+    assert!(!out.status.success(), "una URL file:// no debe abrirse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("http"),
+        "el error debe mencionar http: {stderr}"
+    );
+}
+
+#[test]
 fn info_reads_edited_mod_toml_without_launch() {
     let t = TempDb::new("info");
     let game_root = t.dir.join("game");

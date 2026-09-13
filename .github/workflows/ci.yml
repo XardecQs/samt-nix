@@ -38,3 +38,20 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+
+  audit:
+    name: cargo audit and deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: Audit dependencies (RustSec advisories)
+        run: cargo audit
+
+      - name: Check licenses, bans and sources
+        run: cargo deny --all-features check

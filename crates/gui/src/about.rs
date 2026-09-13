@@ -11,7 +11,7 @@ pub fn show_about(ctx: &egui::Context, settings: &GuiSettings, open: &mut bool) 
     let resp = egui::Modal::new(egui::Id::new("gta_mo_about"))
         .frame(egui::Frame::popup(ctx.style().as_ref()))
         .show(ctx, |ui| {
-            ui.set_min_width(420.0);
+            ui.set_min_width((ctx.screen_rect().width() - 60.0).clamp(220.0, 420.0));
             ui.vertical_centered(|ui| {
                 ui.add_space(4.0);
                 ui.heading("GTA SA Mod Organizer");
@@ -59,10 +59,14 @@ fn diagnostics(settings: &GuiSettings) -> String {
     let cfg = gta_mo_core::config::find_config_file()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "(no encontrado)".to_string());
+    let accent = match settings.custom_accent.as_deref() {
+        Some(hex) => format!("{hex} (personalizado)"),
+        None => format!("{:?}", settings.accent),
+    };
     format!(
         "gta-mo-gui {}\n\
          tema: {:?}\n\
-         acento: {:?}\n\
+         acento: {accent}\n\
          alto contraste: {}\n\
          reducir movimiento: {}\n\
          escala ui: {}\n\
@@ -71,7 +75,6 @@ fn diagnostics(settings: &GuiSettings) -> String {
          base de datos: {}",
         env!("CARGO_PKG_VERSION"),
         settings.theme,
-        settings.accent,
         settings.high_contrast,
         settings.reduce_motion,
         settings.ui_scale,
@@ -86,7 +89,7 @@ pub fn show_shortcuts(ctx: &egui::Context, open: &mut bool) {
     let resp = egui::Modal::new(egui::Id::new("gta_mo_shortcuts"))
         .frame(egui::Frame::popup(ctx.style().as_ref()))
         .show(ctx, |ui| {
-            ui.set_min_width(360.0);
+            ui.set_min_width((ctx.screen_rect().width() - 60.0).clamp(220.0, 360.0));
             ui.heading("Atajos de teclado");
             ui.separator();
             egui::Grid::new("shortcuts")

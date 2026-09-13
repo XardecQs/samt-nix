@@ -111,6 +111,10 @@
             "$out/share/applications/gta-mo-gui.desktop"
           install -Dm644 data/icons/hicolor/scalable/apps/gta-mo-gui.svg \
             "$out/share/icons/hicolor/scalable/apps/gta-mo-gui.svg"
+          for size in 16 24 32 48 64 128 256 512; do
+            install -Dm644 "data/icons/hicolor/''${size}x''${size}/apps/gta-mo-gui.png" \
+              "$out/share/icons/hicolor/''${size}x''${size}/apps/gta-mo-gui.png"
+          done
         '';
 
         meta = {
@@ -185,7 +189,14 @@
         libGL
         mesa
         libx11
+        libxcursor
+        libxrandr
+        libxi
+        libxinerama
+        libxext
+        libxxf86vm
         libxkbcommon
+        libxcb
         wayland
       ];
     in {

@@ -380,9 +380,8 @@ Steam Linux Runtime compatibility tool on the entry, or Steam will execute
 `gta-mo` inside `pressure-vessel`, where neither the binary nor its
 dependencies exist (`Failed to execute child process ?gta-mo?`).
 
-The built-in `gta-mo steam` subcommand does the namespace dance that the old
-shell wrapper did (the legacy wrapper lives in
-[`bash-legacy/gta-mo-steam.sh`](bash-legacy/gta-mo-steam.sh)).
+The built-in `gta-mo steam` subcommand performs the user/mount namespace
+dance required by Steam.
 
 To integrate with Steam:
 
@@ -447,7 +446,8 @@ installed `gta-mo`.
 Features: mods list with search/tag/group/enabled-status filters and sorting,
 enable/disable and drag&drop load-order controls (with an insertion bar), a rich
 detail panel (author, Mod ID, URL, tags, groups, mount, description, cover,
-screenshot gallery, components), profiles tab with create/use/rename/copy/delete
+screenshot gallery, components, and a one-click **Crear mod.toml** for mods
+without a manifest), profiles tab with create/use/rename/copy/delete
 (renaming also moves `run/profiles/<slug>`), groups tab, a **Dependencies** tab
 that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run),
@@ -458,7 +458,8 @@ Discover/Clean actions, a streaming Log tab, and a status bar.
 The GUI follows the system **light/dark** theme by default and can be forced in
 **Preferencias…** (⋮ menu), together with:
 
-- **Accent color** (Blue/Violet/Green/Orange/Pink/Graphite), high-contrast mode,
+- **Accent color** (8 presets — blue, purple, magenta, red, amber, yellow,
+  green, gray — plus a custom color picker), high-contrast mode,
   UI density, interface scale, "reduce motion" and whether to show covers.
 - A semantic color palette (`crates/gui/src/theme.rs`) whose text/background
   pairs are verified to meet **WCAG AA** contrast in both themes by unit tests.
@@ -520,9 +521,9 @@ nix shell nixpkgs#python3Packages.fonttools -c \
 Then add the codepoints from `assets/lucide/codepoints.json` to
 `crates/gui/src/icons.rs`.
 
-The package installs a desktop entry and icon (`data/gta-mo-gui.desktop`,
-`data/icons/.../gta-mo-gui.svg`); with `enableGui` it appears in your
-application menu.
+The package installs a desktop entry and the app icon (a scalable SVG plus PNGs
+at the standard sizes) from `data/gta-mo-gui.desktop` and
+`data/icons/hicolor/`; with `enableGui` it appears in your application menu.
 
 To develop it: `nix develop`, then `cargo run -p gta-mo-gui`.
 
@@ -534,10 +535,6 @@ To develop it: `nix develop`, then `cargo run -p gta-mo-gui`.
 3. The binary builds a `fuse-overlayfs` layer stack from the enabled mods of
    the active profile (writing through to that profile's `upper/`) and runs
    the game with `umu-launcher` (Proton)
-
-## Legacy version
-
-The original bash implementation is preserved in [`bash-legacy/`](bash-legacy/).
 
 ## License
 

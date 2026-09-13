@@ -76,7 +76,7 @@ impl Toasts {
                     };
                     egui::Frame::new()
                         .fill(palette.surface_raised.gamma_multiply(alpha))
-                        .stroke(egui::Stroke::new(1.0, accent))
+                        .stroke(egui::Stroke::new(1.0_f32, accent))
                         .corner_radius(egui::CornerRadius::same(8))
                         .inner_margin(egui::Margin::symmetric(12, 8))
                         .show(ui, |ui| {
