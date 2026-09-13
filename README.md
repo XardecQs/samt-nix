@@ -461,7 +461,8 @@ without a manifest, a **tag editor** and a raw **mod.toml editor**), profiles
 tab with create/use/rename/copy/delete
 (renaming also moves `run/profiles/<slug>`), a **Datos** tab listing the active
 profile's saves, settings, User Tracks and screenshots written under
-`userfiles/` (with PortableGTA) and a recommendation to install it, groups tab, a
+`userfiles/` (with PortableGTA), with screenshot previews in the full-screen
+image viewer, and a recommendation to install PortableGTA, groups tab, a
 **Dependencies** tab
 that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run) that
@@ -503,7 +504,9 @@ The interface reflows by window width (breakpoint 760 px):
 
 The mod detail always opens as a **full-screen overlay page** (8 px margins) with
 a pinned header and a back button (libadwaita `NavigationSplitView` style), so
-the back button is always visible.
+the back button is always visible. The dialogs (new/rename/copy, tag editor,
+`mod.toml` editor, delete confirmation) use the same full-screen overlay style,
+so they always appear above the detail page and are never floating windows.
 
 Each control appears in exactly one place per layout (no duplicated
 preferences/theme menus).

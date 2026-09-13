@@ -98,6 +98,13 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Entry>, depth: usize) {
         if ft.is_dir() {
             walk(root, &path, out, depth + 1);
         } else if ft.is_file() {
+            let file_name = e.file_name();
+            let name = file_name.to_string_lossy();
+            // Skip overlayfs whiteout markers (`.wh..wh..opq`, `.wh.<name>`):
+            // they are not user files.
+            if name.starts_with(".wh.") {
+                continue;
+            }
             let Ok(rel_path) = path.strip_prefix(root) else {
                 continue;
             };
@@ -107,7 +114,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Entry>, depth: usize) {
             }
             let meta = e.metadata().ok();
             out.push(Entry {
-                name: e.file_name().to_string_lossy().to_string(),
+                name: name.to_string(),
                 rel: rel.clone(),
                 size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
                 modified: meta.and_then(|m| m.modified().ok()),
@@ -217,9 +224,13 @@ mod tests {
         std::fs::write(upper.join("userfiles/gta_sa.set"), "cfg").unwrap();
         std::fs::write(upper.join("userfiles/User Tracks/a.mp3"), "audio").unwrap();
         std::fs::write(upper.join("userfiles/Gallery/shot.png"), "img").unwrap();
+        // Overlayfs whiteouts must be ignored.
+        std::fs::write(upper.join("userfiles/.wh..wh..opq"), "").unwrap();
+        std::fs::write(upper.join("userfiles/.wh.deleted.b"), "").unwrap();
 
         let entries = scan(&upper, "userfiles");
         assert_eq!(entries.len(), 4);
+        assert!(entries.iter().all(|e| !e.name.starts_with(".wh.")));
         assert!(entries.iter().any(|e| e.category == Category::Saves));
         assert!(entries.iter().any(|e| e.category == Category::Screenshots));
 

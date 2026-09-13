@@ -128,6 +128,8 @@ pub struct GtaMoApp {
     /// Whether an enabled mod provides PortableGTA.
     portablegta: bool,
     userdata_error: Option<String>,
+    /// Absolute path of the profile's user-data folder (for previews).
+    userdata_base: Option<std::path::PathBuf>,
     relations: Option<crate::backend::ModRelations>,
     relations_for: Option<i64>,
     conflicts: Vec<crate::backend::ConflictView>,
@@ -197,6 +199,7 @@ impl GtaMoApp {
             userdata: Vec::new(),
             portablegta: false,
             userdata_error: None,
+            userdata_base: None,
             relations: None,
             relations_for: None,
             conflicts: Vec::new(),
@@ -290,6 +293,7 @@ impl GtaMoApp {
             Err(e) => {
                 self.userdata.clear();
                 self.portablegta = false;
+                self.userdata_base = None;
                 self.userdata_error = Some(format!("Error de config: {e}"));
                 return;
             }
@@ -297,6 +301,7 @@ impl GtaMoApp {
         let Some(subdir) = cfg.game_spec().user_data_dir else {
             self.userdata.clear();
             self.portablegta = false;
+            self.userdata_base = None;
             self.userdata_error = Some("El juego no define datos de usuario.".into());
             return;
         };
@@ -304,6 +309,7 @@ impl GtaMoApp {
             .profile_paths(&self.snapshot.active_slug)
             .upper;
         self.userdata = gta_mo_core::userdata::scan(&upper, subdir);
+        self.userdata_base = Some(upper.join(subdir));
         self.portablegta = self
             .backend
             .mods_dir_path()
@@ -786,6 +792,17 @@ impl eframe::App for GtaMoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_events(ctx);
         self.handle_lightbox_input(ctx);
+
+        // Escape closes the top dialog before the detail overlay can see it, so
+        // closing a dialog never also closes the detail behind it.
+        if self.lightbox.is_none()
+            && (self.input.is_some() || self.confirm.is_some() || self.manifest_editor.is_some())
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.input = None;
+            self.confirm = None;
+            self.manifest_editor = None;
+        }
 
         // Force a reflow after a window resize so every layout (including the
         // image viewer) is recomputed with the new size instead of reusing a
@@ -2498,6 +2515,32 @@ impl GtaMoApp {
             })
             .collect();
 
+        // Screenshot entries, with a gallery item for the image viewer.
+        let shots: Vec<(UserDataRow, crate::lightbox::GalleryItem)> = self
+            .userdata_base
+            .as_ref()
+            .map(|base| {
+                self.userdata
+                    .iter()
+                    .filter(|e| e.category == Category::Screenshots)
+                    .map(|e| {
+                        (
+                            UserDataRow {
+                                rel: e.rel.clone(),
+                                name: e.name.clone(),
+                                size: e.size,
+                            },
+                            crate::lightbox::GalleryItem {
+                                key: format!("data/{slug}/{}", e.rel),
+                                path: base.join(&e.rel),
+                                label: e.name.clone(),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut pending_remove: Option<String> = None;
         egui::ScrollArea::vertical()
             .id_salt("data_scroll")
@@ -2511,6 +2554,51 @@ impl GtaMoApp {
                     ui.label(
                         egui::RichText::new(format!("{} ({})", cat.label(), items.len())).strong(),
                     );
+                    if *cat == Category::Screenshots {
+                        ui.horizontal_wrapped(|ui| {
+                            for (i, (row, item)) in shots.iter().enumerate() {
+                                ui.vertical(|ui| {
+                                    let key = item.key.clone();
+                                    if let Some(tex) = self.load_image(ui.ctx(), key, &item.path) {
+                                        let resp = ui
+                                            .add(
+                                                egui::Image::new(&tex)
+                                                    .fit_to_exact_size(egui::vec2(150.0, 90.0))
+                                                    .corner_radius(4)
+                                                    .sense(egui::Sense::click()),
+                                            )
+                                            .on_hover_text("Ampliar");
+                                        if resp.clicked() {
+                                            let items: Vec<crate::lightbox::GalleryItem> =
+                                                shots.iter().map(|(_, it)| it.clone()).collect();
+                                            self.lightbox =
+                                                Some(crate::lightbox::Lightbox::from_rect(
+                                                    items, i, resp.rect,
+                                                ));
+                                        }
+                                    } else {
+                                        ui.label(
+                                            egui::RichText::new("No se pudo cargar").small().weak(),
+                                        );
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(&row.name).small(),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(&row.rel);
+                                        if ui.small_button(crate::icons::TRASH).clicked() {
+                                            pending_remove = Some(row.rel.clone());
+                                        }
+                                    });
+                                });
+                            }
+                        });
+                        ui.add_space(6.0);
+                        continue;
+                    }
                     for row in items {
                         ui.horizontal(|ui| {
                             ui.add(egui::Label::new(egui::RichText::new(&row.name)).truncate())
@@ -2925,38 +3013,42 @@ impl GtaMoApp {
             // Take the state so its `value` buffer persists across frames; it is
             // put back when the dialog stays open.
             let mut input = self.input.take().expect("checked is_some");
-            let mut open = true;
             let mut close = false;
             let mut submit = false;
             let title = input.title.clone();
             let label = input.label.clone();
-            egui::Window::new(title)
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label(label);
-                    submit |= ui
-                        .add(egui::TextEdit::singleline(&mut input.value).desired_width(220.0))
-                        .lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() {
-                            submit = true;
-                        }
-                        if ui.button("Cancelar").clicked() {
-                            close = true;
-                        }
-                    });
+            let narrow = ctx.screen_rect().width() < NARROW_BREAKPOINT;
+            overlay_page(ctx, "gta_mo_input", narrow, 560.0, |ui| {
+                if overlay_header(ui, &title, "Atrás") {
+                    close = true;
+                }
+                ui.label(&label);
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut input.value)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(&label),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit = true;
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        submit = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        close = true;
+                    }
                 });
+            });
             if submit
                 && (!input.value.trim().is_empty()
                     || matches!(input.action, InputAction::SetTags(_)))
             {
                 let value = input.value.trim().to_string();
                 self.apply_input(input.action, value);
-            } else if close || !open {
-                // descartar
+            } else if close {
+                // discard
             } else {
                 self.input = Some(input);
             }
@@ -2967,65 +3059,69 @@ impl GtaMoApp {
                 let c = self.confirm.as_ref().unwrap();
                 (c.title.clone(), c.message.clone())
             };
-            let mut open = true;
             let mut close = false;
             let mut ok = false;
-            egui::Window::new(title)
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label(message);
-                    ui.horizontal(|ui| {
-                        if ui.button("Sí").clicked() {
-                            ok = true;
-                        }
-                        if ui.button("No").clicked() {
-                            close = true;
-                        }
-                    });
+            let narrow = ctx.screen_rect().width() < NARROW_BREAKPOINT;
+            overlay_page(ctx, "gta_mo_confirm", narrow, 520.0, |ui| {
+                if overlay_header(ui, &title, "Atrás") {
+                    close = true;
+                }
+                ui.label(&message);
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Sí").clicked() {
+                        ok = true;
+                    }
+                    if ui.button("No").clicked() {
+                        close = true;
+                    }
                 });
+            });
             if ok {
                 if let Some(c) = self.confirm.take() {
                     self.apply_confirm(c.action);
                 }
-            } else if close || !open {
+            } else if close {
                 self.confirm = None;
             }
         }
 
         if self.manifest_editor.is_some() {
             let mut ed = self.manifest_editor.take().expect("checked is_some");
-            let mut open = true;
+            let mut close = false;
             let mut save = false;
             let mut reload = false;
-            egui::Window::new(format!("mod.toml — {}", ed.folder))
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(true)
-                .default_size([640.0, 480.0])
-                .show(ctx, |ui| {
-                    if let Some(err) = &ed.error {
-                        ui.colored_label(theme::active(ui.ctx()).danger, err);
-                        ui.add_space(4.0);
-                    }
-                    egui::ScrollArea::both().show(ui, |ui| {
+            let title = format!("mod.toml — {}", ed.folder);
+            let narrow = ctx.screen_rect().width() < NARROW_BREAKPOINT;
+            overlay_page(ctx, "gta_mo_manifest", narrow, 780.0, |ui| {
+                if overlay_header(ui, &title, "Atrás") {
+                    close = true;
+                }
+                if let Some(err) = &ed.error {
+                    ui.colored_label(theme::active(ui.ctx()).danger, err);
+                    ui.add_space(4.0);
+                }
+                let available = (ui.available_height() - 40.0).max(120.0);
+                egui::ScrollArea::both()
+                    .max_height(available)
+                    .show(ui, |ui| {
                         ui.add(
                             egui::TextEdit::multiline(&mut ed.content)
                                 .code_editor()
                                 .desired_width(f32::INFINITY)
-                                .desired_rows(18),
+                                .desired_rows(20),
                         );
                     });
-                    ui.horizontal(|ui| {
-                        if ui.button("Guardar").clicked() {
-                            save = true;
-                        }
-                        if ui.button("Recargar").clicked() {
-                            reload = true;
-                        }
-                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Guardar").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Recargar").clicked() {
+                        reload = true;
+                    }
                 });
+            });
             if reload {
                 if let Some(dir) = self.backend.mods_dir_path() {
                     match std::fs::read_to_string(dir.join(&ed.folder).join("mod.toml")) {
@@ -3056,7 +3152,7 @@ impl GtaMoApp {
                     Err(e) => ed.error = Some(format!("TOML inválido: {e}")),
                 }
             }
-            if !open || saved {
+            if close || saved {
                 self.manifest_editor = None;
             } else {
                 self.manifest_editor = Some(ed);
@@ -3295,6 +3391,61 @@ fn nav_item(
 fn contain_rect(bounds: egui::Rect, size: egui::Vec2) -> egui::Rect {
     let scale = (bounds.width() / size.x.max(1.0)).min(bounds.height() / size.y.max(1.0));
     egui::Rect::from_center_size(bounds.center(), size * scale)
+}
+
+/// Renders a centered, full-screen "page" overlay, in the same style as the
+/// detail overlay. Unlike a floating `egui::Window` it lives in the foreground
+/// layer (so it always appears above other overlays) and is not resizable.
+fn overlay_page<R>(
+    ctx: &egui::Context,
+    id: &str,
+    narrow: bool,
+    max_w: f32,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::ModalResponse<R> {
+    let screen = ctx.screen_rect();
+    let palette = theme::active(ctx);
+    let frame = egui::Frame::new()
+        .fill(palette.surface)
+        .stroke(egui::Stroke::new(1.0_f32, palette.border))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(12));
+    let card_w = (screen.width() - 40.0)
+        .min(if narrow { f32::INFINITY } else { max_w })
+        .max(220.0);
+    let card_h = (screen.height() - 40.0).max(220.0);
+    egui::Modal::new(egui::Id::new(id))
+        .frame(frame)
+        .show(ctx, |ui| {
+            ui.set_min_size(egui::vec2(card_w, card_h));
+            add_contents(ui)
+        })
+}
+
+/// Pinned overlay header: title (truncated) plus a right-aligned back button.
+/// Returns `true` when the button was clicked.
+fn overlay_header(ui: &mut egui::Ui, title: &str, back_label: &str) -> bool {
+    let mut back = false;
+    egui::Sides::new()
+        .height(30.0)
+        .shrink_left()
+        .truncate()
+        .show(
+            ui,
+            |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(title).heading()).truncate());
+            },
+            |ui| {
+                if ui
+                    .button(format!("{} {back_label}", crate::icons::CHEVRON_LEFT))
+                    .clicked()
+                {
+                    back = true;
+                }
+            },
+        );
+    ui.separator();
+    back
 }
 
 /// Linear interpolation between two colors (per-channel, sRGB).

@@ -5,6 +5,7 @@ use eframe::egui;
 use std::path::PathBuf;
 
 /// One image in the gallery.
+#[derive(Clone)]
 pub struct GalleryItem {
     /// Cache key (also used as the egui texture name).
     pub key: String,
