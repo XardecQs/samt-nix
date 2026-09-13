@@ -313,6 +313,11 @@ gta-mo ctl tag set <mod> [<tag>...]           # replace tags (no tags = clear)
 gta-mo ctl tag add <mod> <tag>...
 gta-mo ctl tag remove <mod> <tag>...
 gta-mo ctl manifest set <mod>                 # replace mod.toml with stdin content
+gta-mo ctl data list [--json]                 # profile user data (saves/tracks/screenshots)
+gta-mo ctl data dir                           # open the profile user-data folder
+gta-mo ctl data open <rel>
+gta-mo ctl data remove <rel> [--yes]
+gta-mo ctl open-url <url>                     # open an http(s) URL
 gta-mo ctl profile list [--json]
 gta-mo ctl profile create <name>
 gta-mo ctl profile delete <name>
@@ -454,7 +459,10 @@ detail panel (author, Mod ID, URL, tags, groups, mount, description, cover,
 screenshot gallery, components, a one-click **Crear mod.toml** for mods
 without a manifest, a **tag editor** and a raw **mod.toml editor**), profiles
 tab with create/use/rename/copy/delete
-(renaming also moves `run/profiles/<slug>`), groups tab, a **Dependencies** tab
+(renaming also moves `run/profiles/<slug>`), a **Datos** tab listing the active
+profile's saves, settings, User Tracks and screenshots written under
+`userfiles/` (with PortableGTA) and a recommendation to install it, groups tab, a
+**Dependencies** tab
 that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run) that
 becomes a **Detener** button while the game runs, Discover/Clean actions, a
@@ -542,6 +550,19 @@ To develop it: `nix develop`, then `cargo run -p gta-mo-gui`.
 3. The binary builds a `fuse-overlayfs` layer stack from the enabled mods of
    the active profile (writing through to that profile's `upper/`) and runs
    the game with `umu-launcher` (Proton)
+
+## Profile user data
+
+Per-profile savegames, settings, User Tracks and screenshots need the game to
+write *inside* its directory (so the overlay routes those writes to the
+profile's `upper/`). The recommended way is **[PortableGTA](https://www.mixmods.com.br/2021/06/iii-vc-sa-portablegta-change-saves-folder-mudar-pasta-user-files/)**
+(MIT, by GTA modding): install it as a mod (its `portablegta.asi` inside
+`modloader/`) and enable it. Each profile then keeps its own
+`userfiles/` (saves, `gta_sa.set`, `User Tracks/`, `Gallery/`), browsable and
+manageable from the GUI's **Datos** tab or with `gta-mo ctl data ...`.
+
+The launcher only *recommends* PortableGTA (a third-party mod, MIT-licensed); it
+does not redistribute its binary.
 
 ## License
 

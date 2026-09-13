@@ -14,6 +14,7 @@ enum Tab {
     Mods,
     Profiles,
     Groups,
+    Data,
     Dependencies,
     Conflicts,
     Log,
@@ -74,11 +75,19 @@ struct ManifestEditor {
     error: Option<String>,
 }
 
+/// One row of the Data tab (owned so `self` can be used while rendering).
+struct UserDataRow {
+    rel: String,
+    name: String,
+    size: u64,
+}
+
 #[allow(clippy::enum_variant_names)]
 enum ConfirmAction {
     DeleteProfile(String),
     DeleteMod(String),
     DeleteGroup(String),
+    DeleteUserData(String),
 }
 
 struct ConfirmState {
@@ -114,6 +123,11 @@ pub struct GtaMoApp {
     input: Option<InputState>,
     confirm: Option<ConfirmState>,
     manifest_editor: Option<ManifestEditor>,
+    /// Profile user data (saves/tracks/screenshots), refreshed on `refresh`.
+    userdata: Vec<gta_mo_core::userdata::Entry>,
+    /// Whether an enabled mod provides PortableGTA.
+    portablegta: bool,
+    userdata_error: Option<String>,
     relations: Option<crate::backend::ModRelations>,
     relations_for: Option<i64>,
     conflicts: Vec<crate::backend::ConflictView>,
@@ -180,6 +194,9 @@ impl GtaMoApp {
             input: None,
             confirm: None,
             manifest_editor: None,
+            userdata: Vec::new(),
+            portablegta: false,
+            userdata_error: None,
             relations: None,
             relations_for: None,
             conflicts: Vec::new(),
@@ -258,10 +275,41 @@ impl GtaMoApp {
                 }
                 self.reload_relations();
                 self.reload_groups();
+                self.reload_userdata();
                 self.start_conflict_scan();
             }
             Err(e) => self.status = Some(e),
         }
+    }
+
+    /// Rescans the active profile's user data (saves/tracks/screenshots) and
+    /// checks whether PortableGTA is enabled.
+    fn reload_userdata(&mut self) {
+        let cfg = match gta_mo_core::config::load_config() {
+            Ok(c) => c,
+            Err(e) => {
+                self.userdata.clear();
+                self.portablegta = false;
+                self.userdata_error = Some(format!("Error de config: {e}"));
+                return;
+            }
+        };
+        let Some(subdir) = cfg.game_spec().user_data_dir else {
+            self.userdata.clear();
+            self.portablegta = false;
+            self.userdata_error = Some("El juego no define datos de usuario.".into());
+            return;
+        };
+        let upper = gta_mo_core::config::RuntimePaths::from_config(&cfg)
+            .profile_paths(&self.snapshot.active_slug)
+            .upper;
+        self.userdata = gta_mo_core::userdata::scan(&upper, subdir);
+        self.portablegta = self
+            .backend
+            .mods_dir_path()
+            .map(|md| gta_mo_core::userdata::portablegta_installed(&md, &self.snapshot.resolved))
+            .unwrap_or(false);
+        self.userdata_error = None;
     }
 
     /// Kicks off a background conflict scan. Results are discarded if they
@@ -957,6 +1005,7 @@ impl eframe::App for GtaMoApp {
                 Tab::Mods => self.ui_mods(ui),
                 Tab::Profiles => self.ui_profiles(ui),
                 Tab::Groups => self.ui_groups(ui),
+                Tab::Data => self.ui_data(ui),
                 Tab::Dependencies => self.ui_dependencies(ui),
                 Tab::Conflicts => self.ui_conflicts(ui),
                 Tab::Log => self.ui_log(ui),
@@ -1113,10 +1162,11 @@ impl GtaMoApp {
         // Dependencias and Conflictos appear when their measured width fits, and
         // labels are dropped at very small widths. Everything else lives in
         // "más".
-        let all: [(Tab, &str, &str, Option<usize>); 6] = [
+        let all: [(Tab, &str, &str, Option<usize>); 7] = [
             (Tab::Mods, crate::icons::LIST, "Mods", None),
             (Tab::Profiles, crate::icons::USERS, "Perfiles", None),
             (Tab::Log, crate::icons::INFO, "Log", None),
+            (Tab::Data, crate::icons::SAVE, "Datos", None),
             (Tab::Groups, crate::icons::FOLDER, "Grupos", None),
             (
                 Tab::Dependencies,
@@ -1219,10 +1269,11 @@ impl GtaMoApp {
             + self.snapshot.dep_cycles.len();
         let conflicts = self.conflicts.iter().filter(|c| !c.duplicate).count();
 
-        let items: [(Tab, &str, &str, Option<usize>); 6] = [
+        let items: [(Tab, &str, &str, Option<usize>); 7] = [
             (Tab::Mods, crate::icons::LIST, "Mods", None),
             (Tab::Profiles, crate::icons::USERS, "Perfiles", None),
             (Tab::Groups, crate::icons::FOLDER, "Grupos", None),
+            (Tab::Data, crate::icons::SAVE, "Datos", None),
             (
                 Tab::Dependencies,
                 crate::icons::SWAP_H,
@@ -2333,6 +2384,185 @@ impl GtaMoApp {
         }
     }
 
+    /// Profile user data: saves, settings, user tracks and screenshots written
+    /// inside `userfiles/` (with PortableGTA).
+    fn ui_data(&mut self, ui: &mut egui::Ui) {
+        use gta_mo_core::userdata::Category;
+        ui.add_space(6.0);
+        let palette = theme::active(ui.ctx());
+        let slug = self.snapshot.active_slug.clone();
+
+        if !self.portablegta {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Recomendado: PortableGTA").strong());
+                ui.label(
+                    "Con PortableGTA cada perfil guarda sus partidas, ajustes, User Tracks y \
+                     capturas en su propia carpeta (userfiles/), aisladas por el overlay.",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Abrir MixMods (descarga)").clicked() {
+                        self.exec(
+                            vec![
+                                "ctl".into(),
+                                "open-url".into(),
+                                "https://www.mixmods.com.br/2021/06/iii-vc-sa-portablegta-change-saves-folder-mudar-pasta-user-files/".into(),
+                            ],
+                            false,
+                        );
+                    }
+                    if ui.button("Código fuente (MIT)").clicked() {
+                        self.exec(
+                            vec![
+                                "ctl".into(),
+                                "open-url".into(),
+                                "https://github.com/GTAmodding/miscmods/blob/master/portablegta.cpp".into(),
+                            ],
+                            false,
+                        );
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Instálalo como un mod (contenido dentro de mods/) y actívalo. PortableGTA \
+                         es de terceros (MIT, GTA modding); el launcher solo lo recomienda.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
+            ui.add_space(8.0);
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(format!("Datos del perfil '{slug}'")).strong());
+            if ui
+                .button(format!("{} Abrir carpeta", crate::icons::FOLDER_OPEN))
+                .clicked()
+            {
+                self.exec(
+                    vec![
+                        "ctl".into(),
+                        "data".into(),
+                        "dir".into(),
+                        "--profile".into(),
+                        slug.clone(),
+                    ],
+                    false,
+                );
+            }
+            if ui
+                .button(format!("{} Actualizar", crate::icons::REFRESH))
+                .clicked()
+            {
+                self.reload_userdata();
+            }
+        });
+        ui.separator();
+
+        if let Some(err) = self.userdata_error.clone() {
+            ui.colored_label(palette.danger, err);
+            return;
+        }
+        if self.userdata.is_empty() {
+            let msg = if self.portablegta {
+                "Aún no hay partidas, capturas ni tracks en este perfil."
+            } else {
+                "No hay datos. Instala y activa PortableGTA para que el juego guarde aquí."
+            };
+            ui.label(msg);
+            return;
+        }
+
+        // Own the rows so `self.exec` can be called while rendering.
+        let cats = [
+            Category::Saves,
+            Category::Settings,
+            Category::UserTracks,
+            Category::Screenshots,
+            Category::Other,
+        ];
+        let grouped: Vec<(Category, Vec<UserDataRow>)> = cats
+            .iter()
+            .map(|c| {
+                let items = self
+                    .userdata
+                    .iter()
+                    .filter(|e| e.category == *c)
+                    .map(|e| UserDataRow {
+                        rel: e.rel.clone(),
+                        name: e.name.clone(),
+                        size: e.size,
+                    })
+                    .collect();
+                (*c, items)
+            })
+            .collect();
+
+        let mut pending_remove: Option<String> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("data_scroll")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                for (cat, items) in &grouped {
+                    if items.is_empty() {
+                        continue;
+                    }
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(format!("{} ({})", cat.label(), items.len())).strong(),
+                    );
+                    for row in items {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(&row.name)).truncate())
+                                .on_hover_text(&row.rel);
+                            ui.label(
+                                egui::RichText::new(gta_mo_core::userdata::human_size(row.size))
+                                    .small()
+                                    .weak(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button(format!("{} Eliminar", crate::icons::TRASH))
+                                        .clicked()
+                                    {
+                                        pending_remove = Some(row.rel.clone());
+                                    }
+                                    if ui
+                                        .small_button(format!(
+                                            "{} Abrir",
+                                            crate::icons::FOLDER_OPEN
+                                        ))
+                                        .clicked()
+                                    {
+                                        self.exec(
+                                            vec![
+                                                "ctl".into(),
+                                                "data".into(),
+                                                "open".into(),
+                                                row.rel.clone(),
+                                                "--profile".into(),
+                                                slug.clone(),
+                                            ],
+                                            false,
+                                        );
+                                    }
+                                },
+                            );
+                        });
+                    }
+                }
+            });
+        if let Some(rel) = pending_remove {
+            self.confirm = Some(ConfirmState {
+                title: "Eliminar dato".into(),
+                message: format!("¿Eliminar '{rel}' del perfil '{slug}'?"),
+                action: ConfirmAction::DeleteUserData(rel),
+            });
+        }
+    }
+
     fn ui_conflicts(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         if self.conflicts.is_empty() {
@@ -2932,6 +3162,21 @@ impl GtaMoApp {
                         "delete".into(),
                         ident,
                         "--yes".into(),
+                    ],
+                    false,
+                );
+            }
+            ConfirmAction::DeleteUserData(rel) => {
+                let slug = self.snapshot.active_slug.clone();
+                self.exec(
+                    vec![
+                        "ctl".into(),
+                        "data".into(),
+                        "remove".into(),
+                        rel,
+                        "--yes".into(),
+                        "--profile".into(),
+                        slug,
                     ],
                     false,
                 );

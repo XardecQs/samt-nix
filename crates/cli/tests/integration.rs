@@ -807,3 +807,35 @@ fn manifest_set_replaces_and_validates() {
     let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
     assert_eq!(v["name"].as_str().unwrap(), "New Name");
 }
+
+#[test]
+fn data_lists_and_removes_profile_files() {
+    let t = TempDb::new("data");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    let upper = game_root.join("run/profiles/default/upper/userfiles");
+    std::fs::create_dir_all(upper.join("User Tracks")).unwrap();
+    std::fs::write(upper.join("GTASAsf1.b"), "save").unwrap();
+    std::fs::write(upper.join("User Tracks/a.mp3"), "audio").unwrap();
+
+    let v = json(&t.run_ok(&["ctl", "data", "list", "--json"]));
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert!(arr.iter().any(|e| e["category"] == "saves"));
+    assert!(arr.iter().any(|e| e["category"] == "usertracks"));
+
+    t.run_ok(&["ctl", "data", "remove", "GTASAsf1.b", "--yes"]);
+    assert!(!upper.join("GTASAsf1.b").exists());
+}
+
+#[test]
+fn data_rejects_traversal() {
+    let t = TempDb::new("datatraversal");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+    let out = t.run(&["ctl", "data", "remove", "../escape", "--yes"]);
+    assert!(!out.status.success());
+}

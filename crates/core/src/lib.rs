@@ -8,3 +8,4 @@ pub mod log;
 pub mod meta;
 pub mod overlay;
 pub mod resolver;
+pub mod userdata;

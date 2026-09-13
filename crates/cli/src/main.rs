@@ -213,6 +213,13 @@ pub enum CtlCommand {
         #[command(subcommand)]
         action: ManifestAction,
     },
+    #[command(about = "View/manage the active profile's user data (saves, tracks, screenshots)")]
+    Data {
+        #[command(subcommand)]
+        action: DataAction,
+    },
+    #[command(about = "Open an http(s) URL with xdg-open")]
+    OpenUrl { url: String },
     #[command(about = "Manage profiles")]
     Profile {
         #[command(subcommand)]
@@ -295,6 +302,29 @@ pub enum TagAction {
 pub enum ManifestAction {
     #[command(about = "Replace the mod.toml with the manifest read from stdin")]
     Set { ident: String },
+}
+
+#[derive(Subcommand)]
+pub enum DataAction {
+    #[command(about = "List the profile's user-data files")]
+    List {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Open the profile's user-data folder")]
+    Dir,
+    #[command(about = "Open a user-data file/folder")]
+    Open {
+        #[arg(value_name = "PATH", help = "Path relative to the user-data folder")]
+        path: String,
+    },
+    #[command(about = "Delete a user-data file")]
+    Remove {
+        #[arg(value_name = "PATH", help = "Path relative to the user-data folder")]
+        path: String,
+        #[arg(long, help = "Skip confirmation")]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -219,6 +219,8 @@ pub fn run(
         super::CtlCommand::Manifest { action } => match action {
             super::ManifestAction::Set { ident } => cmd_manifest_set(conn, ident),
         },
+        super::CtlCommand::Data { action } => cmd_data(conn, action, profile_ident),
+        super::CtlCommand::OpenUrl { url } => cmd_open_url(url),
         super::CtlCommand::Profile { action } => cmd_profile(conn, action),
         super::CtlCommand::Group { action } => cmd_group(conn, action, profile_ident),
     }
@@ -2112,6 +2114,146 @@ fn cmd_manifest_set(conn: &Connection, ident: &str) -> anyhow::Result<()> {
     refresh_meta_cache(conn, &mods_dir, m.id, &m.folder_name)?;
     log::info(format!("'{}': mod.toml actualizado.", m.folder_name));
     Ok(())
+}
+
+// ---------- Profile user data (saves/tracks/screenshots) ----------
+
+fn xdg_open(target: &std::path::Path) -> anyhow::Result<()> {
+    let status = std::process::Command::new("xdg-open")
+        .arg(target)
+        .status()
+        .map_err(|e| anyhow::anyhow!("No se pudo ejecutar xdg-open: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("xdg-open terminó con error: {status}");
+    }
+    Ok(())
+}
+
+fn cmd_open_url(url: &str) -> anyhow::Result<()> {
+    if !is_http_url(url) {
+        anyhow::bail!("Solo se permiten URLs http/https: '{url}'.");
+    }
+    let status = std::process::Command::new("xdg-open")
+        .arg(url)
+        .status()
+        .map_err(|e| anyhow::anyhow!("No se pudo ejecutar xdg-open: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("xdg-open terminó con error: {status}");
+    }
+    log::info(format!("Abriendo '{url}'..."));
+    Ok(())
+}
+
+fn cmd_data(
+    conn: &Connection,
+    action: &super::DataAction,
+    profile_ident: Option<&str>,
+) -> anyhow::Result<()> {
+    let profile = resolve_active_profile(conn, profile_ident)?;
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let spec = cfg.game_spec();
+    let subdir = spec
+        .user_data_dir
+        .ok_or_else(|| anyhow::anyhow!("El juego '{}' no define datos de usuario.", spec.name))?;
+    let upper = gta_mo_core::config::RuntimePaths::from_config(&cfg)
+        .profile_paths(&profile.slug)
+        .upper;
+
+    match action {
+        super::DataAction::List { json } => {
+            let entries = gta_mo_core::userdata::scan(&upper, subdir);
+            if *json {
+                #[derive(Serialize)]
+                struct DataJson {
+                    path: String,
+                    name: String,
+                    size: u64,
+                    category: String,
+                }
+                let out: Vec<DataJson> = entries
+                    .iter()
+                    .map(|e| DataJson {
+                        path: e.rel.clone(),
+                        name: e.name.clone(),
+                        size: e.size,
+                        category: e.category.key().to_string(),
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
+            if entries.is_empty() {
+                println!(
+                    "No hay datos de usuario en el perfil '{}' \
+                     (¿PortableGTA instalado y activo?).",
+                    profile.name
+                );
+                return Ok(());
+            }
+            let rows: Vec<Vec<String>> = entries
+                .iter()
+                .map(|e| {
+                    vec![
+                        e.category.label().to_string(),
+                        e.rel.clone(),
+                        gta_mo_core::userdata::human_size(e.size),
+                    ]
+                })
+                .collect();
+            println!(
+                "{}",
+                render_table(
+                    vec![
+                        "Tipo".to_string(),
+                        "Archivo".to_string(),
+                        "Tamaño".to_string(),
+                    ],
+                    rows,
+                )
+            );
+            log::info(format!(
+                "Total: {} archivo(s) en el perfil '{}'.",
+                entries.len(),
+                profile.name
+            ));
+            Ok(())
+        }
+        super::DataAction::Dir => {
+            let dir = upper.join(subdir);
+            if !dir.exists() {
+                anyhow::bail!("La carpeta de datos no existe todavía: {}", dir.display());
+            }
+            xdg_open(&dir)
+        }
+        super::DataAction::Open { path } => {
+            let target = gta_mo_core::userdata::resolve_entry(&upper, subdir, path)?;
+            xdg_open(&target)
+        }
+        super::DataAction::Remove { path, yes } => {
+            // Validate before asking.
+            gta_mo_core::userdata::resolve_entry(&upper, subdir, path)?;
+            if !yes {
+                eprintln!();
+                log::warn(format!(
+                    "Vas a eliminar '{}' del perfil '{}'.",
+                    path, profile.name
+                ));
+                eprint!("Confirmar eliminación? [s/N]: ");
+                std::io::Write::flush(&mut std::io::stderr()).ok();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let confirm = input.trim().to_lowercase();
+                if confirm != "s" && confirm != "si" {
+                    log::info("Cancelado.");
+                    return Ok(());
+                }
+            }
+            gta_mo_core::userdata::remove(&upper, subdir, path)?;
+            log::info(format!("Eliminado: '{path}'."));
+            Ok(())
+        }
+    }
 }
 
 // ---------- Export / import ----------
