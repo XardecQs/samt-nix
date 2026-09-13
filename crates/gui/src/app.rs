@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
@@ -21,6 +22,15 @@ enum Tab {
 /// Below this logical width the layout switches to the single-column
 /// (phone-like) mode: bottom navigation + detail as an overlay page.
 const NARROW_BREAKPOINT: f32 = 760.0;
+
+/// Which header controls have overflowed into the ⋮ menu, so they are drawn
+/// there instead of the header (each control appears in exactly one place).
+#[derive(Clone, Copy, Default)]
+struct HeaderOverflow {
+    launch_opts: bool,
+    clean: bool,
+    discover: bool,
+}
 
 /// Límites al decodificar imágenes de mods (no confiables): evita bombas de
 /// descompresión. 8192px de lado y 64 MiB de asignación por imagen.
@@ -121,6 +131,11 @@ pub struct GtaMoApp {
     last_enabled: usize,
     enabled_pulse: Option<std::time::Instant>,
     last_screen_size: egui::Vec2,
+    /// Pid of the running `gta-mo launch` process group, for the Stop button.
+    child_pid: Arc<Mutex<Option<u32>>>,
+    /// True while the user asked to stop the game (so a non-zero exit is not an
+    /// error).
+    stopping: bool,
 }
 
 impl GtaMoApp {
@@ -181,6 +196,8 @@ impl GtaMoApp {
             last_enabled: 0,
             enabled_pulse: None,
             last_screen_size: egui::Vec2::ZERO,
+            child_pid: Arc::new(Mutex::new(None)),
+            stopping: false,
         };
         app.refresh();
         app
@@ -286,7 +303,8 @@ impl GtaMoApp {
             self.busy = true;
             self.playing = job.launch;
             let tx = self.tx.clone();
-            self.backend.run_cli_async(job.args, tx);
+            self.backend
+                .run_cli_async(job.args, job.launch, self.child_pid.clone(), tx);
         } else {
             self.playing = false;
         }
@@ -310,9 +328,17 @@ impl GtaMoApp {
                 }
                 GuiEvent::CommandDone(ok, msg) => {
                     let launched = self.playing;
+                    let was_stopping = self.stopping;
                     self.busy = false;
                     self.playing = false;
-                    if !ok {
+                    self.stopping = false;
+                    if let Ok(mut slot) = self.child_pid.lock() {
+                        *slot = None;
+                    }
+                    if was_stopping {
+                        self.toasts
+                            .push(ctx, crate::toasts::ToastKind::Info, "Juego detenido");
+                    } else if !ok {
                         // Abort any follow-up jobs: a failed write may have left
                         // the DB in an unknown state, so don't keep mutating.
                         self.pending.clear();
@@ -512,6 +538,18 @@ impl GtaMoApp {
             .inner_margin(egui::Margin::symmetric(6, 2));
         let row = frame.show(ui, |ui| {
             ui.set_min_width(ui.available_width());
+            let row_w = ui.available_width();
+            // Responsive row: drop the cover/author and the button caption when
+            // there is little horizontal room, and truncate/wrap the text.
+            let compact = row_w < 440.0;
+            let show_cover = self.settings.show_covers && row_w >= 360.0;
+            let details_label = if row_w >= 300.0 {
+                format!("{} Detalles", crate::icons::PANEL_RIGHT)
+            } else {
+                crate::icons::PANEL_RIGHT.to_string()
+            };
+            let details_w = button_width(ui, &details_label);
+
             ui.horizontal(|ui| {
                 if show_handle {
                     // Kept visible (only disabled) while a command runs so the
@@ -532,7 +570,7 @@ impl GtaMoApp {
                 if Self::toggle_indicator(ui, m.id, m.enabled, idle) {
                     self.set_enabled(m.id, !m.enabled);
                 }
-                if self.settings.show_covers {
+                if show_cover {
                     if let Some(cover) = m.meta.cover.clone() {
                         if let Some(tex) = self.load_cover(ui.ctx(), &m.folder, &cover) {
                             ui.add(
@@ -543,74 +581,87 @@ impl GtaMoApp {
                         }
                     }
                 }
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
+
+                // Text column, constrained so it never pushes the button out.
+                let spacing = ui.spacing().item_spacing.x;
+                let text_w = (ui.available_width() - details_w - spacing).max(48.0);
+                ui.scope(|ui| {
+                    ui.set_max_width(text_w);
+                    ui.vertical(|ui| {
                         let name_color = if m.enabled {
                             palette.text
                         } else {
                             palette.text_muted
                         };
-                        ui.label(egui::RichText::new(&m.name).strong().color(name_color));
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&m.name).strong().color(name_color),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(&m.name);
+
+                        let mut meta: Vec<String> = Vec::new();
                         if let Some(v) = &m.meta.version {
-                            ui.label(egui::RichText::new(format!("v{v}")).weak());
+                            meta.push(format!("v{v}"));
                         }
-                        if !m.meta.author.is_empty() {
-                            ui.label(egui::RichText::new(m.meta.author.join(", ")).weak());
+                        if !compact && !m.meta.author.is_empty() {
+                            meta.push(m.meta.author.join(", "));
                         }
-                    });
-                    if !m.meta.tags.is_empty() || !m.groups.is_empty() {
-                        ui.horizontal(|ui| {
-                            for t in &m.meta.tags {
-                                ui.label(
-                                    egui::RichText::new(format!("#{t}"))
-                                        .small()
-                                        .color(palette.accent),
-                                );
-                            }
-                            for g in &m.groups {
-                                ui.label(egui::RichText::new(format!("[{g}]")).small().weak());
-                            }
-                        });
-                    }
-                    if let Some(dep) = self.snapshot.dep_status.get(&m.id) {
-                        if dep.required > 0 || dep.optional > 0 {
-                            let problems = !dep.disabled.is_empty() || !dep.missing.is_empty();
-                            let color = if problems {
-                                palette.danger
-                            } else {
-                                palette.text_muted
-                            };
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} {} req · {} opt",
-                                        crate::icons::SWAP_H,
-                                        dep.required,
-                                        dep.optional
-                                    ))
-                                    .small()
-                                    .color(color),
-                                );
-                                if problems {
+                        if !meta.is_empty() {
+                            let line = meta.join(" · ");
+                            ui.add(egui::Label::new(egui::RichText::new(&line).weak()).truncate())
+                                .on_hover_text(&line);
+                        }
+
+                        if !m.meta.tags.is_empty() || !m.groups.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                for t in &m.meta.tags {
                                     ui.label(
-                                        egui::RichText::new(format!(
-                                            "{} requeridas sin resolver",
-                                            crate::icons::WARN
-                                        ))
-                                        .small()
-                                        .color(palette.danger),
+                                        egui::RichText::new(format!("#{t}"))
+                                            .small()
+                                            .color(palette.accent),
                                     );
+                                }
+                                for g in &m.groups {
+                                    ui.label(egui::RichText::new(format!("[{g}]")).small().weak());
                                 }
                             });
                         }
+
+                        if let Some(dep) = self.snapshot.dep_status.get(&m.id) {
+                            if dep.required > 0 || dep.optional > 0 {
+                                let problems = !dep.disabled.is_empty() || !dep.missing.is_empty();
+                                let color = if problems {
+                                    palette.danger
+                                } else {
+                                    palette.text_muted
+                                };
+                                let mut line = format!(
+                                    "{} {} req · {} opt",
+                                    crate::icons::SWAP_H,
+                                    dep.required,
+                                    dep.optional
+                                );
+                                if problems {
+                                    line.push_str(" · requeridas sin resolver");
+                                }
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(line).small().color(color),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        }
+                    });
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(egui::RichText::new(&details_label)).clicked() {
+                        self.selected_mod = Some(m.id);
                     }
                 });
-                if ui
-                    .button(format!("{} Detalles", crate::icons::PANEL_RIGHT))
-                    .clicked()
-                {
-                    self.selected_mod = Some(m.id);
-                }
             });
         });
         row.response
@@ -674,13 +725,64 @@ impl eframe::App for GtaMoApp {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if !narrow {
-                    ui.heading("GTA SA Mod Organizer");
-                    ui.separator();
-                    ui.label("Perfil:");
-                }
+                let spacing = ui.spacing().item_spacing.x.max(4.0);
+                let avail = ui.available_width();
                 let active = self.snapshot.active_slug.clone();
                 let profiles = self.snapshot.profiles.clone();
+
+                // Measure the controls so the header degrades gradually: the
+                // essentials stay (profile, play/stop, menu) and the rest drop
+                // into the ⋮ menu as the window narrows.
+                let w_play = button_width(ui, &format!("{} Jugar", crate::icons::PLAY));
+                let w_stop = button_width(ui, &format!("{} Detener", crate::icons::SQUARE));
+                let w_play_eff = if self.playing { w_stop } else { w_play };
+                let w_menu = 34.0;
+                let w_clean = button_width(ui, &format!("{} Limpiar", crate::icons::ERASER));
+                let w_disc = button_width(ui, &format!("{} Descubrir", crate::icons::SEARCH));
+                let w_combo = text_width(ui, &active, egui::TextStyle::Button) + 40.0;
+                let w_debug = checkbox_width(ui, "Debug");
+                let w_prev = checkbox_width(ui, "Previsualizar");
+                let w_plabel = text_width(ui, "Perfil:", egui::TextStyle::Body);
+                let w_title = text_width(ui, "GTA SA Mod Organizer", egui::TextStyle::Heading);
+
+                let show_menu = !narrow;
+                let mut used = w_play_eff;
+                if show_menu {
+                    used += spacing + w_menu;
+                }
+                let show_clean = !narrow && used + spacing + w_clean <= avail;
+                if show_clean {
+                    used += spacing + w_clean;
+                }
+                let show_disc = !narrow && used + spacing + w_disc <= avail;
+                if show_disc {
+                    used += spacing + w_disc;
+                }
+
+                let mut left_budget = (avail - used - spacing - w_combo).max(0.0);
+                let show_opts = !narrow && left_budget >= w_debug + spacing + w_prev + spacing;
+                if show_opts {
+                    left_budget -= w_debug + spacing + w_prev + spacing;
+                }
+                let show_label = !narrow && left_budget >= w_plabel + spacing;
+                if show_label {
+                    left_budget -= w_plabel + spacing;
+                }
+                let show_title = !narrow && left_budget >= w_title + spacing;
+
+                let overflow = HeaderOverflow {
+                    launch_opts: !show_opts,
+                    clean: !show_clean,
+                    discover: !show_disc,
+                };
+
+                if show_title {
+                    ui.heading("GTA SA Mod Organizer");
+                    ui.separator();
+                }
+                if show_label {
+                    ui.label("Perfil:");
+                }
                 egui::ComboBox::from_id_salt("profile")
                     .selected_text(active.clone())
                     .show_ui(ui, |ui| {
@@ -701,7 +803,7 @@ impl eframe::App for GtaMoApp {
                             }
                         }
                     });
-                if !narrow {
+                if show_opts {
                     ui.separator();
                     ui.checkbox(&mut self.launch_debug, "Debug")
                         .on_hover_text("Habilitar log de Proton/DXVK (--debug)");
@@ -718,56 +820,76 @@ impl eframe::App for GtaMoApp {
 
                     // Wide layout: the ⋮ menu is the single place for the app
                     // menu (narrow uses the bottom bar's "more" menu instead).
-                    if !narrow {
+                    if show_menu {
                         ui.menu_button(crate::icons::ELLIPSIS_V, |ui| {
                             ui.set_min_width(200.0);
-                            app_menu_items(self, ui, &mut new_theme);
+                            app_menu_items(self, ui, &mut new_theme, overflow);
                         })
                         .response
                         .on_hover_text("Menú");
                     }
 
-                    let label = if self.playing {
-                        format!("{} Jugando…", crate::icons::PLAY)
+                    if self.playing {
+                        let stop = egui::Button::new(
+                            egui::RichText::new(format!("{} Detener", crate::icons::SQUARE))
+                                .color(egui::Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(palette.danger);
+                        if ui.add(stop).on_hover_text("Detener el juego").clicked() {
+                            let pid = self.child_pid.lock().ok().and_then(|s| *s);
+                            if let Some(pid) = pid {
+                                crate::backend::stop_child_group(pid);
+                                self.stopping = true;
+                                self.toasts.push(
+                                    ctx,
+                                    crate::toasts::ToastKind::Info,
+                                    "Deteniendo el juego…",
+                                );
+                            }
+                        }
                     } else {
-                        format!("{} Jugar", crate::icons::PLAY)
-                    };
-                    let play = egui::Button::new(
-                        egui::RichText::new(label).color(palette.on_accent).strong(),
-                    )
-                    .fill(palette.accent);
-                    if ui.add_enabled(idle, play).clicked() {
-                        let slug = self.snapshot.active_slug.clone();
-                        self.log.clear();
-                        let mode = if self.launch_dry_run {
-                            "previsualizando (dry-run)"
-                        } else {
-                            "lanzando"
-                        };
-                        self.log.push(format!("--- {mode} perfil '{slug}' ---"));
-                        let mut args: Vec<String> = vec!["launch".into(), "--deps-enable".into()];
-                        if self.launch_debug {
-                            args.push("--debug".into());
+                        let play = egui::Button::new(
+                            egui::RichText::new(format!("{} Jugar", crate::icons::PLAY))
+                                .color(palette.on_accent)
+                                .strong(),
+                        )
+                        .fill(palette.accent);
+                        if ui.add_enabled(idle, play).clicked() {
+                            let slug = self.snapshot.active_slug.clone();
+                            self.log.clear();
+                            let mode = if self.launch_dry_run {
+                                "previsualizando (dry-run)"
+                            } else {
+                                "lanzando"
+                            };
+                            self.log.push(format!("--- {mode} perfil '{slug}' ---"));
+                            let mut args: Vec<String> =
+                                vec!["launch".into(), "--deps-enable".into()];
+                            if self.launch_debug {
+                                args.push("--debug".into());
+                            }
+                            if self.launch_dry_run {
+                                args.push("--dry-run".into());
+                            }
+                            args.push("--profile".into());
+                            args.push(slug.clone());
+                            self.exec(args, !self.launch_dry_run);
                         }
-                        if self.launch_dry_run {
-                            args.push("--dry-run".into());
-                        }
-                        args.push("--profile".into());
-                        args.push(slug.clone());
-                        self.exec(args, !self.launch_dry_run);
                     }
-                    if !narrow {
-                        if ui
+                    if show_clean
+                        && ui
                             .add_enabled(
                                 idle,
                                 egui::Button::new(format!("{} Limpiar", crate::icons::ERASER)),
                             )
                             .on_hover_text("Eliminar mods huérfanos (carpetas desaparecidas)")
                             .clicked()
-                        {
-                            self.exec(vec!["ctl".into(), "clean".into()], false);
-                        }
-                        if ui
+                    {
+                        self.exec(vec!["ctl".into(), "clean".into()], false);
+                    }
+                    if show_disc
+                        && ui
                             .add_enabled(
                                 idle,
                                 egui::Button::new(format!("{} Descubrir", crate::icons::SEARCH)),
@@ -776,9 +898,8 @@ impl eframe::App for GtaMoApp {
                                 "Escanear mods/ y registrar/actualizar mods y dependencias",
                             )
                             .clicked()
-                        {
-                            self.exec(vec!["ctl".into(), "discover".into()], false);
-                        }
+                    {
+                        self.exec(vec!["ctl".into(), "discover".into()], false);
                     }
                 });
                 if let Some(pref) = new_theme {
@@ -1041,25 +1162,16 @@ impl GtaMoApp {
                             }
                         }
                         ui.separator();
-                        if ui
-                            .button(format!("{} Descubrir", crate::icons::SEARCH))
-                            .clicked()
-                        {
-                            self.exec(vec!["ctl".into(), "discover".into()], false);
-                            ui.close();
-                        }
-                        if ui
-                            .button(format!("{} Limpiar", crate::icons::ERASER))
-                            .clicked()
-                        {
-                            self.exec(vec!["ctl".into(), "clean".into()], false);
-                            ui.close();
-                        }
-                        ui.separator();
-                        ui.checkbox(&mut self.launch_debug, "Debug");
-                        ui.checkbox(&mut self.launch_dry_run, "Previsualizar (dry-run)");
-                        ui.separator();
-                        app_menu_items(self, ui, &mut new_theme);
+                        app_menu_items(
+                            self,
+                            ui,
+                            &mut new_theme,
+                            HeaderOverflow {
+                                launch_opts: true,
+                                clean: true,
+                                discover: true,
+                            },
+                        );
                     });
                 },
             );
@@ -2784,6 +2896,28 @@ fn theme_icon(pref: ThemePref) -> &'static str {
     }
 }
 
+/// Approximate width of a text run in the given style.
+fn text_width(ui: &egui::Ui, text: &str, style: egui::TextStyle) -> f32 {
+    let font = style.resolve(ui.style());
+    ui.fonts(|f| {
+        f.layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE)
+            .size()
+            .x
+    })
+}
+
+/// Approximate width of a button with the given label.
+fn button_width(ui: &egui::Ui, text: &str) -> f32 {
+    text_width(ui, text, egui::TextStyle::Button) + ui.spacing().button_padding.x * 2.0 + 2.0
+}
+
+/// Approximate width of a checkbox with the given label.
+fn checkbox_width(ui: &egui::Ui, text: &str) -> f32 {
+    text_width(ui, text, egui::TextStyle::Button)
+        + ui.spacing().icon_width
+        + ui.spacing().icon_spacing
+}
+
 /// Approximate width a bottom-nav button needs for its icon + caption (+badge).
 fn bottom_nav_text_width(ui: &egui::Ui, icon: &str, label: &str, badge: Option<usize>) -> f32 {
     let text = match badge {
@@ -2872,7 +3006,36 @@ fn bottom_nav_item(
 
 /// Shared "app" part of the ⋮ / "more" menus: preferences, about, shortcuts and
 /// the theme selector. Writes the chosen theme into `new_theme`.
-fn app_menu_items(app: &mut GtaMoApp, ui: &mut egui::Ui, new_theme: &mut Option<ThemePref>) {
+fn app_menu_items(
+    app: &mut GtaMoApp,
+    ui: &mut egui::Ui,
+    new_theme: &mut Option<ThemePref>,
+    overflow: HeaderOverflow,
+) {
+    // Controls that did not fit in the header (empty in wide layouts).
+    if overflow.discover
+        && ui
+            .button(format!("{} Descubrir", crate::icons::SEARCH))
+            .clicked()
+    {
+        app.exec(vec!["ctl".into(), "discover".into()], false);
+        ui.close();
+    }
+    if overflow.clean
+        && ui
+            .button(format!("{} Limpiar", crate::icons::ERASER))
+            .clicked()
+    {
+        app.exec(vec!["ctl".into(), "clean".into()], false);
+        ui.close();
+    }
+    if overflow.launch_opts {
+        ui.checkbox(&mut app.launch_debug, "Debug");
+        ui.checkbox(&mut app.launch_dry_run, "Previsualizar (dry-run)");
+    }
+    if overflow.discover || overflow.clean || overflow.launch_opts {
+        ui.separator();
+    }
     if ui
         .button(format!("{} Preferencias…", crate::icons::SETTINGS))
         .clicked()

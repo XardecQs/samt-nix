@@ -450,8 +450,9 @@ screenshot gallery, components, and a one-click **Crear mod.toml** for mods
 without a manifest), profiles tab with create/use/rename/copy/delete
 (renaming also moves `run/profiles/<slug>`), groups tab, a **Dependencies** tab
 that flags required dependencies that are disabled/missing, a Conflicts tab
-(background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run),
-Discover/Clean actions, a streaming Log tab, and a status bar.
+(background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run) that
+becomes a **Detener** button while the game runs, Discover/Clean actions, a
+streaming Log tab, and a status bar.
 
 ### Appearance
 

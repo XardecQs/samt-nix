@@ -6,7 +6,9 @@ use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use crate::model::{ModView, ProfileView, Snapshot};
 
@@ -307,13 +309,30 @@ impl Backend {
     }
 
     /// Spawns `gta-mo <args>` in a background thread, streaming output to `tx`.
-    pub fn run_cli_async(&self, args: Vec<String>, tx: Sender<GuiEvent>) {
+    ///
+    /// For `launch` jobs the child is placed in its own process group (so the
+    /// whole game tree can be stopped later) and its pid is published in
+    /// `pid_slot`; it is cleared once the process exits.
+    pub fn run_cli_async(
+        &self,
+        args: Vec<String>,
+        launch: bool,
+        pid_slot: Arc<Mutex<Option<u32>>>,
+        tx: Sender<GuiEvent>,
+    ) {
+        use std::os::unix::process::CommandExt;
+
         let bin = self.bin.clone();
         thread::spawn(move || {
             let mut cmd = Command::new(&bin);
             cmd.args(&args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            if launch {
+                // New process group so `stop_child_group` can signal the whole
+                // tree (umu-run, Proton, the game).
+                cmd.process_group(0);
+            }
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {
@@ -324,6 +343,11 @@ impl Backend {
                     return;
                 }
             };
+            if launch {
+                if let Ok(mut slot) = pid_slot.lock() {
+                    *slot = Some(child.id());
+                }
+            }
             if let Some(out) = child.stdout.take() {
                 let tx2 = tx.clone();
                 thread::spawn(move || {
@@ -341,9 +365,32 @@ impl Backend {
                 });
             }
             let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+            if launch {
+                if let Ok(mut slot) = pid_slot.lock() {
+                    *slot = None;
+                }
+            }
             let _ = tx.send(GuiEvent::CommandDone(ok, String::new()));
         });
     }
+}
+
+/// Stops a launcher process group: sends `SIGTERM`, then `SIGKILL` after a short
+/// grace period if it is still alive. The registered pid is the group leader.
+pub fn stop_child_group(pid: u32) {
+    let pgid = pid as libc::pid_t;
+    unsafe {
+        libc::kill(-pgid, libc::SIGTERM);
+    }
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(3));
+        // Still alive? force-kill the group.
+        if unsafe { libc::kill(-pgid, 0) } == 0 {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    });
 }
 
 /// Live `mod.toml` metadata wins; fields the manifest leaves absent/empty fall

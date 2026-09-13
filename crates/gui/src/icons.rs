@@ -62,6 +62,7 @@ pub const ROTATE_CW: &str = "\u{E149}";
 pub const IMAGE_OFF: &str = "\u{E1C0}";
 pub const ARROW_LEFT: &str = "\u{E048}";
 pub const PANEL_LEFT: &str = "\u{E12A}";
+pub const SQUARE: &str = "\u{E167}";
 
 /// Subset of the official Lucide font, embedded at compile time.
 pub const FONT: &[u8] = include_bytes!("../assets/lucide/lucide.ttf");

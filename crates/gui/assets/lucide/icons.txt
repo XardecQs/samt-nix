@@ -54,3 +54,4 @@ rotate-cw
 image-off
 arrow-left
 panel-left
+square
