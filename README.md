@@ -471,10 +471,38 @@ to disable it. The ⋮ menu also has **Acerca de** and **Atajos de teclado**, an
 the keyboard shortcuts include `Ctrl+F` (search), `Ctrl+R` (refresh) and
 `Ctrl+,` (preferences).
 
+### Adaptive layout
+
+The interface reflows by window width (breakpoint 760 px):
+
+- **Wide**: left navigation sidebar plus a resizable right-side detail panel.
+- **Narrow (vertical/phone)**: a bottom navigation bar, and the mod detail opens
+  as a full-screen overlay page with a back button (libadwaita
+  `NavigationSplitView` style). The header collapses its extra controls into the
+  ⋮ menu and the filter row wraps.
+
+In the detail panel, clicking the cover or any screenshot opens a **full-screen
+image viewer** with previous/next arrows, a counter and page dots (also `←`/`→`
+and `Esc`, or click the backdrop).
+
+### Icons
+
+The UI icons are a subset of the bundled [Lucide](https://lucide.dev) font
+(`crates/gui/assets/lucide/`). To add icons: list their canonical names in
+`assets/lucide/icons.txt`, then regenerate the subset (the committed `.ttf` is
+what the build embeds, so Nix never needs the tool):
+
+```bash
+nix shell nixpkgs#python3Packages.fonttools -c \
+  bash crates/gui/assets/lucide/build.sh
+```
+
+Then add the codepoints from `assets/lucide/codepoints.json` to
+`crates/gui/src/icons.rs`.
+
 The package installs a desktop entry and icon (`data/gta-mo-gui.desktop`,
 `data/icons/.../gta-mo-gui.svg`); with `enableGui` it appears in your
-application menu. The UI icons come from the bundled [Lucide](https://lucide.dev)
-font (see `crates/gui/assets/lucide/`).
+application menu.
 
 To develop it: `nix develop`, then `cargo run -p gta-mo-gui`.
 

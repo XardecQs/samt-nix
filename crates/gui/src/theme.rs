@@ -38,6 +38,15 @@ impl ThemePref {
             ThemePref::Dark => egui::ThemePreference::Dark,
         }
     }
+
+    /// Cycles Sistema → Claro → Oscuro → Sistema.
+    pub fn next(self) -> ThemePref {
+        match self {
+            ThemePref::System => ThemePref::Light,
+            ThemePref::Light => ThemePref::Dark,
+            ThemePref::Dark => ThemePref::System,
+        }
+    }
 }
 
 /// Accent color, inspired by GNOME 47 and macOS system colors.
@@ -287,10 +296,19 @@ impl Palette {
         w.hovered.corner_radius = small_radius;
         w.hovered.expansion = 1.0;
 
-        w.active.bg_fill = self.accent_pressed;
-        w.active.weak_bg_fill = self.accent_pressed;
-        w.active.bg_stroke = Stroke::new(1.0, self.accent_pressed);
-        w.active.fg_stroke = Stroke::new(1.0, self.on_accent);
+        // NOTE: `Visuals::strong_text_color()` (used by `.strong()`/`.heading()`)
+        // reads `widgets.active.fg_stroke`, so it must be the regular text color,
+        // not `on_accent` (which only contrasts against the accent fill). Pressed
+        // widgets use a neutral fill plus an accent focus stroke.
+        let pressed = if self.dark_mode {
+            Color32::from_rgb(52, 52, 60)
+        } else {
+            Color32::from_rgb(220, 220, 227)
+        };
+        w.active.bg_fill = pressed;
+        w.active.weak_bg_fill = pressed;
+        w.active.bg_stroke = Stroke::new(1.0, self.accent);
+        w.active.fg_stroke = Stroke::new(1.0, self.text);
         w.active.corner_radius = small_radius;
 
         w.open.bg_fill = w.inactive.bg_fill;
@@ -459,6 +477,36 @@ mod tests {
         }
     }
 
+    /// Regression: `.strong()`/`.heading()` resolve to
+    /// `Visuals::strong_text_color()` (i.e. `widgets.active.fg_stroke`). It must
+    /// stay legible on the panel/window backgrounds for every theme and accent.
+    #[test]
+    fn strong_and_weak_text_meet_wcag_aa() {
+        for accent in Accent::ALL {
+            for hc in [false, true] {
+                let cfg = ThemeConfig {
+                    accent,
+                    high_contrast: hc,
+                };
+                for p in for_config(cfg) {
+                    let v = p.visuals();
+                    let strong = contrast_ratio(v.strong_text_color(), v.panel_fill);
+                    assert!(
+                        strong >= 4.5,
+                        "{accent:?} hc={hc} dark={} strong text on panel: {strong:.2} < 4.5",
+                        p.dark_mode
+                    );
+                    let weak = contrast_ratio(v.weak_text_color(), v.panel_fill);
+                    assert!(
+                        weak >= 3.0,
+                        "{accent:?} hc={hc} dark={} weak text on panel: {weak:.2} < 3.0",
+                        p.dark_mode
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn apply_and_active_run_in_a_frame() {
         let ctx = egui::Context::default();
@@ -467,5 +515,12 @@ mod tests {
             let p = active(ctx);
             assert_ne!(p.accent, Color32::TRANSPARENT);
         });
+    }
+
+    #[test]
+    fn theme_pref_cycles() {
+        assert_eq!(ThemePref::System.next(), ThemePref::Light);
+        assert_eq!(ThemePref::Light.next(), ThemePref::Dark);
+        assert_eq!(ThemePref::Dark.next(), ThemePref::System);
     }
 }

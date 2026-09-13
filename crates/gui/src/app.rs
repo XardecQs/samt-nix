@@ -18,6 +18,10 @@ enum Tab {
     Log,
 }
 
+/// Below this logical width the layout switches to the single-column
+/// (phone-like) mode: bottom navigation + detail as an overlay page.
+const NARROW_BREAKPOINT: f32 = 760.0;
+
 enum InputAction {
     Create,
     Rename(String),
@@ -105,6 +109,7 @@ pub struct GtaMoApp {
     show_shortcuts: bool,
     focus_search: bool,
     toasts: crate::toasts::Toasts,
+    lightbox: Option<crate::lightbox::Lightbox>,
 }
 
 impl GtaMoApp {
@@ -158,6 +163,7 @@ impl GtaMoApp {
             show_shortcuts: false,
             focus_search: false,
             toasts: crate::toasts::Toasts::new(),
+            lightbox: None,
         };
         app.refresh();
         app
@@ -624,13 +630,16 @@ impl GtaMoApp {
 impl eframe::App for GtaMoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_events(ctx);
+        let narrow = ctx.screen_rect().width() < NARROW_BREAKPOINT;
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.heading("GTA SA Mod Organizer");
-                ui.separator();
-                ui.label("Perfil:");
+                if !narrow {
+                    ui.heading("GTA SA Mod Organizer");
+                    ui.separator();
+                    ui.label("Perfil:");
+                }
                 let active = self.snapshot.active_slug.clone();
                 let profiles = self.snapshot.profiles.clone();
                 egui::ComboBox::from_id_salt("profile")
@@ -653,28 +662,46 @@ impl eframe::App for GtaMoApp {
                             }
                         }
                     });
-                ui.separator();
-                ui.checkbox(&mut self.launch_debug, "Debug")
-                    .on_hover_text("Habilitar log de Proton/DXVK (--debug)");
-                ui.checkbox(&mut self.launch_dry_run, "Previsualizar")
-                    .on_hover_text("Mostrar el orden de capas sin montar ni lanzar (--dry-run)");
+                if !narrow {
+                    ui.separator();
+                    ui.checkbox(&mut self.launch_debug, "Debug")
+                        .on_hover_text("Habilitar log de Proton/DXVK (--debug)");
+                    ui.checkbox(&mut self.launch_dry_run, "Previsualizar")
+                        .on_hover_text(
+                            "Mostrar el orden de capas sin montar ni lanzar (--dry-run)",
+                        );
+                }
 
                 let mut new_theme: Option<ThemePref> = None;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let idle = !self.busy && !self.playing;
                     let palette = theme::active(ui.ctx());
 
-                    ui.menu_button(crate::icons::MENU, |ui| {
+                    ui.menu_button(crate::icons::ELLIPSIS_V, |ui| {
                         ui.set_min_width(200.0);
-                        if ui.button("Preferencias…").clicked() {
+                        if narrow {
+                            ui.checkbox(&mut self.launch_debug, "Debug");
+                            ui.checkbox(&mut self.launch_dry_run, "Previsualizar (dry-run)");
+                            ui.separator();
+                        }
+                        if ui
+                            .button(format!("{} Preferencias…", crate::icons::SETTINGS))
+                            .clicked()
+                        {
                             self.show_preferences = true;
                             ui.close_menu();
                         }
-                        if ui.button("Acerca de").clicked() {
+                        if ui
+                            .button(format!("{} Acerca de", crate::icons::INFO))
+                            .clicked()
+                        {
                             self.show_about = true;
                             ui.close_menu();
                         }
-                        if ui.button("Atajos de teclado").clicked() {
+                        if ui
+                            .button(format!("{} Atajos de teclado", crate::icons::KEYBOARD))
+                            .clicked()
+                        {
                             self.show_shortcuts = true;
                             ui.close_menu();
                         }
@@ -682,7 +709,10 @@ impl eframe::App for GtaMoApp {
                         ui.label(egui::RichText::new("Tema").small().weak());
                         for pref in [ThemePref::System, ThemePref::Light, ThemePref::Dark] {
                             if ui
-                                .radio(self.settings.theme == pref, pref.label())
+                                .radio(
+                                    self.settings.theme == pref,
+                                    format!("{}  {}", theme_icon(pref), pref.label()),
+                                )
                                 .clicked()
                             {
                                 new_theme = Some(pref);
@@ -750,16 +780,25 @@ impl eframe::App for GtaMoApp {
             ui.add_space(6.0);
         });
 
-        egui::SidePanel::left("nav")
-            .resizable(false)
-            .exact_width(200.0)
-            .show(ctx, |ui| self.ui_sidebar(ui));
+        if !narrow {
+            egui::SidePanel::left("nav")
+                .resizable(false)
+                .exact_width(200.0)
+                .show(ctx, |ui| self.ui_sidebar(ui));
 
-        if self.selected_mod.is_some() {
-            egui::SidePanel::right("detail")
-                .resizable(true)
-                .default_width(360.0)
-                .show(ctx, |ui| self.ui_detail(ui));
+            if self.selected_mod.is_some() {
+                egui::SidePanel::right("detail")
+                    .resizable(true)
+                    .default_width(360.0)
+                    .show(ctx, |ui| self.ui_detail(ui, false));
+            }
+        }
+
+        // Status bar is declared before the central panel so it is not
+        // overlapped; on narrow screens the nav bar sits just above it.
+        self.ui_status_bar(ctx);
+        if narrow {
+            egui::TopBottomPanel::bottom("bottom_nav").show(ctx, |ui| self.ui_bottom_nav(ui));
         }
 
         let content_frame = egui::Frame::central_panel(&ctx.style()).fill(theme::active(ctx).bg);
@@ -774,6 +813,76 @@ impl eframe::App for GtaMoApp {
                 Tab::Log => self.ui_log(ui),
             });
 
+        // Narrow layout: the mod detail becomes a full-screen overlay page
+        // (libadwaita `NavigationSplitView` style) with a back button.
+        if narrow && self.selected_mod.is_some() {
+            let screen = ctx.screen_rect();
+            let palette = theme::active(ctx);
+            let frame = egui::Frame::new()
+                .fill(palette.surface)
+                .stroke(egui::Stroke::new(1.0, palette.border))
+                .corner_radius(egui::CornerRadius::same(12))
+                .inner_margin(egui::Margin::same(12));
+            let resp = egui::Modal::new(egui::Id::new("detail_overlay"))
+                .frame(frame)
+                .show(ctx, |ui| {
+                    ui.set_min_size(egui::vec2(
+                        (screen.width() - 24.0).max(200.0),
+                        (screen.height() - 120.0).max(200.0),
+                    ));
+                    self.ui_detail(ui, true);
+                });
+            if resp.should_close() {
+                self.selected_mod = None;
+            }
+        }
+
+        self.handle_shortcuts(ctx);
+        self.ui_dialogs(ctx);
+
+        if self.show_preferences {
+            let changed =
+                crate::preferences::show(ctx, &mut self.settings, &mut self.show_preferences);
+            if changed {
+                self.settings.save();
+                self.apply_settings(ctx);
+                self.toasts.push(
+                    ctx,
+                    crate::toasts::ToastKind::Info,
+                    "Preferencias guardadas",
+                );
+            }
+        }
+        if self.show_about {
+            crate::about::show_about(ctx, &self.settings, &mut self.show_about);
+        }
+        if self.show_shortcuts {
+            crate::about::show_shortcuts(ctx, &mut self.show_shortcuts);
+        }
+
+        self.ui_lightbox(ctx);
+        self.toasts.show(ctx);
+    }
+}
+
+impl GtaMoApp {
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
+            self.backend.reload();
+            self.refresh();
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
+            self.show_preferences = true;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.tab = Tab::Mods;
+            self.focus_search = true;
+        }
+    }
+}
+
+impl GtaMoApp {
+    fn ui_status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             let palette = theme::active(ui.ctx());
             ui.horizontal(|ui| {
@@ -805,51 +914,86 @@ impl eframe::App for GtaMoApp {
                 });
             });
         });
+    }
 
-        self.handle_shortcuts(ctx);
-        self.ui_dialogs(ctx);
+    /// Bottom navigation bar for the narrow (phone-like) layout.
+    fn ui_bottom_nav(&mut self, ui: &mut egui::Ui) {
+        let dep_problems: usize = self
+            .snapshot
+            .dep_status
+            .values()
+            .filter(|s| !s.disabled.is_empty() || !s.missing.is_empty())
+            .count()
+            + self.snapshot.dep_cycles.len();
+        let conflicts = self.conflicts.iter().filter(|c| !c.duplicate).count();
 
-        if self.show_preferences {
-            let changed =
-                crate::preferences::show(ctx, &mut self.settings, &mut self.show_preferences);
-            if changed {
-                self.settings.save();
-                self.apply_settings(ctx);
-                self.toasts.push(
-                    ctx,
-                    crate::toasts::ToastKind::Info,
-                    "Preferencias guardadas",
-                );
+        let items: [(Tab, &str, &str, Option<usize>); 5] = [
+            (Tab::Mods, crate::icons::LIST, "Mods", None),
+            (Tab::Profiles, crate::icons::USERS, "Perfiles", None),
+            (Tab::Groups, crate::icons::FOLDER, "Grupos", None),
+            (
+                Tab::Dependencies,
+                crate::icons::SWAP_H,
+                "Deps",
+                (dep_problems > 0).then_some(dep_problems),
+            ),
+            (
+                Tab::Conflicts,
+                crate::icons::WARN,
+                "Conflictos",
+                (conflicts > 0).then_some(conflicts),
+            ),
+        ];
+        let mut new_theme: Option<ThemePref> = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let w = ui.available_width() / (items.len() + 1) as f32;
+            for (tab, icon, label, badge) in items {
+                if bottom_nav_item(ui, self.tab == tab, icon, label, badge, w) {
+                    self.tab = tab;
+                }
             }
+            ui.menu_button(crate::icons::ELLIPSIS_V, |ui| {
+                ui.set_min_width(180.0);
+                if ui.button(format!("{} Log", crate::icons::INFO)).clicked() {
+                    self.tab = Tab::Log;
+                    ui.close_menu();
+                }
+                if ui
+                    .button(format!("{} Preferencias…", crate::icons::SETTINGS))
+                    .clicked()
+                {
+                    self.show_preferences = true;
+                    ui.close_menu();
+                }
+                if ui
+                    .button(format!("{} Acerca de", crate::icons::INFO))
+                    .clicked()
+                {
+                    self.show_about = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                ui.label(egui::RichText::new("Tema").small().weak());
+                for pref in [ThemePref::System, ThemePref::Light, ThemePref::Dark] {
+                    if ui
+                        .radio(
+                            self.settings.theme == pref,
+                            format!("{}  {}", theme_icon(pref), pref.label()),
+                        )
+                        .clicked()
+                    {
+                        new_theme = Some(pref);
+                        ui.close_menu();
+                    }
+                }
+            });
+        });
+        if let Some(pref) = new_theme {
+            self.set_theme(ui.ctx(), pref);
         }
-        if self.show_about {
-            crate::about::show_about(ctx, &self.settings, &mut self.show_about);
-        }
-        if self.show_shortcuts {
-            crate::about::show_shortcuts(ctx, &mut self.show_shortcuts);
-        }
-
-        self.toasts.show(ctx);
     }
-}
 
-impl GtaMoApp {
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
-            self.backend.reload();
-            self.refresh();
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
-            self.show_preferences = true;
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
-            self.tab = Tab::Mods;
-            self.focus_search = true;
-        }
-    }
-}
-
-impl GtaMoApp {
     fn ui_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         let dep_problems: usize = self
@@ -887,11 +1031,36 @@ impl GtaMoApp {
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
             ui.add_space(8.0);
+            let w = ui.available_width();
             if ui
-                .add(egui::Button::new(format!(
-                    "{} Refrescar",
-                    crate::icons::REFRESH
-                )))
+                .add_sized(
+                    egui::vec2(w, 28.0),
+                    egui::Button::new(format!("{} Preferencias", crate::icons::SETTINGS)),
+                )
+                .clicked()
+            {
+                self.show_preferences = true;
+            }
+            if ui
+                .add_sized(
+                    egui::vec2(w, 28.0),
+                    egui::Button::new(format!(
+                        "{} {}",
+                        theme_icon(self.settings.theme),
+                        self.settings.theme.label()
+                    )),
+                )
+                .on_hover_text("Cambiar tema (Sistema → Claro → Oscuro)")
+                .clicked()
+            {
+                let next = self.settings.theme.next();
+                self.set_theme(ui.ctx(), next);
+            }
+            if ui
+                .add_sized(
+                    egui::vec2(w, 28.0),
+                    egui::Button::new(format!("{} Refrescar", crate::icons::REFRESH)),
+                )
                 .clicked()
             {
                 self.backend.reload();
@@ -902,7 +1071,7 @@ impl GtaMoApp {
 
     fn ui_mods(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let search = ui.add(
                 egui::TextEdit::singleline(&mut self.filters.search)
                     .hint_text("Buscar mods…")
@@ -1082,7 +1251,7 @@ impl GtaMoApp {
             });
     }
 
-    fn ui_detail(&mut self, ui: &mut egui::Ui) {
+    fn ui_detail(&mut self, ui: &mut egui::Ui, narrow: bool) {
         let Some(id) = self.selected_mod else {
             return;
         };
@@ -1097,7 +1266,14 @@ impl GtaMoApp {
         ui.horizontal(|ui| {
             ui.heading(&m.name);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(format!("{} Cerrar", crate::icons::X)).clicked() {
+                if ui
+                    .button(if narrow {
+                        format!("{} Atrás", crate::icons::CHEVRON_LEFT)
+                    } else {
+                        format!("{} Cerrar", crate::icons::X)
+                    })
+                    .clicked()
+                {
                     self.selected_mod = None;
                 }
             });
@@ -1106,7 +1282,21 @@ impl GtaMoApp {
 
         if let Some(cover) = m.meta.cover.clone() {
             if let Some(tex) = self.load_cover(ui.ctx(), &m.folder, &cover) {
-                ui.add(egui::Image::new(&tex).max_width(320.0).max_height(200.0));
+                let resp = ui
+                    .add(
+                        egui::Image::new(&tex)
+                            .max_width(320.0)
+                            .max_height(200.0)
+                            .corner_radius(6)
+                            .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text(format!("{} Ampliar", crate::icons::MAXIMIZE));
+                if resp.clicked() {
+                    let items = self.gallery_items(&m);
+                    if !items.is_empty() {
+                        self.lightbox = Some(crate::lightbox::Lightbox::new(items, 0));
+                    }
+                }
             }
         }
 
@@ -1126,15 +1316,27 @@ impl GtaMoApp {
                 .max_height(120.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        for rel in shots.iter().take(24) {
+                        for (i, rel) in shots.iter().take(24).enumerate() {
                             let key = format!("{}/{}", m.folder, rel);
                             if let Some(path) = self.backend.cover_path(&m.folder, rel) {
                                 if let Some(tex) = self.load_image(ui.ctx(), key, &path) {
-                                    ui.add(
-                                        egui::Image::new(&tex)
-                                            .fit_to_exact_size(egui::vec2(150.0, 90.0))
-                                            .corner_radius(4),
-                                    );
+                                    let resp = ui
+                                        .add(
+                                            egui::Image::new(&tex)
+                                                .fit_to_exact_size(egui::vec2(150.0, 90.0))
+                                                .corner_radius(4)
+                                                .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_text("Ampliar");
+                                    if resp.clicked() {
+                                        let items = self.gallery_items(&m);
+                                        let base = items.len().saturating_sub(shots.len());
+                                        let idx = (base + i).min(items.len().saturating_sub(1));
+                                        if !items.is_empty() {
+                                            self.lightbox =
+                                                Some(crate::lightbox::Lightbox::new(items, idx));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1418,6 +1620,32 @@ impl GtaMoApp {
                 self.reload_relations();
             }
         }
+    }
+
+    /// Builds the browsable gallery (cover first, when present, then every
+    /// screenshot) for a mod.
+    fn gallery_items(&self, m: &crate::model::ModView) -> Vec<crate::lightbox::GalleryItem> {
+        let mut items = Vec::new();
+        if let Some(cover) = &m.meta.cover {
+            if let Some(path) = self.backend.cover_path(&m.folder, cover) {
+                items.push(crate::lightbox::GalleryItem {
+                    key: format!("{}/{}", m.folder, cover),
+                    path,
+                    label: format!("Portada — {}", m.name),
+                });
+            }
+        }
+        for rel in &m.screenshots {
+            if let Some(path) = self.backend.cover_path(&m.folder, rel) {
+                let key = format!("{}/{}", m.folder, rel);
+                items.push(crate::lightbox::GalleryItem {
+                    key,
+                    path,
+                    label: rel.clone(),
+                });
+            }
+        }
+        items
     }
 
     fn ui_profiles(&mut self, ui: &mut egui::Ui) {
@@ -1844,6 +2072,142 @@ impl GtaMoApp {
             });
     }
 
+    /// Full-screen image viewer with arrows, counter and dots.
+    fn ui_lightbox(&mut self, ctx: &egui::Context) {
+        let Some(mut lb) = self.lightbox.take() else {
+            return;
+        };
+        let total = lb.len();
+        if total == 0 {
+            return;
+        }
+        let mut go = 0i32;
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)) {
+            go += 1;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)) {
+            go -= 1;
+        }
+        if go != 0 && total > 1 {
+            lb.index = (lb.index as i32 + go).rem_euclid(total as i32) as usize;
+        }
+
+        let index = lb.index;
+        let (key, path, label) = {
+            let it = &lb.items[index];
+            (it.key.clone(), it.path.clone(), it.label.clone())
+        };
+        let tex = self.load_image(ctx, key, &path);
+        let palette = theme::active(ctx);
+        let screen = ctx.screen_rect();
+
+        let mut close = false;
+        let mut nav = 0i32;
+        let mut pick: Option<usize> = None;
+        let resp = egui::Modal::new(egui::Id::new("gta_mo_lightbox"))
+            .backdrop_color(egui::Color32::from_black_alpha(220))
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::TRANSPARENT)
+                    .inner_margin(egui::Margin::same(8)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_size(egui::vec2(
+                    (screen.width() - 40.0).max(200.0),
+                    (screen.height() - 80.0).max(200.0),
+                ));
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&label).color(palette.text).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(crate::icons::X)
+                            .on_hover_text("Cerrar (Esc)")
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                match &tex {
+                    Some(tex) => {
+                        let size = tex.size_vec2();
+                        let avail = (ui.available_size() - egui::vec2(20.0, 64.0))
+                            .max(egui::vec2(64.0, 64.0));
+                        let scale = (avail.x / size.x).min(avail.y / size.y).clamp(0.05, 1.0);
+                        ui.vertical_centered(|ui| {
+                            ui.add(
+                                egui::Image::new(tex)
+                                    .fit_to_exact_size(size * scale)
+                                    .corner_radius(6),
+                            );
+                            if total > 1 {
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .button(crate::icons::CHEVRON_LEFT)
+                                        .on_hover_text("Anterior (←)")
+                                        .clicked()
+                                    {
+                                        nav = -1;
+                                    }
+                                    ui.label(format!("{} / {}", index + 1, total));
+                                    if ui
+                                        .button(crate::icons::CHEVRON_RIGHT)
+                                        .on_hover_text("Siguiente (→)")
+                                        .clicked()
+                                    {
+                                        nav = 1;
+                                    }
+                                });
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    for i in 0..total {
+                                        let selected = i == index;
+                                        let (r, resp) = ui.allocate_exact_size(
+                                            egui::vec2(12.0, 12.0),
+                                            egui::Sense::click(),
+                                        );
+                                        ui.painter().circle_filled(
+                                            r.center(),
+                                            if selected { 5.0 } else { 3.0 },
+                                            if selected {
+                                                palette.accent
+                                            } else {
+                                                palette.text_muted
+                                            },
+                                        );
+                                        if resp.clicked() {
+                                            pick = Some(i);
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    None => {
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new("No se pudo cargar la imagen")
+                                    .color(palette.danger),
+                            );
+                        });
+                    }
+                }
+            });
+        if resp.should_close() {
+            close = true;
+        }
+        if let Some(i) = pick {
+            lb.index = i;
+        } else if nav != 0 && total > 1 {
+            lb.index = (lb.index as i32 + nav).rem_euclid(total as i32) as usize;
+        }
+        if !close {
+            self.lightbox = Some(lb);
+        }
+    }
+
     fn ui_dialogs(&mut self, ctx: &egui::Context) {
         if self.input.is_some() {
             // Take the state so its `value` buffer persists across frames; it is
@@ -2115,4 +2479,69 @@ fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     egui::Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
+/// Icon for a theme preference.
+fn theme_icon(pref: ThemePref) -> &'static str {
+    match pref {
+        ThemePref::System => crate::icons::MONITOR,
+        ThemePref::Light => crate::icons::SUN,
+        ThemePref::Dark => crate::icons::MOON,
+    }
+}
+
+/// A bottom-navigation item (icon + caption), used in the narrow layout.
+fn bottom_nav_item(
+    ui: &mut egui::Ui,
+    selected: bool,
+    icon: &str,
+    label: &str,
+    badge: Option<usize>,
+    width: f32,
+) -> bool {
+    let palette = theme::active(ui.ctx());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 52.0), egui::Sense::click());
+    if selected {
+        ui.painter().rect_filled(
+            rect.shrink2(egui::vec2(4.0, 4.0)),
+            egui::CornerRadius::same(8),
+            palette.row_active_fill,
+        );
+    }
+    let color = if selected {
+        palette.accent
+    } else {
+        palette.text_muted
+    };
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.top() + 18.0),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        egui::FontId::proportional(18.0),
+        color,
+    );
+    ui.painter().text(
+        egui::pos2(rect.center().x, rect.bottom() - 12.0),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(10.0),
+        color,
+    );
+    if let Some(n) = badge {
+        let badge_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.center().x + 16.0, rect.top() + 12.0),
+            egui::vec2(16.0, 14.0),
+        );
+        ui.painter()
+            .rect_filled(badge_rect, egui::CornerRadius::same(7), palette.accent);
+        ui.painter().text(
+            badge_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            n.to_string(),
+            egui::FontId::proportional(9.0),
+            palette.on_accent,
+        );
+    }
+    resp.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
+    resp.clicked()
 }

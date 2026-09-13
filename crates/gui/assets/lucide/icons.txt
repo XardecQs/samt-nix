@@ -1,0 +1,56 @@
+# Lucide icons bundled in crates/gui/assets/lucide/lucide.ttf
+# One canonical Lucide icon name per line. Keep this in sync with icons.rs.
+# Regenerate with: crates/gui/assets/lucide/build.sh
+
+# Existing UI icons
+check
+x
+menu
+folder-open
+plus
+refresh-cw
+trash-2
+pencil
+search
+triangle-alert
+tag
+external-link
+link
+users
+play
+info
+image
+panel-right
+circle-check
+eraser
+save
+list
+folder
+arrow-left-right
+
+# Theme / preferences / navigation
+settings
+sun
+moon
+monitor
+keyboard
+accessibility
+sliders-horizontal
+chevron-left
+chevron-right
+ellipsis-vertical
+palette
+
+# Action extras
+circle-plus
+play-circle
+maximize
+zoom-in
+zoom-out
+folder-cog
+wand-sparkles
+plug
+rotate-cw
+image-off
+arrow-left
+panel-left

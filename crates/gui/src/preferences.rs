@@ -42,15 +42,15 @@ pub fn show(ctx: &egui::Context, settings: &mut GuiSettings, open: &mut bool) ->
     changed
 }
 
-fn section(ui: &mut egui::Ui, title: &str) {
+fn section(ui: &mut egui::Ui, icon: &str, title: &str) {
     ui.add_space(2.0);
-    ui.label(egui::RichText::new(title).strong());
+    ui.label(egui::RichText::new(format!("{icon}  {title}")).strong());
     ui.add_space(4.0);
 }
 
 fn appearance(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
     let mut changed = false;
-    section(ui, "Apariencia");
+    section(ui, crate::icons::PALETTE, "Apariencia");
     egui::Grid::new("prefs_appearance")
         .num_columns(2)
         .spacing([18.0, 10.0])
@@ -120,7 +120,7 @@ fn appearance(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
 
 fn behavior(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
     let mut changed = false;
-    section(ui, "Comportamiento");
+    section(ui, crate::icons::SETTINGS, "Comportamiento");
     changed |= ui
         .checkbox(&mut s.show_covers, "Mostrar portadas en la lista")
         .changed();
@@ -131,7 +131,7 @@ fn behavior(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
 }
 
 fn advanced(ui: &mut egui::Ui) {
-    section(ui, "Avanzado");
+    section(ui, crate::icons::FOLDER_COG, "Avanzado");
     let bin = crate::backend::find_gta_mo_bin();
     ui.horizontal(|ui| {
         ui.label("Binario gta-mo:");

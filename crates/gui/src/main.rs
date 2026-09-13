@@ -5,6 +5,7 @@ mod app;
 mod backend;
 mod fonts;
 mod icons;
+mod lightbox;
 mod model;
 mod preferences;
 mod settings;
