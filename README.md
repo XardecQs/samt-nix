@@ -134,6 +134,7 @@ Example `config.toml`:
 ```toml
 game_root = "/home/user/Games/GTA_SA"
 proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
+game = "gta_sa"
 game_id = "umu-gtasa"
 game_exe = "gta_sa.exe"
 proton_use_wined3d = false

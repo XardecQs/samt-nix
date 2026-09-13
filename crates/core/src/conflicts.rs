@@ -26,7 +26,11 @@ pub struct Conflict {
 
 /// Scans the files contributed by `resolved` mods (in overlay priority order)
 /// and reports paths provided by more than one mod.
-pub fn scan_conflicts(mods_dir: &Path, resolved: &[String]) -> anyhow::Result<Vec<Conflict>> {
+pub fn scan_conflicts(
+    mods_dir: &Path,
+    resolved: &[String],
+    spec: &crate::games::GameSpec,
+) -> anyhow::Result<Vec<Conflict>> {
     let mut files: HashMap<String, Vec<(String, PathBuf, u64)>> = HashMap::new();
     for folder in resolved {
         for layer in crate::meta::mod_layers(mods_dir, folder) {
@@ -40,7 +44,7 @@ pub fn scan_conflicts(mods_dir: &Path, resolved: &[String]) -> anyhow::Result<Ve
             continue;
         }
         let duplicate = providers_all_equal(&providers);
-        let severity = severity_for(&path);
+        let severity = severity_for(&path, spec);
         conflicts.push(Conflict {
             path,
             providers: providers.iter().map(|(f, _, _)| f.clone()).collect(),
@@ -68,6 +72,7 @@ pub fn providers_for_path(
     mods_dir: &Path,
     resolved: &[String],
     rel: &str,
+    spec: &crate::games::GameSpec,
 ) -> anyhow::Result<Option<PathProviders>> {
     let rel = rel.trim_start_matches("./").replace('\\', "/");
     let mut found: Vec<(String, PathBuf, u64)> = Vec::new();
@@ -84,7 +89,7 @@ pub fn providers_for_path(
         providers: found.iter().map(|(f, _, _)| f.clone()).collect(),
         sizes: found.iter().map(|(_, _, s)| *s).collect(),
         duplicate,
-        severity: severity_for(&rel),
+        severity: severity_for(&rel, spec),
     }))
 }
 
@@ -192,11 +197,10 @@ fn streams_equal(a: &mut impl Read, b: &mut impl Read) -> bool {
     }
 }
 
-fn severity_for(path: &str) -> Severity {
-    let p = path.to_lowercase();
-    if p == "gta_sa.exe" || p == "gta_sa.pdb" || p.ends_with(".exe") {
+fn severity_for(path: &str, spec: &crate::games::GameSpec) -> Severity {
+    if spec.is_executable(path) {
         Severity::High
-    } else if p.starts_with("modloader/") {
+    } else if spec.is_loader_path(path) {
         // Mod Loader manages its own priorities.
         Severity::Info
     } else {

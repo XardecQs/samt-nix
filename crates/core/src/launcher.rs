@@ -643,6 +643,7 @@ mod tests {
         Config {
             game_root: "/tmp".into(),
             proton_path: "/tmp".into(),
+            game: None,
             game_id: None,
             game_exe: None,
             proton_use_wined3d: None,

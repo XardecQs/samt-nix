@@ -42,6 +42,7 @@ pub struct Backend {
     pub mods_dir: Option<PathBuf>,
     pub bin: String,
     pub error: Option<String>,
+    game: &'static gta_mo_core::games::GameSpec,
 }
 
 impl Backend {
@@ -67,6 +68,9 @@ impl Backend {
 
     pub fn new() -> Self {
         let db_path = config::db_path();
+        let game = config::load_config()
+            .map(|c| c.game_spec())
+            .unwrap_or_else(|_| gta_mo_core::games::default_spec());
         let conn = match db::open_db(&db_path) {
             Ok(c) => match db::run_migrations(&c) {
                 Ok(()) => Some(c),
@@ -76,6 +80,7 @@ impl Backend {
                         mods_dir: None,
                         bin: find_gta_mo_bin(),
                         error: Some(format!("No se pudo migrar la base de datos: {e:#}")),
+                        game,
                     };
                 }
             },
@@ -85,6 +90,7 @@ impl Backend {
                     mods_dir: None,
                     bin: find_gta_mo_bin(),
                     error: Some(format!("No se pudo abrir la base de datos: {e}")),
+                    game,
                 };
             }
         };
@@ -102,7 +108,12 @@ impl Backend {
             mods_dir,
             bin: find_gta_mo_bin(),
             error,
+            game,
         }
+    }
+
+    pub fn game_spec(&self) -> &'static gta_mo_core::games::GameSpec {
+        self.game
     }
 
     pub fn cover_path(&self, folder: &str, cover: &str) -> Option<PathBuf> {
@@ -284,10 +295,11 @@ impl Backend {
         gen: u64,
         mods_dir: PathBuf,
         resolved: Vec<String>,
+        spec: &'static gta_mo_core::games::GameSpec,
         tx: Sender<GuiEvent>,
     ) {
         thread::spawn(move || {
-            let list = match conflicts::scan_conflicts(&mods_dir, &resolved) {
+            let list = match conflicts::scan_conflicts(&mods_dir, &resolved, spec) {
                 Ok(cs) => cs
                     .into_iter()
                     .map(|c| ConflictView {

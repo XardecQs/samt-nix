@@ -274,7 +274,8 @@ impl GtaMoApp {
                 let resolved = self.snapshot.resolved.clone();
                 let gen = self.scan_gen;
                 let tx = self.tx.clone();
-                crate::backend::Backend::scan_conflicts_async(gen, mdir, resolved, tx);
+                let spec = self.backend.game_spec();
+                crate::backend::Backend::scan_conflicts_async(gen, mdir, resolved, spec, tx);
             }
             None => self.conflicts_pending = false,
         }

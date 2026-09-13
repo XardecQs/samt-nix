@@ -2,6 +2,7 @@ pub mod color;
 pub mod config;
 pub mod conflicts;
 pub mod db;
+pub mod games;
 pub mod launcher;
 pub mod log;
 pub mod meta;

@@ -5,6 +5,8 @@ use std::path::PathBuf;
 pub struct Config {
     pub game_root: String,
     pub proton_path: String,
+    /// Game key (see `games::ALL`); defaults to `gta_sa`.
+    pub game: Option<String>,
     pub game_id: Option<String>,
     pub game_exe: Option<String>,
     pub proton_use_wined3d: Option<bool>,
@@ -17,12 +19,19 @@ pub struct Config {
 }
 
 impl Config {
+    /// The active [`crate::games::GameSpec`] (falls back to the default).
+    pub fn game_spec(&self) -> &'static crate::games::GameSpec {
+        crate::games::resolve(self.game.as_deref())
+    }
+
     pub fn game_id(&self) -> &str {
-        self.game_id.as_deref().unwrap_or("umu-gtasa")
+        self.game_id
+            .as_deref()
+            .unwrap_or(self.game_spec().umu_game_id)
     }
 
     pub fn game_exe(&self) -> &str {
-        self.game_exe.as_deref().unwrap_or("gta_sa.exe")
+        self.game_exe.as_deref().unwrap_or(self.game_spec().exe)
     }
 
     pub fn proton_use_wined3d(&self) -> bool {
@@ -44,7 +53,7 @@ impl Config {
     pub fn dxvk_hud(&self) -> &str {
         self.dxvk_hud
             .as_deref()
-            .unwrap_or("devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls")
+            .unwrap_or(self.game_spec().dxvk_hud)
     }
 
     pub fn default_profile(&self) -> Option<&str> {

@@ -2427,7 +2427,8 @@ fn cmd_conflicts(conn: &Connection, profile_ident: Option<&str>, json: bool) -> 
         gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
     let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
     let resolved = resolve_enabled_order(conn, &profile)?;
-    let conflicts = gta_mo_core::conflicts::scan_conflicts(&paths.mods_dir, &resolved)?;
+    let conflicts =
+        gta_mo_core::conflicts::scan_conflicts(&paths.mods_dir, &resolved, cfg.game_spec())?;
 
     if json {
         #[derive(Serialize)]
@@ -2499,7 +2500,12 @@ fn cmd_which(conn: &Connection, profile_ident: Option<&str>, path: &str) -> anyh
     let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
     let resolved = resolve_enabled_order(conn, &profile)?;
 
-    match gta_mo_core::conflicts::providers_for_path(&paths.mods_dir, &resolved, path)? {
+    match gta_mo_core::conflicts::providers_for_path(
+        &paths.mods_dir,
+        &resolved,
+        path,
+        cfg.game_spec(),
+    )? {
         None => println!(
             "'{}' no lo provee ningún mod del perfil '{}' (viene de la base).",
             path, profile.name
