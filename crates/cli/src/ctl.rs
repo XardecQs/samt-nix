@@ -1253,6 +1253,27 @@ fn enforce_enable_constraints(
         }
     }
 
+    // requires_any: only warn (the alternative can be enabled right after).
+    if !target_meta.requires_any.is_empty() {
+        let enabled: std::collections::HashSet<String> = all
+            .iter()
+            .filter(|m| m.enabled)
+            .map(|m| m.folder_name.clone())
+            .collect();
+        let any = target_meta.requires_any.iter().any(|r| {
+            resolve_conflict_ref(r, &by_id, &folders)
+                .map(|f| enabled.contains(&f))
+                .unwrap_or(false)
+        });
+        if !any {
+            log::warn(format!(
+                "'{}' requiere al menos uno de: {} (ninguno activado).",
+                target.folder_name,
+                target_meta.requires_any.join(", ")
+            ));
+        }
+    }
+
     // Variant exclusivity: disable the other enabled members of the family.
     let mut disabled = Vec::new();
     if let Some(variant) = &target_meta.variant {

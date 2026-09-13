@@ -13,6 +13,8 @@ pub enum Kind {
     Variant,
     /// Two mods declared incompatible are enabled.
     Conflict,
+    /// A mod's `requires_any` alternatives are all missing/disabled.
+    Requires,
 }
 
 /// One violated constraint.
@@ -22,14 +24,30 @@ pub struct Violation {
     pub message: String,
 }
 
-/// Checks the enabled mods for variant/conflict violations.
+/// Resolves a manifest reference (by `author:slug` id or by folder name).
+fn resolve_ref(
+    reference: &str,
+    by_id: &HashMap<String, String>,
+    folders: &[String],
+) -> Option<String> {
+    let normalized = crate::meta::normalize_mod_id(reference);
+    if crate::meta::valid_mod_id(&normalized) {
+        if let Some(folder) = by_id.get(&normalized) {
+            return Some(folder.clone());
+        }
+    }
+    let trimmed = reference.trim();
+    folders.iter().find(|f| f.as_str() == trimmed).cloned()
+}
+
+/// Checks the enabled mods for variant/conflict/requires-any violations.
 ///
-/// `all_folders` is used to resolve conflict references by `author:slug` id;
-/// `enabled` is the set of folders enabled in the profile.
+/// `all_folders` is used to resolve references by `author:slug` id; `enabled`
+/// is the set of folders enabled in the profile.
 pub fn check(mods_dir: &Path, all_folders: &[String], enabled: &[String]) -> Vec<Violation> {
     let enabled_set: HashSet<&str> = enabled.iter().map(|s| s.as_str()).collect();
 
-    // id -> folder, so conflicts can reference a mod by its stable id.
+    // id -> folder, so references can use the stable id.
     let mut by_id: HashMap<String, String> = HashMap::new();
     for folder in all_folders {
         if let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, folder) {
@@ -53,20 +71,12 @@ pub fn check(mods_dir: &Path, all_folders: &[String], enabled: &[String]) -> Vec
                 .or_default()
                 .push(folder.clone());
         }
+
+        // Conflicts: report a pair once (one-way declaration is enough).
         for reference in &meta.conflicts {
-            let normalized = crate::meta::normalize_mod_id(reference);
-            let target = if crate::meta::valid_mod_id(&normalized) {
-                by_id.get(&normalized).cloned()
-            } else {
-                None
-            }
-            .or_else(|| {
-                all_folders
-                    .iter()
-                    .find(|f| f.as_str() == reference.trim())
-                    .cloned()
-            });
-            let Some(target) = target else { continue };
+            let Some(target) = resolve_ref(reference, &by_id, all_folders) else {
+                continue;
+            };
             if &target == folder || !enabled_set.contains(target.as_str()) {
                 continue;
             }
@@ -78,6 +88,24 @@ pub fn check(mods_dir: &Path, all_folders: &[String], enabled: &[String]) -> Vec
                     message: format!(
                         "'{}' es incompatible con '{}' (ambos activados).",
                         pair[0], pair[1]
+                    ),
+                });
+            }
+        }
+
+        // requires_any: at least one alternative must be enabled.
+        if !meta.requires_any.is_empty() {
+            let any = meta.requires_any.iter().any(|reference| {
+                resolve_ref(reference, &by_id, all_folders)
+                    .map(|f| enabled_set.contains(f.as_str()))
+                    .unwrap_or(false)
+            });
+            if !any {
+                violations.push(Violation {
+                    kind: Kind::Requires,
+                    message: format!(
+                        "'{folder}' requiere al menos uno de: {} (ninguno activado).",
+                        meta.requires_any.join(", ")
                     ),
                 });
             }
@@ -145,6 +173,31 @@ mod tests {
 
         // Not co-enabled -> no violation.
         assert!(check(&dir, &all, &["A".to_string()]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn requires_any_needs_one_alternative() {
+        let dir = tmp_dir("reqany");
+        for folder in ["Needs", "Alt1", "Alt2"] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+        }
+        std::fs::write(
+            dir.join("Needs/mod.toml"),
+            "id = \"x:needs\"\nrequires_any = [\"x:alt1\", \"Alt2\"]\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("Alt1/mod.toml"), "id = \"x:alt1\"\n").unwrap();
+        std::fs::write(dir.join("Alt2/mod.toml"), "id = \"x:alt2\"\n").unwrap();
+
+        let all = vec!["Needs".to_string(), "Alt1".to_string(), "Alt2".to_string()];
+        // Nothing enabled -> violation.
+        let v = check(&dir, &all, &["Needs".to_string()]);
+        assert_eq!(v.iter().filter(|x| x.kind == Kind::Requires).count(), 1);
+
+        // Any one alternative satisfies it.
+        assert!(check(&dir, &all, &["Needs".to_string(), "Alt1".to_string()]).is_empty());
+        assert!(check(&dir, &all, &["Needs".to_string(), "Alt2".to_string()]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

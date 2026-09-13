@@ -38,6 +38,11 @@ pub struct ModMeta {
     /// Mods incompatible with this one (by `author:slug` or folder name).
     #[serde(default)]
     pub conflicts: Vec<String>,
+    /// At least one of these mods (by `author:slug` or folder) must be enabled
+    /// for this mod to work. Unlike `[dependencies].required` (which is an edge
+    /// that auto-enables and orders), this is a validation constraint.
+    #[serde(default)]
+    pub requires_any: Vec<String>,
     /// Mod Loader (`modloader.ini`) integration.
     #[serde(default)]
     pub modloader: Option<ModLoaderMeta>,

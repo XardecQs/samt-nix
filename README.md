@@ -191,6 +191,10 @@ name = "RoSA"
 # Mods incompatibles (por id o carpeta); no se pueden activar juntos.
 conflicts = ["mixmods:proper-fixes-vanilla"]
 
+# Al menos UNO de estos debe estar activo (alternativas, p. ej. variantes o
+# "Proper Shaders" o "SkyGfx"). No auto-activa ni afecta al orden: se valida.
+requires_any = ["mixmods:rosa-evolved-4k", "mixmods:rosa-evolved-lite"]
+
 # Prioridad en Mod Loader para las carpetas que este mod aporta a modloader/.
 # El launcher la escribe en el modloader.ini del perfil al lanzar.
 [modloader]
@@ -245,6 +249,10 @@ requirements/conflicts are declared in each folder's own `[dependencies]` and
   Enabling one of a conflicting pair is refused, and `ctl health`/`launch`
   report the pair. A real launch **aborts** on a variant/conflict violation
   (`--dry-run` prints them without launching).
+- `requires_any = [...]` lists alternatives of which **at least one** must be
+  enabled. Unlike `[dependencies].required` (an edge that auto-enables and
+  affects the layer order), this is a validation: it never enables anything,
+  `ctl enable` only warns, and `health`/`launch` report it.
 - Mods under `modloader/` are ordered by Mod Loader itself, not by the overlay:
   set `[modloader] priority` (1..100, higher wins) and the launcher writes the
   `[Profiles.<P>.Priority]` entries into
