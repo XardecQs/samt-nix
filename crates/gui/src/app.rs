@@ -1192,7 +1192,7 @@ impl GtaMoApp {
         let labeled = fixed_labels <= total_w;
         let width_of = |i: usize| if labeled { labeled_w[i] } else { icon_w };
 
-        let mut show = [false; 6];
+        let mut show = vec![false; all.len()];
         let mut used = more_w + spacing;
         for (i, s) in show.iter_mut().enumerate().take(3) {
             *s = true;
