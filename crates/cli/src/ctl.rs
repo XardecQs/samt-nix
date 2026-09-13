@@ -41,10 +41,13 @@ fn render_table(headers: Vec<String>, rows: Vec<Vec<String>>) -> String {
 /// runs too late for `cmd_init`, which writes first).
 fn valid_folder_name(folder: &str) -> bool {
     !folder.is_empty()
+        && !folder.starts_with('.')
         && !folder.contains('|')
         && !folder.contains('/')
         && !folder.contains('\\')
         && !folder.contains(':')
+        // A comma would corrupt the fuse-overlayfs option string.
+        && !folder.contains(',')
         && folder != "."
         && folder != ".."
         && !folder.starts_with(".. ")
@@ -287,6 +290,13 @@ fn expand_guides(mods_dir: &std::path::Path, folder: &str, guides: Vec<String>) 
     let mod_dir = mods_dir.join(folder);
     let mut out = Vec::new();
     for g in guides {
+        if !gta_mo_core::meta::valid_relative_path(&g) {
+            log::warn(format!(
+                "guía ignorada en '{}': '{g}' apunta fuera de la carpeta del mod",
+                folder
+            ));
+            continue;
+        }
         let p = mod_dir.join(&g);
         if p.is_dir() {
             let mut files: Vec<String> = std::fs::read_dir(&p)
@@ -1087,7 +1097,7 @@ fn cmd_list(
 
 fn cmd_add(conn: &Connection, folder: &str, name: Option<&str>) -> anyhow::Result<()> {
     if !valid_folder_name(folder) {
-        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\', ni ser '.', '..', ni llevar espacios alrededor.");
+        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\', ni una coma, ni empezar por '.', ni ser '.', '..', ni llevar espacios alrededor.");
     }
     if db::mod_exists(conn, folder)? {
         anyhow::bail!("El mod '{folder}' ya existe en la base de datos.");
@@ -1328,7 +1338,7 @@ fn cmd_rename_folder(
     new_folder: &str,
 ) -> anyhow::Result<()> {
     if !valid_folder_name(new_folder) {
-        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\', ni ser '.', '..', ni llevar espacios alrededor.");
+        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\', ni una coma, ni empezar por '.', ni ser '.', '..', ni llevar espacios alrededor.");
     }
 
     let cfg =
@@ -2390,19 +2400,20 @@ fn cmd_health(
             continue;
         }
         match gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder_name) {
-            Ok(_) => {}
-            Err(e) => warnings.push(format!("{}: {e}", m.folder_name)),
-        }
-        if let Ok(Some(meta)) = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder_name) {
-            if let Some(mount) = meta.mount {
-                for entry in mount {
-                    if !gta_mo_core::meta::valid_mount_entry(&entry) {
-                        warnings.push(format!("{}: mount inválido '{entry}'", m.folder_name));
-                    } else if !dir.join(&entry).is_dir() {
-                        warnings.push(format!("{}: mount '{}' no existe", m.folder_name, entry));
+            Ok(Some(meta)) => {
+                if let Some(mount) = meta.mount {
+                    for entry in mount {
+                        if !gta_mo_core::meta::valid_mount_entry(&entry) {
+                            warnings.push(format!("{}: mount inválido '{entry}'", m.folder_name));
+                        } else if !dir.join(&entry).is_dir() {
+                            warnings
+                                .push(format!("{}: mount '{}' no existe", m.folder_name, entry));
+                        }
                     }
                 }
             }
+            Ok(None) => {}
+            Err(e) => warnings.push(format!("{}: {e}", m.folder_name)),
         }
     }
 

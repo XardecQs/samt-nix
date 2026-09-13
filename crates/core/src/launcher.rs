@@ -1,4 +1,5 @@
 use std::io::IsTerminal;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::{config, db, overlay, resolver};
@@ -87,6 +88,9 @@ impl LaunchEngine {
             .truncate(true)
             .write(true)
             .read(true)
+            // Never follow a symlink: a pre-planted link could otherwise be
+            // truncated (e.g. when falling back to a shared temp dir).
+            .custom_flags(libc::O_NOFOLLOW)
             .open(lock_path)?;
 
         fs2::FileExt::try_lock_exclusive(&file)
@@ -414,12 +418,27 @@ impl LaunchEngine {
 
         let resolved = graph.resolve();
 
+        if !crate::meta::overlay_safe_path(&paths.base_game) {
+            anyhow::bail!(
+                "La ruta base del juego contiene ',' o ':' y no se puede usar como capa de overlay: {}",
+                paths.base_game.display()
+            );
+        }
+
         for folder in &resolved {
             let layers = crate::meta::mod_layers(&paths.mods_dir, folder);
             for layer in &layers {
                 if !layer.exists() {
                     anyhow::bail!(
                         "La capa del mod '{}' no existe: {} (revisa 'mount' en mod.toml)",
+                        folder,
+                        layer.display()
+                    );
+                }
+                if !crate::meta::overlay_safe_path(layer) {
+                    anyhow::bail!(
+                        "La capa del mod '{}' contiene ',' o ':' (no se puede usar en el \
+                         lowerdir de fuse-overlayfs): {}",
                         folder,
                         layer.display()
                     );

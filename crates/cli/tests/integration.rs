@@ -455,6 +455,34 @@ fn list_filters_by_tag_author_and_search() {
 }
 
 #[test]
+fn import_rejects_profile_slug_traversal() {
+    let t = TempDb::new("badslug");
+    let export = t.dir.join("evil.json");
+    std::fs::write(
+        &export,
+        r#"{
+  "profiles": [{"name": "Evil", "slug": "../../../../tmp/pwned", "is_active": true}],
+  "mods": [],
+  "profile_mods": [],
+  "dependencies": [],
+  "groups": [],
+  "mod_groups": []
+}"#,
+    )
+    .unwrap();
+    let out = t.run(&["ctl", "import", export.to_str().unwrap(), "--force"]);
+    assert!(
+        !out.status.success(),
+        "el import debe rechazar un slug de perfil con traversal"
+    );
+
+    // La base de datos original no debe quedar tocada.
+    let v = json(&t.run_ok(&["ctl", "profile", "list", "--json"]));
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["slug"].as_str().unwrap(), "default");
+}
+
+#[test]
 fn export_import_roundtrip() {
     let t = TempDb::new("export");
     t.run_ok(&["ctl", "add", "m1"]);

@@ -104,6 +104,12 @@ impl Backend {
     }
 
     pub fn cover_path(&self, folder: &str, cover: &str) -> Option<PathBuf> {
+        // `cover` also carries screenshot paths (both go through load_image).
+        // Reject absolute paths and `..` so a malicious mod.toml cannot make the
+        // GUI read files outside the mod folder.
+        if !gta_mo_core::meta::valid_relative_path(cover) {
+            return None;
+        }
         self.mods_dir.as_ref().map(|d| d.join(folder).join(cover))
     }
 
@@ -170,23 +176,24 @@ impl Backend {
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|p| {
-                let (total, enabled) = db::profile_mod_count(conn, p.id).unwrap_or((0, 0));
-                ProfileView {
+                let (total, enabled) =
+                    db::profile_mod_count(conn, p.id).map_err(|e| e.to_string())?;
+                Ok::<ProfileView, String>(ProfileView {
                     name: p.name.clone(),
                     slug: p.slug.clone(),
                     is_active: p.is_active,
                     total,
                     enabled,
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mods = db::load_all_mods_for_profile(conn, profile.id)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .map(|m| {
+            .map(|m| -> Result<ModView, String> {
                 let folder = m.folder_name.clone();
-                let cached = db::load_mod_meta(conn, m.id).unwrap_or_default();
+                let cached = db::load_mod_meta(conn, m.id).map_err(|e| e.to_string())?;
                 // mod.toml es la fuente canónica: léelo en vivo y funde sus
                 // campos con la caché (los ausentes caen a lo cacheado), así las
                 // ediciones manuales (nombre, cover, tags…) se reflejan al
@@ -203,12 +210,12 @@ impl Backend {
                     .and_then(|lm| lm.name.clone())
                     .unwrap_or_else(|| m.name.clone());
                 let groups = db::groups_of_mod_in_profile(conn, m.id, profile.id)
-                    .unwrap_or_default()
+                    .map_err(|e| e.to_string())?
                     .into_iter()
                     .map(|g| g.name)
                     .collect();
                 let screenshots = gta_mo_core::meta::mod_screenshots(&paths.mods_dir, &folder);
-                ModView {
+                Ok(ModView {
                     id: m.id,
                     folder,
                     name,
@@ -217,9 +224,9 @@ impl Backend {
                     meta,
                     groups,
                     screenshots,
-                }
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
         let mut all_tags: Vec<String> = Vec::new();
         for m in &mods {
@@ -232,25 +239,26 @@ impl Backend {
         all_tags.sort();
 
         let all_groups = db::list_groups(conn)
-            .unwrap_or_default()
+            .map_err(|e| e.to_string())?
             .into_iter()
             .map(|g| g.name)
             .collect::<Vec<_>>();
 
         let group_counts = db::list_groups(conn)
-            .unwrap_or_default()
+            .map_err(|e| e.to_string())?
             .into_iter()
             .map(|g| {
                 let n = db::mods_in_group(conn, g.id, profile.id)
                     .map(|v| v.len())
-                    .unwrap_or(0);
-                (g.name.clone(), n)
+                    .map_err(|e| e.to_string())?;
+                Ok::<(String, usize), String>((g.name.clone(), n))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let resolved = resolve_enabled_order(conn, &profile).unwrap_or_default();
-        let dep_status = db::dependency_issues(conn, profile.id).unwrap_or_default();
-        let dep_cycles = resolver::dependency_cycles(conn, profile.id).unwrap_or_default();
+        let resolved = resolve_enabled_order(conn, &profile).map_err(|e| e.to_string())?;
+        let dep_status = db::dependency_issues(conn, profile.id).map_err(|e| e.to_string())?;
+        let dep_cycles =
+            resolver::dependency_cycles(conn, profile.id).map_err(|e| e.to_string())?;
 
         Ok(Snapshot {
             profiles,
@@ -400,14 +408,18 @@ pub fn find_gta_mo_bin() -> String {
     if let Ok(p) = which::which("gta-mo") {
         return p.to_string_lossy().into_owned();
     }
-    for cand in [
-        "target/debug/gta-mo",
-        "../target/debug/gta-mo",
-        "../../target/debug/gta-mo",
-        "../../../target/debug/gta-mo",
-    ] {
-        if std::path::Path::new(cand).exists() {
-            return cand.to_string();
+    // Development convenience only: in a release build, never execute a
+    // relative `target/debug/gta-mo` found in whatever the CWD happens to be.
+    if cfg!(debug_assertions) {
+        for cand in [
+            "target/debug/gta-mo",
+            "../target/debug/gta-mo",
+            "../../target/debug/gta-mo",
+            "../../../target/debug/gta-mo",
+        ] {
+            if std::path::Path::new(cand).exists() {
+                return cand.to_string();
+            }
         }
     }
     "gta-mo".into()
@@ -433,10 +445,12 @@ mod tests {
             tags: vec![],
             components: vec![],
         };
-        let mut live = ModMeta::default();
-        live.name = Some("Live Name".into());
-        live.author = vec!["New".into()];
-        live.tags = Some(vec!["essential".into()]);
+        let live = ModMeta {
+            name: Some("Live Name".into()),
+            author: vec!["New".into()],
+            tags: Some(vec!["essential".into()]),
+            ..Default::default()
+        };
         // version/cover ausentes en el manifest -> se mantienen de la caché
         let merged = merge_meta_caches(cached, db::meta_cache_from_meta(&live));
         assert_eq!(merged.mod_id.as_deref(), Some("a:b"));

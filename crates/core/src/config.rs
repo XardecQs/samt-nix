@@ -133,10 +133,35 @@ pub fn db_path() -> PathBuf {
 }
 
 pub fn lockfile_path() -> PathBuf {
-    let dir = std::env::var("XDG_RUNTIME_DIR")
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        if dir.is_dir() {
+            return dir.join("gta-mo-launcher.lock");
+        }
+    }
+    // No user runtime dir (sudo, cron, some Steam setups): use a per-user
+    // directory created with mode 0700 instead of the world-writable /tmp,
+    // which would allow a symlink attack on the lock file.
+    let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"));
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("gta-mo");
+    create_private_dir(&dir);
     dir.join("gta-mo-launcher.lock")
+}
+
+#[cfg(unix)]
+fn create_private_dir(dir: &std::path::Path) {
+    use std::os::unix::fs::DirBuilderExt;
+    let _ = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir);
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
 }
 
 pub fn load_config() -> anyhow::Result<Config> {

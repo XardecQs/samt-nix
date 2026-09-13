@@ -116,6 +116,9 @@ pub fn mod_screenshots(mods_dir: &Path, folder: &str) -> Vec<String> {
     let base = mods_dir.join(folder);
     let mut out: Vec<String> = Vec::new();
     for entry in entries {
+        if !valid_relative_path(&entry) {
+            continue;
+        }
         let p = base.join(&entry);
         if p.is_dir() {
             let mut files: Vec<String> = std::fs::read_dir(&p)
@@ -182,11 +185,45 @@ pub fn read_mod_meta(mods_dir: &Path, folder: &str) -> anyhow::Result<Option<Mod
 }
 
 /// A mount entry must be a relative path (using `/`) with no `.`/`..`
-/// components, so it can never escape the mod folder.
+/// components, and must not contain characters that would corrupt the
+/// `fuse-overlayfs` option string: `:` separates `lowerdir` layers and `,`
+/// separates mount options. Rejecting them here means a manifest can never
+/// escape the mod folder nor inject overlay options.
 pub fn valid_mount_entry(entry: &str) -> bool {
     !entry.is_empty()
+        && !entry.contains(',')
+        && !entry.contains(':')
         && entry
             .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..")
+}
+
+/// True when a mod folder name is safe to use as an overlay layer path. Folder
+/// names ultimately land in the `lowerdir` option, so a bare `,` or `:` would
+/// split options/layers even though the folder itself is a valid filename.
+pub fn overlay_safe_folder(folder: &str) -> bool {
+    !folder.contains(',') && !folder.contains(':')
+}
+
+/// True when a filesystem path is safe to embed in the `fuse-overlayfs`
+/// option string (`lowerdir`/`upperdir`/`workdir`). Covers `mods_dir`,
+/// `game_root` and the per-profile dirs, which come from the user config and
+/// are not otherwise validated.
+pub fn overlay_safe_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    !s.contains(',') && !s.contains(':')
+}
+
+/// True when `entry` is a relative path confined to its base directory: it is
+/// not absolute and has no `.`/`..` component. Used for manifest paths that are
+/// read from (but must never escape) the mod folder: `cover`, `guides`,
+/// `screenshots` and `components[].path`. A trailing `/` is tolerated.
+pub fn valid_relative_path(entry: &str) -> bool {
+    let e = entry.trim_end_matches('/');
+    !e.is_empty()
+        && !e.starts_with('/')
+        && !e.starts_with('\\')
+        && e.split(['/', '\\'])
             .all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
@@ -470,6 +507,25 @@ optional = ["xardec:extra"]
         assert!(!valid_mount_entry("/abs"));
         assert!(!valid_mount_entry("a//b"));
         assert!(!valid_mount_entry("a/"));
+        // overlay option injection
+        assert!(!valid_mount_entry("content,upperdir=/etc"));
+        assert!(!valid_mount_entry("a:b"));
+        assert!(!overlay_safe_folder("evil,upperdir=/etc"));
+        assert!(!overlay_safe_folder("a:b"));
+        assert!(overlay_safe_folder("My Mod"));
+    }
+
+    #[test]
+    fn relative_path_is_confined_to_base() {
+        assert!(valid_relative_path("cover.png"));
+        assert!(valid_relative_path("guides/instalacion.md"));
+        assert!(valid_relative_path("capturas/"));
+        // escapes
+        assert!(!valid_relative_path("/etc/passwd"));
+        assert!(!valid_relative_path("../secret"));
+        assert!(!valid_relative_path("a/../../b"));
+        assert!(!valid_relative_path(""));
+        assert!(!valid_relative_path("a//b"));
     }
 
     #[test]

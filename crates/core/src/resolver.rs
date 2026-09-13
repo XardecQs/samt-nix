@@ -1,6 +1,10 @@
 use crate::db::{DepRef, ModEntry};
 use std::collections::{HashMap, HashSet};
 
+/// Maximum dependency-chain depth walked recursively. Guards against a stack
+/// overflow from a pathological or maliciously deep dependency graph.
+const MAX_DEP_DEPTH: usize = 4096;
+
 pub struct DepGraph {
     pub mods: HashMap<i64, ModEntry>,
     pub deps: HashMap<i64, Vec<i64>>,
@@ -111,6 +115,14 @@ impl DepGraph {
         state: &mut HashMap<i64, CycleState>,
         path: &mut Vec<i64>,
     ) -> bool {
+        if path.len() > MAX_DEP_DEPTH {
+            if path.len() == MAX_DEP_DEPTH + 1 {
+                crate::log::warn(
+                    "Grafo de dependencias demasiado profundo; se omite la detección de ciclos.",
+                );
+            }
+            return true;
+        }
         state.insert(mid, CycleState::Visiting);
         path.push(mid);
 
@@ -157,6 +169,13 @@ impl DepGraph {
     }
 
     pub fn enable_recursive(&mut self, did: i64) {
+        self.enable_recursive_depth(did, 0);
+    }
+
+    fn enable_recursive_depth(&mut self, did: i64, depth: usize) {
+        if depth > MAX_DEP_DEPTH {
+            return;
+        }
         if let Some(m) = self.mods.get_mut(&did) {
             if m.enabled {
                 return;
@@ -169,7 +188,7 @@ impl DepGraph {
 
             let sub_deps: Vec<i64> = self.deps.get(&did).cloned().unwrap_or_default();
             for sub in sub_deps {
-                self.enable_recursive(sub);
+                self.enable_recursive_depth(sub, depth + 1);
             }
         }
     }
@@ -280,14 +299,20 @@ impl DepGraph {
             if dependency_of.contains(mid) {
                 continue;
             }
-            self.dfs_resolve(*mid, &mut visited, &mut resolved);
+            self.dfs_resolve(*mid, &mut visited, &mut resolved, 0);
         }
 
         resolved
     }
 
-    fn dfs_resolve(&self, mid: i64, visited: &mut HashSet<i64>, resolved: &mut Vec<String>) {
-        if visited.contains(&mid) {
+    fn dfs_resolve(
+        &self,
+        mid: i64,
+        visited: &mut HashSet<i64>,
+        resolved: &mut Vec<String>,
+        depth: usize,
+    ) {
+        if visited.contains(&mid) || depth > MAX_DEP_DEPTH {
             return;
         }
         if self.skip_ids.contains(&mid) {
@@ -308,7 +333,7 @@ impl DepGraph {
             sorted_deps.sort_by_key(|b| std::cmp::Reverse(b.0));
 
             for (_, did) in sorted_deps {
-                self.dfs_resolve(did, visited, resolved);
+                self.dfs_resolve(did, visited, resolved, depth + 1);
             }
         }
 
@@ -325,7 +350,7 @@ impl DepGraph {
             sorted_opt.sort_by_key(|b| std::cmp::Reverse(b.0));
 
             for (_, did) in sorted_opt {
-                self.dfs_resolve(did, visited, resolved);
+                self.dfs_resolve(did, visited, resolved, depth + 1);
             }
         }
     }
@@ -385,6 +410,9 @@ impl DepGraph {
             index: &mut HashMap<i64, usize>,
             out: &mut Vec<Vec<i64>>,
         ) {
+            if stack.len() > MAX_DEP_DEPTH {
+                return;
+            }
             marks.insert(node, Mark::InStack);
             index.insert(node, stack.len());
             stack.push(node);

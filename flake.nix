@@ -144,10 +144,9 @@
 
         nativeBuildInputs = with pkgs; [ clippy ];
 
-        # Compile-level lint only (no `cargo build` needed). Without
-        # `--all-targets` the #[cfg(test)] code — which currently has a few
-        # pre-existing style warnings — is not compiled.
-        cargoBuildCommand = "cargo clippy -p gta-mod-organizer -p gta-mo-core";
+        # Lint cli+core (including test code). The GUI needs X11/Wayland build
+        # inputs that this derivation does not provide; CI lints it separately.
+        cargoBuildCommand = "cargo clippy -p gta-mod-organizer -p gta-mo-core --all-targets -- -D warnings";
 
         installPhase = "mkdir $out";
       };

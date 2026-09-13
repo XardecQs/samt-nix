@@ -98,6 +98,21 @@ pub fn slugify(input: &str) -> String {
     slug
 }
 
+/// Validates a slug that will be used verbatim (e.g. from an import file). It
+/// must be a non-empty, relative, single path component: profile slugs are
+/// turned into `run/profiles/<slug>` directories and group slugs are stored as
+/// identifiers, so `..`/separators must never be accepted.
+pub fn valid_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug != "."
+        && slug != ".."
+        && !slug.contains('/')
+        && !slug.contains('\\')
+        && slug
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
 pub fn unique_slug(conn: &Connection, base: &str) -> anyhow::Result<String> {
     unique_slug_excluding(conn, base, None)
 }
@@ -383,6 +398,9 @@ pub fn insert_profile(
     slug: &str,
     is_active: bool,
 ) -> anyhow::Result<i64> {
+    if !valid_slug(slug) {
+        anyhow::bail!("Slug de perfil inválido en el import: '{slug}'.");
+    }
     conn.execute(
         "INSERT INTO profiles (name, slug, is_active) VALUES (?1, ?2, ?3)",
         params![name, slug, is_active as i64],
@@ -392,6 +410,9 @@ pub fn insert_profile(
 
 /// Inserts a mod without touching profile states (used by `ctl import`).
 pub fn insert_mod(conn: &Connection, folder: &str, name: &str) -> anyhow::Result<i64> {
+    if !crate::meta::overlay_safe_folder(folder) {
+        anyhow::bail!("Carpeta de mod inválida en el import: '{folder}' (contiene ',' o ':').");
+    }
     conn.execute(
         "INSERT INTO mods (folder_name, name) VALUES (?1, ?2)",
         params![folder, name],
@@ -401,6 +422,9 @@ pub fn insert_mod(conn: &Connection, folder: &str, name: &str) -> anyhow::Result
 
 /// Inserts a group with an explicit slug (used by `ctl import`).
 pub fn insert_group(conn: &Connection, name: &str, slug: &str) -> anyhow::Result<i64> {
+    if !valid_slug(slug) {
+        anyhow::bail!("Slug de grupo inválido en el import: '{slug}'.");
+    }
     conn.execute(
         "INSERT INTO groups (name, slug) VALUES (?1, ?2)",
         params![name, slug],
@@ -1600,6 +1624,13 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
                 if name.starts_with('.') {
                     continue;
                 }
+                if !crate::meta::overlay_safe_folder(&name) {
+                    log::warn(format!(
+                        "    [!] Carpeta ignorada '{name}': contiene ',' o ':' y no se puede \
+                         usar como capa de overlay"
+                    ));
+                    continue;
+                }
                 disk_folders.push(name);
             }
         }
@@ -1831,6 +1862,20 @@ mod tests {
         assert_eq!(slugify("  Graphics   Mods  "), "graphics-mods");
         assert_eq!(slugify("A.B/C_1"), "abc-1");
         assert_eq!(slugify("---"), "");
+    }
+
+    #[test]
+    fn valid_slug_rejects_path_traversal() {
+        assert!(valid_slug("default"));
+        assert!(valid_slug("vanilla-play-2"));
+        assert!(valid_slug("graficos"));
+        assert!(!valid_slug(""));
+        assert!(!valid_slug("."));
+        assert!(!valid_slug(".."));
+        assert!(!valid_slug("../../etc"));
+        assert!(!valid_slug("a/b"));
+        assert!(!valid_slug("a\\b"));
+        assert!(!valid_slug("with space"));
     }
 
     #[test]

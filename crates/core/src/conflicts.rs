@@ -1,5 +1,10 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// Maximum directory nesting walked when scanning a mod, to avoid a stack
+/// overflow on a pathological (or malicious) tree.
+const MAX_WALK_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -25,7 +30,7 @@ pub fn scan_conflicts(mods_dir: &Path, resolved: &[String]) -> anyhow::Result<Ve
     let mut files: HashMap<String, Vec<(String, PathBuf, u64)>> = HashMap::new();
     for folder in resolved {
         for layer in crate::meta::mod_layers(mods_dir, folder) {
-            walk(&layer, &layer, folder, &mut files)?;
+            walk(&layer, &layer, folder, &mut files, 0)?;
         }
     }
 
@@ -68,7 +73,7 @@ pub fn providers_for_path(
     let mut found: Vec<(String, PathBuf, u64)> = Vec::new();
     for folder in resolved {
         for layer in crate::meta::mod_layers(mods_dir, folder) {
-            walk_path(&layer, &layer, folder, &rel, &mut found)?;
+            walk_path(&layer, &layer, folder, &rel, &mut found, 0)?;
         }
     }
     if found.is_empty() {
@@ -89,12 +94,16 @@ fn walk_path(
     folder: &str,
     rel: &str,
     found: &mut Vec<(String, PathBuf, u64)>,
+    depth: usize,
 ) -> anyhow::Result<()> {
+    if depth > MAX_WALK_DEPTH {
+        return Ok(());
+    }
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if entry.file_type()?.is_dir() {
-            walk_path(root, &path, folder, rel, found)?;
+            walk_path(root, &path, folder, rel, found, depth + 1)?;
         } else {
             let r = path
                 .strip_prefix(root)
@@ -114,12 +123,16 @@ fn walk(
     dir: &Path,
     folder: &str,
     files: &mut HashMap<String, Vec<(String, PathBuf, u64)>>,
+    depth: usize,
 ) -> anyhow::Result<()> {
+    if depth > MAX_WALK_DEPTH {
+        return Ok(());
+    }
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if entry.file_type()?.is_dir() {
-            walk(root, &path, folder, files)?;
+            walk(root, &path, folder, files, depth + 1)?;
         } else {
             let rel = path
                 .strip_prefix(root)
@@ -136,25 +149,47 @@ fn walk(
     Ok(())
 }
 
-/// All providers with the same size are byte-compared; any difference means the
-/// files are not identical duplicates.
+/// All providers with the same size are byte-compared by streaming chunks, so a
+/// conflict between very large files never loads them fully into memory. Any
+/// difference means the files are not identical duplicates.
 fn providers_all_equal(providers: &[(String, PathBuf, u64)]) -> bool {
     let first_size = providers[0].2;
     if providers.iter().any(|(_, _, s)| *s != first_size) {
         return false;
     }
-    let Ok(first_bytes) = std::fs::read(&providers[0].1) else {
-        return false;
-    };
     for (_, path, _) in &providers[1..] {
-        let Ok(bytes) = std::fs::read(path) else {
+        let (Ok(mut a), Ok(mut b)) = (
+            std::fs::File::open(&providers[0].1),
+            std::fs::File::open(path),
+        ) else {
             return false;
         };
-        if bytes != first_bytes {
+        if !streams_equal(&mut a, &mut b) {
             return false;
         }
     }
     true
+}
+
+fn streams_equal(a: &mut impl Read, b: &mut impl Read) -> bool {
+    let mut ba = [0u8; 64 * 1024];
+    let mut bb = [0u8; 64 * 1024];
+    loop {
+        let na = match a.read(&mut ba) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let nb = match b.read(&mut bb) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if na != nb || ba[..na] != bb[..nb] {
+            return false;
+        }
+        if na == 0 {
+            return true;
+        }
+    }
 }
 
 fn severity_for(path: &str) -> Severity {

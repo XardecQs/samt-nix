@@ -201,13 +201,20 @@ path = "content/modloader/_ESSENTIALS/SilentPatch"
 - `screenshots` accepts a directory or a list of paths; directories are
   expanded to their images (png/jpg/jpeg/webp/bmp/gif), shown as a gallery in
   the GUI detail panel (and listed by `ctl info -v`/`--json`).
+- `cover`, `guides`, `screenshots` and `components[].path` are read from inside
+  the mod folder only: they must be **relative** paths and cannot contain `..`
+  (absolute paths and escapes are ignored with a warning). This prevents a
+  manifest from reading files outside its mod.
 - Each `mount` entry is a folder treated as the **game root**: its CONTENTS
   are laid over the game. With `mount = ["content"]`, `content/d3d9.dll` lands
   on `<game root>/d3d9.dll` and `content/models/*` on `<game root>/models/*`.
   This is handy for mods with many loose files (e.g. Essentials_Pack): move
   them into a `content/` subfolder and list it. With no `mount`, the whole
   folder is treated as the game root, so legacy mods keep working untouched.
-  Entries are relative paths (no `..`, no absolute paths).
+  Entries are relative paths (no `..`, no absolute paths) and must not contain
+  `,` or `:` (those characters separate `fuse-overlayfs` mount options/layers).
+  Mod folder names must also avoid `,`/`:`; such folders are skipped by
+  `discover` with a warning.
 
 **Recommended pack layout** (keeps the game dir clean):
 

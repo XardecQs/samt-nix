@@ -1584,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "gta-mo-core"
-version = "0.43.2"
+version = "0.43.3"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "gta-mo-gui"
-version = "0.43.2"
+version = "0.43.3"
 dependencies = [
  "anyhow",
  "eframe",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "gta-mod-organizer"
-version = "0.43.2"
+version = "0.43.3"
 dependencies = [
  "anyhow",
  "clap",

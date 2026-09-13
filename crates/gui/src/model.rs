@@ -181,9 +181,11 @@ mod tests {
     use super::*;
 
     fn mod_view(id: i64, name: &str, folder: &str, enabled: bool, order: i64) -> ModView {
-        let mut meta = ModMetaCache::default();
-        meta.author = vec!["a".into()];
-        meta.tags = vec!["essential".into()];
+        let meta = ModMetaCache {
+            author: vec!["a".into()],
+            tags: vec!["essential".into()],
+            ..Default::default()
+        };
         ModView {
             id,
             folder: folder.into(),
@@ -202,19 +204,25 @@ mod tests {
             mod_view(1, "Alpha", "alpha", true, 10),
             mod_view(2, "Beta", "beta", false, 20),
         ];
-        let mut f = Filters::default();
-        f.search = "ALPHA".into();
+        let f = Filters {
+            search: "ALPHA".into(),
+            ..Default::default()
+        };
         filter_and_sort(&mut mods, &f);
         assert_eq!(mods.len(), 1);
         assert_eq!(mods[0].id, 1);
 
-        let mut f = Filters::default();
-        f.tag = Some("essential".into());
+        let f = Filters {
+            tag: Some("essential".into()),
+            ..Default::default()
+        };
         filter_and_sort(&mut mods, &f);
         assert_eq!(mods.len(), 1);
 
-        let mut f = Filters::default();
-        f.group = Some("graphics".into());
+        let f = Filters {
+            group: Some("graphics".into()),
+            ..Default::default()
+        };
         filter_and_sort(&mut mods, &f);
         assert_eq!(mods.len(), 1);
     }
@@ -225,9 +233,11 @@ mod tests {
             mod_view(1, "Beta", "b", true, 10),
             mod_view(2, "Alpha", "a", true, 20),
         ];
-        let mut f = Filters::default();
-        f.sort = SortField::Name;
-        f.desc = false;
+        let f = Filters {
+            sort: SortField::Name,
+            desc: false,
+            ..Default::default()
+        };
         filter_and_sort(&mut mods, &f);
         assert_eq!(mods[0].name, "Alpha");
         assert_eq!(mods[1].name, "Beta");
