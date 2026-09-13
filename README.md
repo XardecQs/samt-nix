@@ -453,6 +453,24 @@ that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run),
 Discover/Clean actions, a streaming Log tab, and a status bar.
 
+### Appearance
+
+The GUI follows the system **light/dark** theme by default and can be forced in
+**Preferencias…** (⋮ menu), together with:
+
+- **Accent color** (Blue/Violet/Green/Orange/Pink/Graphite), high-contrast mode,
+  UI density, interface scale, "reduce motion" and whether to show covers.
+- A semantic color palette (`crates/gui/src/theme.rs`) whose text/background
+  pairs are verified to meet **WCAG AA** contrast in both themes by unit tests.
+
+Preferences are stored in `~/.config/gta-mo/gui.toml` (only the changed fields
+are written; older files keep working). The interface **text uses the system UI
+font** when it can be resolved through fontconfig (`fc-match`) or the GNOME
+settings, falling back to the bundled egui fonts; set `GTA_MO_NO_SYSTEM_FONT=1`
+to disable it. The ⋮ menu also has **Acerca de** and **Atajos de teclado**, and
+the keyboard shortcuts include `Ctrl+F` (search), `Ctrl+R` (refresh) and
+`Ctrl+,` (preferences).
+
 The package installs a desktop entry and icon (`data/gta-mo-gui.desktop`,
 `data/icons/.../gta-mo-gui.svg`); with `enableGui` it appears in your
 application menu. The UI icons come from the bundled [Lucide](https://lucide.dev)

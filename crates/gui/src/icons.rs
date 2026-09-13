@@ -4,8 +4,6 @@
 //! (<https://lucide.dev>). The embedded font is a subset of the official
 //! Lucide font, licensed under ISC — see `assets/lucide/LICENSE`.
 
-use eframe::egui;
-
 pub const CHECK: &str = "\u{E06C}";
 pub const X: &str = "\u{E1B2}";
 pub const MENU: &str = "\u{E115}";
@@ -33,21 +31,3 @@ pub const SWAP_H: &str = "\u{E24A}";
 
 /// Subset of the official Lucide font, embedded at compile time.
 pub const FONT: &[u8] = include_bytes!("../assets/lucide/lucide.ttf");
-
-/// Installs the Lucide icon font as a fallback for the default families, so
-/// the [`CHECK`], [`X`], … glyphs render inline with regular text.
-pub fn install(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        "lucide".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(FONT)),
-    );
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .push("lucide".to_owned());
-    }
-    ctx.set_fonts(fonts);
-}

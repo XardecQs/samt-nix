@@ -104,6 +104,7 @@
         postInstall = ''
           wrapProgram "$out/bin/gta-mo-gui" \
             --prefix PATH : ${self.packages.${pkgs.stdenv.hostPlatform.system}.gta-mod-organizer}/bin \
+            --prefix PATH : ${pkgs.fontconfig}/bin \
             --suffix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiRuntimeLibs}"
 
           install -Dm644 data/gta-mo-gui.desktop \

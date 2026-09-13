@@ -1,10 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod app;
 mod backend;
+mod fonts;
 mod icons;
 mod model;
+mod preferences;
 mod settings;
+mod theme;
+mod toasts;
 
 use eframe::egui;
 use std::sync::Arc;
