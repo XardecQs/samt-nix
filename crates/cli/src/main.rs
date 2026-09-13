@@ -213,6 +213,11 @@ pub enum CtlCommand {
         #[command(subcommand)]
         action: ManifestAction,
     },
+    #[command(about = "Inspect the Mod Loader priorities for a profile")]
+    Modloader {
+        #[command(subcommand)]
+        action: ModloaderAction,
+    },
     #[command(about = "View/manage the active profile's user data (saves, tracks, screenshots)")]
     Data {
         #[command(subcommand)]
@@ -302,6 +307,15 @@ pub enum TagAction {
 pub enum ManifestAction {
     #[command(about = "Replace the mod.toml with the manifest read from stdin")]
     Set { ident: String },
+}
+
+#[derive(Subcommand)]
+pub enum ModloaderAction {
+    #[command(about = "Show the effective Mod Loader priorities for a profile")]
+    Show {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

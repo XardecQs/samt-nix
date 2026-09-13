@@ -31,6 +31,35 @@ pub struct ModMeta {
     /// Bundled sub-mods of a composite pack (metadata only).
     #[serde(default)]
     pub components: Option<Vec<MetaComponent>>,
+    /// This folder is one variant of a family; only one member of `group` may
+    /// be enabled in a profile.
+    #[serde(default)]
+    pub variant: Option<ModVariant>,
+    /// Mods incompatible with this one (by `author:slug` or folder name).
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// Mod Loader (`modloader.ini`) integration.
+    #[serde(default)]
+    pub modloader: Option<ModLoaderMeta>,
+}
+
+/// One variant of a mutually exclusive family.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ModVariant {
+    /// Stable family id (lowercase `[a-z0-9_-]`).
+    pub group: String,
+    /// Human-readable label for this variant (optional).
+    pub name: Option<String>,
+}
+
+/// Mod Loader priority for the folders a mod adds under `modloader/`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ModLoaderMeta {
+    /// Priority 1..=100 (higher wins). Absent = do not touch `modloader.ini`.
+    pub priority: Option<i64>,
+    /// Explicit folder names under `modloader/`; auto-detected when absent.
+    #[serde(default)]
+    pub folders: Option<Vec<String>>,
 }
 
 /// One bundled component of a composite pack.
@@ -169,6 +198,23 @@ pub fn valid_tag(tag: &str) -> bool {
         && tag
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// A variant group id has the same shape as a tag.
+pub fn valid_variant_group(group: &str) -> bool {
+    valid_tag(group)
+}
+
+/// A `[modloader] folders` entry is a single path segment under `modloader/`:
+/// no separators and no overlay-breaking characters.
+pub fn valid_modloader_folder(folder: &str) -> bool {
+    !folder.is_empty()
+        && folder != "."
+        && folder != ".."
+        && !folder.contains('/')
+        && !folder.contains('\\')
+        && !folder.contains(',')
+        && !folder.contains(':')
 }
 
 /// Reads `mod.toml` from `mods_dir/<folder>`. Returns `None` when there is no

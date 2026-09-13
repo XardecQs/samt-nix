@@ -182,6 +182,21 @@ mount = ["content"]
 required = ["xardec:asi-loader"]  # sin esto el mod no funciona
 optional = []
 
+# Variante de una familia mutuamente excluyente (4K/LITE, RoSA/vanilla…):
+# solo una variante del mismo `group` puede estar activa a la vez.
+[variant]
+group = "proper-fixes"
+name = "RoSA"
+
+# Mods incompatibles (por id o carpeta); no se pueden activar juntos.
+conflicts = ["mixmods:proper-fixes-vanilla"]
+
+# Prioridad en Mod Loader para las carpetas que este mod aporta a modloader/.
+# El launcher la escribe en el modloader.ini del perfil al lanzar.
+[modloader]
+priority = 60                     # 1..100 (mayor gana); sin esto no se toca
+# folders = ["Proper Fixes"]      # opcional; se autodetecta modloader/<X>
+
 # Si es un pack de mods, lista sus componentes (solo metadata)
 [[components]]
 name = "SilentPatch"
@@ -216,6 +231,27 @@ path = "content/modloader/_ESSENTIALS/SilentPatch"
   `,` or `:` (those characters separate `fuse-overlayfs` mount options/layers).
   Mod folder names must also avoid `,`/`:`; such folders are skipped by
   `discover` with a warning.
+
+### Variants, conflicts and Mod Loader
+
+Some mods ship **variants** (RoSA 4K vs LITE, Proper Fixes "normal" vs "for
+RoSA Evolved"). Model them as separate folders that share a `[variant] group`:
+enabling one variant automatically disables the other members of the family
+(both from `ctl enable` and the GUI's variant selector). Per-variant
+requirements/conflicts are declared in each folder's own `[dependencies]` and
+`conflicts`.
+
+- `conflicts = [...]` lists incompatible mods (by `author:slug` or folder).
+  Enabling one of a conflicting pair is refused, and `ctl health`/`launch`
+  report the pair. A real launch **aborts** on a variant/conflict violation
+  (`--dry-run` prints them without launching).
+- Mods under `modloader/` are ordered by Mod Loader itself, not by the overlay:
+  set `[modloader] priority` (1..100, higher wins) and the launcher writes the
+  `[Profiles.<P>.Priority]` entries into
+  `run/profiles/<slug>/upper/modloader/modloader.ini` on every launch,
+  preserving the rest of the file. Folder names are auto-detected from the
+  mod's `modloader/<Name>` tree. Inspect them with `ctl modloader show`.
+  Example: `Proper Fixes=60` must outrank `RoSA Project Evolved=50`.
 
 **Recommended pack layout** (keeps the game dir clean):
 
@@ -318,6 +354,7 @@ gta-mo ctl data dir                           # open the profile user-data folde
 gta-mo ctl data open <rel>
 gta-mo ctl data remove <rel> [--yes]
 gta-mo ctl open-url <url>                     # open an http(s) URL
+gta-mo ctl modloader show [--json]            # Mod Loader priorities for the profile
 gta-mo ctl profile list [--json]
 gta-mo ctl profile create <name>
 gta-mo ctl profile delete <name>
@@ -457,8 +494,9 @@ Features: mods list with search/tag/group/enabled-status filters and sorting,
 enable/disable and drag&drop load-order controls (with an insertion bar), a rich
 detail panel (author, Mod ID, URL, tags, groups, mount, description, cover,
 screenshot gallery, components, a one-click **Crear mod.toml** for mods
-without a manifest, a **tag editor** and a raw **mod.toml editor**), profiles
-tab with create/use/rename/copy/delete
+without a manifest, a **tag editor** and a raw **mod.toml editor**), a
+**variant** badge/selector and declared **conflicts** in the detail panel,
+profiles tab with create/use/rename/copy/delete
 (renaming also moves `run/profiles/<slug>`), a **Datos** tab listing the active
 profile's saves, settings, User Tracks and screenshots written under
 `userfiles/` (with PortableGTA), with screenshot previews in the full-screen

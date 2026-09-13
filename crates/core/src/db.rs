@@ -36,6 +36,14 @@ pub struct ModMetaCache {
     pub tags: Vec<String>,
     /// Bundled components of a composite pack.
     pub components: Vec<crate::meta::MetaComponent>,
+    /// Mutually exclusive variant family (`[variant]`).
+    pub variant_group: Option<String>,
+    pub variant_name: Option<String>,
+    /// Incompatible mods (by `author:slug` or folder).
+    pub conflicts: Vec<String>,
+    /// Mod Loader priority and folders (`[modloader]`).
+    pub modloader_priority: Option<i64>,
+    pub modloader_folders: Vec<String>,
 }
 
 impl ModMetaCache {
@@ -453,8 +461,10 @@ pub fn insert_group(conn: &Connection, name: &str, slug: &str) -> anyhow::Result
 pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> anyhow::Result<()> {
     conn.execute(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
-         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10, screenshots = ?11
-         WHERE id = ?12",
+         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10, screenshots = ?11,
+         variant_group = ?12, variant_name = ?13, conflicts = ?14, modloader_priority = ?15,
+         modloader_folders = ?16
+         WHERE id = ?17",
         params![
             cache.mod_id,
             cache.version,
@@ -467,6 +477,11 @@ pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> a
             json_vec(&cache.tags),
             json_components(&cache.components),
             json_vec(&cache.screenshots),
+            cache.variant_group,
+            cache.variant_name,
+            json_vec(&cache.conflicts),
+            cache.modloader_priority,
+            json_vec(&cache.modloader_folders),
             id,
         ],
     )?;
@@ -704,7 +719,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Applies any pending schema migration. The whole chain runs inside a single
 /// transaction: a failure rolls everything back and `user_version` is only
@@ -739,6 +754,9 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         if version < 7 {
             migrate_to_v7(conn)?;
         }
+        if version < 8 {
+            migrate_to_v8(conn)?;
+        }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
     })();
@@ -765,6 +783,40 @@ fn migrate_to_v7(conn: &Connection) -> anyhow::Result<()> {
     if !cols.iter().any(|c| c.as_str() == "screenshots") {
         log::info("Migrando schema: ALTER TABLE mods ADD COLUMN screenshots TEXT");
         conn.execute("ALTER TABLE mods ADD COLUMN screenshots TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// Adds the variant/conflict/ModLoader cache columns. Introspection based and
+/// idempotent.
+fn migrate_to_v8(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for (name, sql) in [
+        (
+            "variant_group",
+            "ALTER TABLE mods ADD COLUMN variant_group TEXT",
+        ),
+        (
+            "variant_name",
+            "ALTER TABLE mods ADD COLUMN variant_name TEXT",
+        ),
+        ("conflicts", "ALTER TABLE mods ADD COLUMN conflicts TEXT"),
+        (
+            "modloader_priority",
+            "ALTER TABLE mods ADD COLUMN modloader_priority INTEGER",
+        ),
+        (
+            "modloader_folders",
+            "ALTER TABLE mods ADD COLUMN modloader_folders TEXT",
+        ),
+    ] {
+        if !cols.iter().any(|c| c.as_str() == name) {
+            log::info(format!("Migrando schema: {sql}"));
+            conn.execute(sql, [])?;
+        }
     }
     Ok(())
 }
@@ -1319,13 +1371,23 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
         screenshots: meta.screenshots.clone().unwrap_or_default(),
         tags: meta.tags.clone().unwrap_or_default(),
         components: meta.components.clone().unwrap_or_default(),
+        variant_group: meta.variant.as_ref().map(|v| v.group.clone()),
+        variant_name: meta.variant.as_ref().and_then(|v| v.name.clone()),
+        conflicts: meta.conflicts.clone(),
+        modloader_priority: meta.modloader.as_ref().and_then(|m| m.priority),
+        modloader_folders: meta
+            .modloader
+            .as_ref()
+            .and_then(|m| m.folders.clone())
+            .unwrap_or_default(),
     }
 }
 
 /// Loads the cached metadata for a mod (empty default if none was discovered).
 pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache> {
     let mut stmt = conn.prepare(
-        "SELECT mod_id, version, author, url, description, cover, mount, guides, tags, components, screenshots
+        "SELECT mod_id, version, author, url, description, cover, mount, guides, tags, components, screenshots,
+                variant_group, variant_name, conflicts, modloader_priority, modloader_folders
          FROM mods WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
@@ -1341,6 +1403,11 @@ pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache>
             tags: parse_json_list(row.get(8)?),
             components: parse_components(row.get(9)?),
             screenshots: parse_json_list(row.get(10)?),
+            variant_group: row.get(11)?,
+            variant_name: row.get(12)?,
+            conflicts: parse_json_list(row.get(13)?),
+            modloader_priority: row.get(14)?,
+            modloader_folders: parse_json_list(row.get(15)?),
         })
     })?;
     Ok(rows.next().transpose()?.unwrap_or_default())
@@ -1354,8 +1421,10 @@ pub fn update_mod_meta(
 ) -> anyhow::Result<()> {
     conn.execute(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
-         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10, screenshots = ?11
-         WHERE id = ?12",
+         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10, screenshots = ?11,
+         variant_group = ?12, variant_name = ?13, conflicts = ?14, modloader_priority = ?15,
+         modloader_folders = ?16
+         WHERE id = ?17",
         params![
             meta.as_ref().and_then(|m| m.id.clone()),
             meta.as_ref().and_then(|m| m.version.clone()),
@@ -1369,6 +1438,22 @@ pub fn update_mod_meta(
             meta.as_ref()
                 .and_then(|m| json_components(m.components.as_deref().unwrap_or(&[]))),
             json_list(&meta.as_ref().and_then(|m| m.screenshots.clone())),
+            meta.as_ref()
+                .and_then(|m| m.variant.as_ref())
+                .map(|v| v.group.clone()),
+            meta.as_ref()
+                .and_then(|m| m.variant.as_ref())
+                .and_then(|v| v.name.clone()),
+            json_list(&meta.as_ref().map(|m| m.conflicts.clone())),
+            meta.as_ref()
+                .and_then(|m| m.modloader.as_ref())
+                .and_then(|ml| ml.priority),
+            json_list(
+                &meta
+                    .as_ref()
+                    .and_then(|m| m.modloader.as_ref())
+                    .and_then(|ml| ml.folders.clone())
+            ),
             id,
         ],
     )?;
@@ -1993,6 +2078,11 @@ mod tests {
             "tags",
             "components",
             "screenshots",
+            "variant_group",
+            "variant_name",
+            "conflicts",
+            "modloader_priority",
+            "modloader_folders",
         ] {
             assert!(cols.contains(&c.to_string()), "falta columna {c}");
         }

@@ -1,11 +1,13 @@
 pub mod color;
 pub mod config;
 pub mod conflicts;
+pub mod constraints;
 pub mod db;
 pub mod games;
 pub mod launcher;
 pub mod log;
 pub mod meta;
+pub mod modloader;
 pub mod overlay;
 pub mod resolver;
 pub mod userdata;

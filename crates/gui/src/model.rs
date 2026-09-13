@@ -23,6 +23,13 @@ pub struct ModView {
     pub screenshots: Vec<String>,
     /// Whether the mod folder has a `mod.toml` manifest on disk.
     pub has_manifest: bool,
+    /// Mutually exclusive variant family (`[variant]`).
+    pub variant_group: Option<String>,
+    pub variant_name: Option<String>,
+    /// Incompatible mods (by id or folder).
+    pub conflicts: Vec<String>,
+    /// Mod Loader priority, when declared.
+    pub modloader_priority: Option<i64>,
 }
 
 impl ModView {
@@ -62,6 +69,8 @@ pub struct Snapshot {
     pub dep_status: HashMap<i64, ModDepStatus>,
     /// Folder chains of every required-dependency cycle in the profile.
     pub dep_cycles: Vec<Vec<String>>,
+    /// Variant family (`group`) -> members `(folder, name)`, for the selector.
+    pub variant_members: HashMap<String, Vec<(String, String)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +207,10 @@ mod tests {
             groups: vec!["Graphics".into()],
             screenshots: vec![],
             has_manifest: true,
+            variant_group: None,
+            variant_name: None,
+            conflicts: vec![],
+            modloader_priority: None,
         }
     }
 

@@ -695,8 +695,24 @@ impl GtaMoApp {
                                 .on_hover_text(&line);
                         }
 
-                        if !m.meta.tags.is_empty() || !m.groups.is_empty() {
+                        if m.variant_group.is_some()
+                            || !m.meta.tags.is_empty()
+                            || !m.groups.is_empty()
+                        {
                             ui.horizontal_wrapped(|ui| {
+                                if let Some(group) = &m.variant_group {
+                                    let label =
+                                        m.variant_name.clone().unwrap_or_else(|| group.clone());
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} {label}",
+                                            crate::icons::SWAP_H
+                                        ))
+                                        .small()
+                                        .strong()
+                                        .color(palette.accent),
+                                    );
+                                }
                                 for t in &m.meta.tags {
                                     ui.label(
                                         egui::RichText::new(format!("#{t}"))
@@ -1695,6 +1711,59 @@ impl GtaMoApp {
                         if !m.groups.is_empty() {
                             ui.label("Grupos:");
                             ui.label(m.groups.join(", "));
+                            ui.end_row();
+                        }
+                        if let Some(group) = &m.variant_group {
+                            ui.label("Variante:");
+                            let members = self
+                                .snapshot
+                                .variant_members
+                                .get(group)
+                                .cloned()
+                                .unwrap_or_default();
+                            let current = members
+                                .iter()
+                                .find(|(f, _)| f == &m.folder)
+                                .map(|(_, n)| n.clone())
+                                .unwrap_or_else(|| group.clone());
+                            let mut pick: Option<String> = None;
+                            egui::ComboBox::from_id_salt("detail_variant")
+                                .selected_text(current)
+                                .show_ui(ui, |ui| {
+                                    for (folder, name) in &members {
+                                        if ui.selectable_label(folder == &m.folder, name).clicked()
+                                            && folder != &m.folder
+                                        {
+                                            pick = Some(folder.clone());
+                                        }
+                                    }
+                                });
+                            if let Some(folder) = pick {
+                                let slug = self.snapshot.active_slug.clone();
+                                self.exec(
+                                    vec![
+                                        "ctl".into(),
+                                        "enable".into(),
+                                        folder,
+                                        "--profile".into(),
+                                        slug,
+                                    ],
+                                    false,
+                                );
+                            }
+                            ui.end_row();
+                        }
+                        if !m.conflicts.is_empty() {
+                            ui.label("Conflictos:");
+                            ui.label(
+                                egui::RichText::new(m.conflicts.join(", "))
+                                    .color(theme::active(ui.ctx()).danger),
+                            );
+                            ui.end_row();
+                        }
+                        if let Some(p) = m.modloader_priority {
+                            ui.label("Prioridad ModLoader:");
+                            ui.label(p.to_string());
                             ui.end_row();
                         }
                         if !m.meta.mount.is_empty() {

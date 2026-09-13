@@ -232,7 +232,7 @@ fn fresh_database_bootstraps_to_latest_schema() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let profile: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM profiles WHERE slug = 'default'",
@@ -838,4 +838,81 @@ fn data_rejects_traversal() {
     let t = t.with_config(&game_root);
     let out = t.run(&["ctl", "data", "remove", "../escape", "--yes"]);
     assert!(!out.status.success());
+}
+
+#[test]
+fn variant_enable_disables_siblings() {
+    let t = TempDb::new("variant");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(game_root.join("mods/v4k")).unwrap();
+    std::fs::write(
+        game_root.join("mods/v4k/mod.toml"),
+        "id = \"x:v4k\"\n[variant]\ngroup = \"fam\"\nname = \"4K\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(game_root.join("mods/lite")).unwrap();
+    std::fs::write(
+        game_root.join("mods/lite/mod.toml"),
+        "id = \"x:lite\"\n[variant]\ngroup = \"fam\"\nname = \"LITE\"\n",
+    )
+    .unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "discover"]);
+    t.run_ok(&["ctl", "enable", "v4k"]);
+    t.run_ok(&["ctl", "enable", "lite"]);
+
+    let v = json(&t.run_ok(&["ctl", "list", "--json"]));
+    let enabled: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["enabled"].as_bool().unwrap())
+        .map(|m| m["folder"].as_str().unwrap())
+        .collect();
+    assert_eq!(enabled, vec!["lite"]);
+}
+
+#[test]
+fn conflict_refuses_enable() {
+    let t = TempDb::new("conflictref");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(game_root.join("mods/a")).unwrap();
+    std::fs::write(
+        game_root.join("mods/a/mod.toml"),
+        "id = \"x:a\"\nconflicts = [\"x:b\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(game_root.join("mods/b")).unwrap();
+    std::fs::write(game_root.join("mods/b/mod.toml"), "id = \"x:b\"\n").unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "discover"]);
+    t.run_ok(&["ctl", "enable", "b"]);
+    let out = t.run(&["ctl", "enable", "a"]);
+    assert!(
+        !out.status.success(),
+        "un conflicto debe rechazar el enable"
+    );
+}
+
+#[test]
+fn modloader_show_reports_priorities() {
+    let t = TempDb::new("mlshow");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(game_root.join("mods/pf/modloader/Proper Fixes")).unwrap();
+    std::fs::write(
+        game_root.join("mods/pf/mod.toml"),
+        "id = \"x:pf\"\n[modloader]\npriority = 60\n",
+    )
+    .unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "discover"]);
+    t.run_ok(&["ctl", "enable", "pf"]);
+
+    let v = json(&t.run_ok(&["ctl", "modloader", "show", "--json"]));
+    assert_eq!(v["entries"][0]["name"].as_str().unwrap(), "Proper Fixes");
+    assert_eq!(v["entries"][0]["priority"].as_i64().unwrap(), 60);
+    assert!(v["path"].as_str().unwrap().ends_with("modloader.ini"));
 }

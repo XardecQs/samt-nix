@@ -2,6 +2,7 @@ use gta_mo_core::config;
 use gta_mo_core::conflicts;
 use gta_mo_core::db;
 use gta_mo_core::resolver;
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -235,13 +236,28 @@ impl Backend {
                     name,
                     enabled: m.enabled,
                     order: m.load_order,
-                    meta,
+                    meta: meta.clone(),
                     groups,
                     screenshots,
                     has_manifest,
+                    variant_group: meta.variant_group.clone(),
+                    variant_name: meta.variant_name.clone(),
+                    conflicts: meta.conflicts.clone(),
+                    modloader_priority: meta.modloader_priority,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Variant families: group -> members (folder, name).
+        let mut variant_members: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for m in &mods {
+            if let Some(group) = &m.variant_group {
+                variant_members
+                    .entry(group.clone())
+                    .or_default()
+                    .push((m.folder.clone(), m.name.clone()));
+            }
+        }
 
         let mut all_tags: Vec<String> = Vec::new();
         for m in &mods {
@@ -285,6 +301,7 @@ impl Backend {
             group_counts,
             dep_status,
             dep_cycles,
+            variant_members,
         })
     }
 
@@ -454,6 +471,19 @@ fn merge_meta_caches(cached: db::ModMetaCache, live: db::ModMetaCache) -> db::Mo
         } else {
             live.components
         },
+        variant_group: live.variant_group.or(cached.variant_group),
+        variant_name: live.variant_name.or(cached.variant_name),
+        conflicts: if live.conflicts.is_empty() {
+            cached.conflicts
+        } else {
+            live.conflicts
+        },
+        modloader_priority: live.modloader_priority.or(cached.modloader_priority),
+        modloader_folders: if live.modloader_folders.is_empty() {
+            cached.modloader_folders
+        } else {
+            live.modloader_folders
+        },
     }
 }
 
@@ -515,6 +545,11 @@ mod tests {
             screenshots: vec![],
             tags: vec![],
             components: vec![],
+            variant_group: None,
+            variant_name: None,
+            conflicts: vec![],
+            modloader_priority: None,
+            modloader_folders: vec![],
         };
         let live = ModMeta {
             name: Some("Live Name".into()),

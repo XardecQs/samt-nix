@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS mods (
     tags TEXT,
     components TEXT,
     screenshots TEXT,
+    variant_group TEXT,
+    variant_name TEXT,
+    conflicts TEXT,
+    modloader_priority INTEGER,
+    modloader_folders TEXT,
     CHECK(
         length(folder_name) > 0
         AND folder_name NOT LIKE '%|%'

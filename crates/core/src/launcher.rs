@@ -404,7 +404,16 @@ impl LaunchEngine {
 
             if opts.dry_run {
                 return Ok(LaunchResult {
-                    log: Self::dry_run_report(&cfg, &paths, &profile, &ppaths, &[], opts.debug),
+                    log: Self::dry_run_report(
+                        &cfg,
+                        &paths,
+                        &profile,
+                        &ppaths,
+                        &[],
+                        &[],
+                        &[],
+                        opts.debug,
+                    ),
                 });
             }
 
@@ -417,6 +426,42 @@ impl LaunchEngine {
         }
 
         let resolved = graph.resolve();
+
+        // Cross-mod constraints (mutually exclusive variants, declared
+        // incompatibilities). Abort a real launch; the dry-run report lists them.
+        let mut all_folders: Vec<String> =
+            graph.mods.values().map(|m| m.folder_name.clone()).collect();
+        all_folders.sort();
+        let mut enabled_folders: Vec<String> = graph
+            .mods
+            .values()
+            .filter(|m| m.enabled)
+            .map(|m| m.folder_name.clone())
+            .collect();
+        enabled_folders.sort();
+        let violations = crate::constraints::check(&paths.mods_dir, &all_folders, &enabled_folders);
+        if !violations.is_empty() && !opts.dry_run {
+            let mut msg = String::from("Conflictos entre mods activos:\n");
+            for v in &violations {
+                msg.push_str(&format!("  [X] {}\n", v.message));
+            }
+            anyhow::bail!("{}", msg.trim_end());
+        }
+
+        // Mod Loader priorities for the enabled mods (applied before mounting).
+        let modloader_entries = crate::modloader::entries_for(&paths.mods_dir, &enabled_folders);
+        if !opts.dry_run && !modloader_entries.is_empty() {
+            let ini = crate::modloader::ini_path(&ppaths.upper);
+            if let Err(e) = crate::modloader::apply(&ini, &modloader_entries) {
+                crate::log::warn(format!("No se pudo actualizar '{}': {e}", ini.display()));
+            } else {
+                crate::log::info(format!(
+                    "modloader.ini: {} prioridad(es) aplicada(s) en '{}'.",
+                    modloader_entries.len(),
+                    ini.display()
+                ));
+            }
+        }
 
         if !crate::meta::overlay_safe_path(&paths.base_game) {
             anyhow::bail!(
@@ -454,7 +499,14 @@ impl LaunchEngine {
 
         if opts.dry_run {
             log_output.push_str(&Self::dry_run_report(
-                &cfg, &paths, &profile, &ppaths, &resolved, opts.debug,
+                &cfg,
+                &paths,
+                &profile,
+                &ppaths,
+                &resolved,
+                &modloader_entries,
+                &violations,
+                opts.debug,
             ));
             return Ok(LaunchResult { log: log_output });
         }
@@ -533,12 +585,15 @@ impl LaunchEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dry_run_report(
         cfg: &config::Config,
         paths: &config::RuntimePaths,
         profile: &db::Profile,
         ppaths: &config::ProfilePaths,
         resolved: &[String],
+        modloader: &[(String, i64)],
+        violations: &[crate::constraints::Violation],
         debug: bool,
     ) -> String {
         let mut out = String::new();
@@ -616,6 +671,26 @@ impl LaunchEngine {
             "Ejecutable:                {}\n",
             paths.merged.join(cfg.game_exe()).display()
         ));
+
+        if !violations.is_empty() {
+            out.push_str("\n[!] Conflictos entre mods activos:\n");
+            for v in violations {
+                out.push_str(&format!("  [X] {}\n", v.message));
+            }
+        }
+
+        out.push_str("\nmodloader.ini (prioridades que se aplicarían):\n");
+        if modloader.is_empty() {
+            out.push_str("  (ninguna)\n");
+        } else {
+            for (name, prio) in modloader {
+                out.push_str(&format!("  {name}={prio}\n"));
+            }
+            out.push_str(&format!(
+                "  -> {}\n",
+                crate::modloader::ini_path(&ppaths.upper).display()
+            ));
+        }
 
         out
     }

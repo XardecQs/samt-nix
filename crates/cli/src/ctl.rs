@@ -76,6 +76,22 @@ impl DepJson {
 }
 
 #[derive(Serialize)]
+struct VariantJson {
+    group: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+impl VariantJson {
+    fn from_cache(cache: &db::ModMetaCache) -> Option<Self> {
+        cache.variant_group.as_ref().map(|g| Self {
+            group: g.clone(),
+            name: cache.variant_name.clone(),
+        })
+    }
+}
+
+#[derive(Serialize)]
 struct ModJson {
     id: i64,
     folder: String,
@@ -106,6 +122,12 @@ struct ModJson {
     deps: Vec<DepJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     dependents: Vec<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variant: Option<VariantJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    conflicts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modloader_priority: Option<i64>,
 }
 
 pub fn run(
@@ -218,6 +240,9 @@ pub fn run(
         },
         super::CtlCommand::Manifest { action } => match action {
             super::ManifestAction::Set { ident } => cmd_manifest_set(conn, ident),
+        },
+        super::CtlCommand::Modloader { action } => match action {
+            super::ModloaderAction::Show { json } => cmd_modloader_show(conn, profile_ident, *json),
         },
         super::CtlCommand::Data { action } => cmd_data(conn, action, profile_ident),
         super::CtlCommand::OpenUrl { url } => cmd_open_url(url),
@@ -1026,6 +1051,7 @@ fn cmd_list(
                 .into_iter()
                 .map(|d| d.id)
                 .collect::<Vec<_>>();
+            let variant = VariantJson::from_cache(&meta);
             out.push(ModJson {
                 id: m.id,
                 folder: m.folder_name.clone(),
@@ -1044,6 +1070,9 @@ fn cmd_list(
                 tags: meta.tags,
                 deps,
                 dependents,
+                variant,
+                conflicts: meta.conflicts,
+                modloader_priority: meta.modloader_priority,
             });
         }
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -1159,9 +1188,106 @@ fn cmd_remove(conn: &Connection, ident: &str, yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolves a conflict reference (by `author:slug` or folder) to a folder.
+fn resolve_conflict_ref(
+    reference: &str,
+    by_id: &std::collections::HashMap<String, String>,
+    folders: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let normalized = gta_mo_core::meta::normalize_mod_id(reference);
+    if gta_mo_core::meta::valid_mod_id(&normalized) {
+        if let Some(f) = by_id.get(&normalized) {
+            return Some(f.clone());
+        }
+    }
+    let trimmed = reference.trim().to_string();
+    folders.contains(&trimmed).then_some(trimmed)
+}
+
+/// Enforces variant exclusivity and declared conflicts before enabling `target`.
+///
+/// Aborts when a declared conflict with an already-enabled mod would result,
+/// then disables the other enabled variants of `target`'s family (returning
+/// them) so only one member of a family stays active.
+fn enforce_enable_constraints(
+    conn: &Connection,
+    profile: &db::Profile,
+    target: &db::ModIdentity,
+    mods_dir: &std::path::Path,
+) -> anyhow::Result<Vec<String>> {
+    let target_meta =
+        gta_mo_core::meta::read_mod_meta(mods_dir, &target.folder_name)?.unwrap_or_default();
+    let all = db::load_all_mods_for_profile(conn, profile.id)?;
+
+    let mut by_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut folders: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in &all {
+        folders.insert(m.folder_name.clone());
+        if let Some(id) = gta_mo_core::meta::read_mod_meta(mods_dir, &m.folder_name)
+            .ok()
+            .flatten()
+            .and_then(|mm| mm.id)
+        {
+            by_id.insert(
+                gta_mo_core::meta::normalize_mod_id(&id),
+                m.folder_name.clone(),
+            );
+        }
+    }
+
+    // Conflicts in both directions (target -> other, other -> target).
+    for other in all.iter().filter(|m| m.enabled && m.id != target.id) {
+        let other_meta =
+            gta_mo_core::meta::read_mod_meta(mods_dir, &other.folder_name)?.unwrap_or_default();
+        let hits = |meta: &gta_mo_core::meta::ModMeta, folder: &str| {
+            meta.conflicts
+                .iter()
+                .any(|r| resolve_conflict_ref(r, &by_id, &folders).as_deref() == Some(folder))
+        };
+        if hits(&target_meta, &other.folder_name) || hits(&other_meta, &target.folder_name) {
+            anyhow::bail!(
+                "No se puede activar '{}': es incompatible con '{}' (activado).",
+                target.folder_name,
+                other.folder_name
+            );
+        }
+    }
+
+    // Variant exclusivity: disable the other enabled members of the family.
+    let mut disabled = Vec::new();
+    if let Some(variant) = &target_meta.variant {
+        for other in all.iter().filter(|m| m.enabled && m.id != target.id) {
+            let om =
+                gta_mo_core::meta::read_mod_meta(mods_dir, &other.folder_name)?.unwrap_or_default();
+            if om
+                .variant
+                .as_ref()
+                .map(|v| v.group == variant.group)
+                .unwrap_or(false)
+            {
+                db::set_mod_enabled(conn, profile.id, other.id, false)?;
+                disabled.push(other.folder_name.clone());
+            }
+        }
+    }
+    Ok(disabled)
+}
+
 fn cmd_enable(conn: &Connection, profile: &db::Profile, ident: &str) -> anyhow::Result<()> {
     let m = resolve_mod(conn, ident)?;
     let id = m.id;
+
+    // Variant exclusivity + declared conflicts (via the live manifests).
+    if let Some(mods_dir) = mods_dir_from_config() {
+        let disabled = enforce_enable_constraints(conn, profile, &m, &mods_dir)?;
+        for folder in disabled {
+            log::warn(format!(
+                "Variante '{}' desactivada automáticamente (familia de '{}').",
+                folder, m.folder_name
+            ));
+        }
+    }
+
     let (already_enabled, _) = db::profile_mod_state(conn, profile.id, id)?;
 
     let before: std::collections::HashSet<i64> =
@@ -1454,6 +1580,9 @@ fn cmd_info(
             dependencies: Vec<DepJson>,
             dependents: Vec<DepJson>,
             profiles: Vec<ProfileStateJson>,
+            variant: Option<VariantJson>,
+            conflicts: Vec<String>,
+            modloader_priority: Option<i64>,
         }
 
         #[derive(Serialize)]
@@ -1515,6 +1644,7 @@ fn cmd_info(
             })
             .collect();
 
+        let variant = VariantJson::from_cache(&meta);
         let out = InfoJson {
             id: m.id,
             folder: m.folder_name,
@@ -1543,6 +1673,9 @@ fn cmd_info(
                 .map(|d| DepJson::from_entry(d, true))
                 .collect(),
             profiles: profiles_json,
+            variant,
+            conflicts: meta.conflicts,
+            modloader_priority: meta.modloader_priority,
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -2116,6 +2249,68 @@ fn cmd_manifest_set(conn: &Connection, ident: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------- Mod Loader priorities ----------
+
+fn cmd_modloader_show(
+    conn: &Connection,
+    profile_ident: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let profile = resolve_active_profile(conn, profile_ident)?;
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+    let enabled: Vec<String> = db::load_all_mods_for_profile(conn, profile.id)?
+        .into_iter()
+        .filter(|m| m.enabled)
+        .map(|m| m.folder_name)
+        .collect();
+    let entries = gta_mo_core::modloader::entries_for(&paths.mods_dir, &enabled);
+    let ini = gta_mo_core::modloader::ini_path(&paths.profile_paths(&profile.slug).upper);
+
+    if json {
+        #[derive(Serialize)]
+        struct EntryJson {
+            name: String,
+            priority: i64,
+        }
+        #[derive(Serialize)]
+        struct Out {
+            path: String,
+            profile: String,
+            entries: Vec<EntryJson>,
+        }
+        let out = Out {
+            path: ini.display().to_string(),
+            profile: profile.slug.clone(),
+            entries: entries
+                .iter()
+                .map(|(n, p)| EntryJson {
+                    name: n.clone(),
+                    priority: *p,
+                })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        println!("No hay prioridades de ModLoader declaradas por los mods activos.");
+        return Ok(());
+    }
+    let rows: Vec<Vec<String>> = entries
+        .iter()
+        .map(|(n, p)| vec![n.clone(), p.to_string()])
+        .collect();
+    println!(
+        "{}",
+        render_table(vec!["Carpeta".to_string(), "Prioridad".to_string()], rows,)
+    );
+    log::info(format!("Archivo: {}", ini.display()));
+    Ok(())
+}
+
 // ---------- Profile user data (saves/tracks/screenshots) ----------
 
 fn xdg_open(target: &std::path::Path) -> anyhow::Result<()> {
@@ -2291,6 +2486,12 @@ struct ExportMod {
     tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     components: Vec<gta_mo_core::meta::MetaComponent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variant: Option<gta_mo_core::meta::ModVariant>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    conflicts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modloader: Option<gta_mo_core::meta::ModLoaderMeta>,
 }
 
 impl ExportMod {
@@ -2309,6 +2510,24 @@ impl ExportMod {
             screenshots: cache.screenshots.clone(),
             tags: cache.tags.clone(),
             components: cache.components.clone(),
+            variant: cache
+                .variant_group
+                .as_ref()
+                .map(|g| gta_mo_core::meta::ModVariant {
+                    group: g.clone(),
+                    name: cache.variant_name.clone(),
+                }),
+            conflicts: cache.conflicts.clone(),
+            modloader: if cache.modloader_priority.is_some() || !cache.modloader_folders.is_empty()
+            {
+                Some(gta_mo_core::meta::ModLoaderMeta {
+                    priority: cache.modloader_priority,
+                    folders: (!cache.modloader_folders.is_empty())
+                        .then(|| cache.modloader_folders.clone()),
+                })
+            } else {
+                None
+            },
         }
     }
 
@@ -2325,6 +2544,15 @@ impl ExportMod {
             screenshots: self.screenshots.clone(),
             tags: self.tags.clone(),
             components: self.components.clone(),
+            variant_group: self.variant.as_ref().map(|v| v.group.clone()),
+            variant_name: self.variant.as_ref().and_then(|v| v.name.clone()),
+            conflicts: self.conflicts.clone(),
+            modloader_priority: self.modloader.as_ref().and_then(|m| m.priority),
+            modloader_folders: self
+                .modloader
+                .as_ref()
+                .and_then(|m| m.folders.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -2740,6 +2968,18 @@ fn cmd_health(
         }
     }
 
+    // Variant/conflict constraints (live manifests) and ModLoader priorities.
+    let all_folders: Vec<String> = folders.values().cloned().collect();
+    let enabled_folders: Vec<String> = db::load_all_mods_for_profile(conn, profile.id)?
+        .into_iter()
+        .filter(|m| m.enabled)
+        .map(|m| m.folder_name)
+        .collect();
+    for v in gta_mo_core::constraints::check(&paths.mods_dir, &all_folders, &enabled_folders) {
+        errors.push(v.message);
+    }
+    let ml_entries = gta_mo_core::modloader::entries_for(&paths.mods_dir, &enabled_folders);
+
     let mut lines: Vec<String> = Vec::new();
     for e in &errors {
         lines.push(format!("[X] {e}"));
@@ -2762,6 +3002,18 @@ fn cmd_health(
             "Resumen: {} error(es), {} advertencia(s)",
             errors.len(),
             warnings.len()
+        );
+    }
+
+    if !ml_entries.is_empty() {
+        println!();
+        println!("modloader.ini:");
+        for (name, prio) in &ml_entries {
+            println!("  {name}={prio}");
+        }
+        println!(
+            "  -> {}",
+            gta_mo_core::modloader::ini_path(&paths.profile_paths(&profile.slug).upper).display()
         );
     }
 
