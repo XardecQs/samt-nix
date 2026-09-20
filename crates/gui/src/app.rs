@@ -15,6 +15,7 @@ enum Tab {
     Profiles,
     Groups,
     Data,
+    Overwrite,
     Dependencies,
     Conflicts,
     Log,
@@ -48,6 +49,7 @@ enum InputAction {
     SetTags(String),
     NewGroup,
     RenameGroup(String),
+    CaptureUpper,
 }
 
 struct InputState {
@@ -94,6 +96,8 @@ enum ConfirmAction {
     DeleteMod(String),
     DeleteGroup(String),
     DeleteUserData(String),
+    DiscardUpper(String),
+    UnmountDiscard,
 }
 
 struct ConfirmState {
@@ -137,6 +141,18 @@ pub struct GtaMoApp {
     userdata_error: Option<String>,
     /// Absolute path of the profile's user-data folder (for previews).
     userdata_base: Option<std::path::PathBuf>,
+    /// Overlay upper (overwrite layer) rows for the active profile.
+    upper: Vec<crate::backend::UpperView>,
+    /// Directory the current `upper` rows were scanned from.
+    upper_dir: Option<std::path::PathBuf>,
+    upper_deleted: usize,
+    upper_pending: bool,
+    upper_include_userfiles: bool,
+    upper_gen: u64,
+    /// Current manual overlay mount, if any (see `gta-mo mount`).
+    mount: Option<gta_mo_core::mount_state::MountInfo>,
+    /// Target mod chosen in the Overwrite tab's "move to mod" control.
+    move_target: Option<String>,
     relations: Option<crate::backend::ModRelations>,
     relations_for: Option<i64>,
     conflicts: Vec<crate::backend::ConflictView>,
@@ -208,6 +224,14 @@ impl GtaMoApp {
             portablegta: false,
             userdata_error: None,
             userdata_base: None,
+            upper: Vec::new(),
+            upper_dir: None,
+            upper_deleted: 0,
+            upper_pending: false,
+            upper_include_userfiles: false,
+            upper_gen: 0,
+            mount: None,
+            move_target: None,
             relations: None,
             relations_for: None,
             conflicts: Vec::new(),
@@ -288,6 +312,8 @@ impl GtaMoApp {
                 self.reload_groups();
                 self.reload_userdata();
                 self.start_conflict_scan();
+                self.reload_mount();
+                self.start_upper_scan();
             }
             Err(e) => self.status = Some(e),
         }
@@ -341,6 +367,53 @@ impl GtaMoApp {
             }
             None => self.conflicts_pending = false,
         }
+    }
+
+    /// Refreshes the manual-mount indicator (cheap: reads `run/mount.json`).
+    fn reload_mount(&mut self) {
+        self.mount = self.backend.mount_status();
+    }
+
+    /// Kicks off a background scan of the overlay upper. When a manual mount is
+    /// active its upper wins over the active profile's, so the user sees what
+    /// the installer is currently writing.
+    fn start_upper_scan(&mut self) {
+        self.upper_gen += 1;
+        self.upper_pending = true;
+        let cfg = match gta_mo_core::config::load_config() {
+            Ok(c) => c,
+            Err(_) => {
+                self.upper_pending = false;
+                self.upper.clear();
+                return;
+            }
+        };
+        let Some(mods_dir) = self.backend.mods_dir_path() else {
+            self.upper_pending = false;
+            return;
+        };
+        let upper_dir = match &self.mount {
+            Some(m) => m.upper.clone(),
+            None => {
+                gta_mo_core::config::RuntimePaths::from_config(&cfg)
+                    .profile_paths(&self.snapshot.active_slug)
+                    .upper
+            }
+        };
+        let spec = self.backend.game_spec();
+        let resolved = self.snapshot.resolved.clone();
+        let gen = self.upper_gen;
+        let tx = self.tx.clone();
+        self.upper_dir = Some(upper_dir.clone());
+        crate::backend::Backend::scan_upper_async(
+            gen,
+            upper_dir,
+            spec.user_data_dir,
+            mods_dir,
+            resolved,
+            spec,
+            tx,
+        );
     }
 
     fn reload_relations(&mut self) {
@@ -419,6 +492,13 @@ impl GtaMoApp {
                     if gen == self.scan_gen {
                         self.conflicts = list;
                         self.conflicts_pending = false;
+                    }
+                }
+                GuiEvent::UpperScan(gen, rows, deleted) => {
+                    if gen == self.upper_gen {
+                        self.upper = rows;
+                        self.upper_deleted = deleted;
+                        self.upper_pending = false;
                     }
                 }
                 GuiEvent::Detached(ok, msg) => {
@@ -1069,6 +1149,7 @@ impl eframe::App for GtaMoApp {
                 Tab::Profiles => self.ui_profiles(ui),
                 Tab::Groups => self.ui_groups(ui),
                 Tab::Data => self.ui_data(ui),
+                Tab::Overwrite => self.ui_overwrite(ui),
                 Tab::Dependencies => self.ui_dependencies(ui),
                 Tab::Conflicts => self.ui_conflicts(ui),
                 Tab::Log => self.ui_log(ui),
@@ -1225,11 +1306,12 @@ impl GtaMoApp {
         // Dependencias and Conflictos appear when their measured width fits, and
         // labels are dropped at very small widths. Everything else lives in
         // "más".
-        let all: [(Tab, &str, &str, Option<usize>); 7] = [
+        let all: [(Tab, &str, &str, Option<usize>); 8] = [
             (Tab::Mods, crate::icons::LIST, "Mods", None),
             (Tab::Profiles, crate::icons::USERS, "Perfiles", None),
             (Tab::Log, crate::icons::INFO, "Log", None),
             (Tab::Data, crate::icons::SAVE, "Datos", None),
+            (Tab::Overwrite, crate::icons::PLUG, "Overwrite", None),
             (Tab::Groups, crate::icons::FOLDER, "Grupos", None),
             (
                 Tab::Dependencies,
@@ -1332,11 +1414,12 @@ impl GtaMoApp {
             + self.snapshot.dep_cycles.len();
         let conflicts = self.conflicts.iter().filter(|c| !c.duplicate).count();
 
-        let items: [(Tab, &str, &str, Option<usize>); 7] = [
+        let items: [(Tab, &str, &str, Option<usize>); 8] = [
             (Tab::Mods, crate::icons::LIST, "Mods", None),
             (Tab::Profiles, crate::icons::USERS, "Perfiles", None),
             (Tab::Groups, crate::icons::FOLDER, "Grupos", None),
             (Tab::Data, crate::icons::SAVE, "Datos", None),
+            (Tab::Overwrite, crate::icons::PLUG, "Overwrite", None),
             (
                 Tab::Dependencies,
                 crate::icons::SWAP_H,
@@ -2797,6 +2880,256 @@ impl GtaMoApp {
         }
     }
 
+    /// Overwrite tab: browse the profile's upper, move files into a mod or
+    /// discard them, and manage a manual/temporary overlay mount.
+    fn ui_overwrite(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        let palette = theme::active(ui.ctx());
+        let slug = self.snapshot.active_slug.clone();
+        let idle = !(self.busy || self.playing);
+
+        // --- Manual mount controls ---
+        ui.group(|ui| {
+            if let Some(m) = self.mount.clone() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} Overlay montado",
+                            crate::icons::PLUG
+                        ))
+                        .strong(),
+                    );
+                    if m.temp {
+                        ui.label(egui::RichText::new("perfil temporal").small().weak());
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Perfil '{}' → {}",
+                        m.profile_name,
+                        m.merged.display()
+                    ))
+                    .small()
+                    .weak(),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button(format!("{} Abrir merged", crate::icons::FOLDER_OPEN))
+                        .clicked()
+                    {
+                        self.open_detached(vec![
+                            "ctl".into(),
+                            "open-path".into(),
+                            m.merged.display().to_string(),
+                        ]);
+                    }
+                    if m.temp
+                        && ui
+                            .button(format!("{} Capturar a mod…", crate::icons::SAVE))
+                            .clicked()
+                    {
+                        self.input = Some(InputState::new(
+                            "Capturar upper a un mod",
+                            "Nombre del mod a crear:",
+                            InputAction::CaptureUpper,
+                        ));
+                    }
+                    if ui
+                        .add_enabled(idle, egui::Button::new(format!("{} Desmontar", crate::icons::SQUARE)))
+                        .clicked()
+                    {
+                        self.exec(vec!["unmount".into()], false);
+                    }
+                    if m.temp
+                        && ui
+                            .add_enabled(
+                                idle,
+                                egui::Button::new(format!("{} Descartar", crate::icons::TRASH)),
+                            )
+                            .clicked()
+                    {
+                        self.confirm = Some(ConfirmState {
+                            title: "Descartar perfil temporal".into(),
+                            message: format!(
+                                "¿Eliminar el upper temporal en '{}'?",
+                                m.upper.display()
+                            ),
+                            action: ConfirmAction::UnmountDiscard,
+                        });
+                    }
+                });
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Overlay no montado.").strong());
+                    if ui
+                        .add_enabled(idle, egui::Button::new(format!("{} Montar", crate::icons::PLAY)))
+                        .on_hover_text("Monta el overlay en run/merged sin lanzar el juego")
+                        .clicked()
+                    {
+                        self.exec(
+                            vec!["mount".into(), "--profile".into(), slug.clone()],
+                            false,
+                        );
+                    }
+                    if ui
+                        .add_enabled(
+                            idle,
+                            egui::Button::new(format!("{} Temporal", crate::icons::PLUS)),
+                        )
+                        .on_hover_text("Perfil efímero para instaladores (MTA): su upper se descarta o captura")
+                        .clicked()
+                    {
+                        self.exec(
+                            vec![
+                                "mount".into(),
+                                "--temp".into(),
+                                "--profile".into(),
+                                slug.clone(),
+                            ],
+                            false,
+                        );
+                    }
+                });
+            }
+        });
+        ui.add_space(6.0);
+
+        // --- Upper header ---
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(format!("Upper del perfil '{slug}'")).strong());
+            if let Some(dir) = self.upper_dir.clone() {
+                if ui
+                    .button(format!("{} Abrir carpeta", crate::icons::FOLDER_OPEN))
+                    .clicked()
+                {
+                    self.open_detached(vec![
+                        "ctl".into(),
+                        "open-path".into(),
+                        dir.display().to_string(),
+                    ]);
+                }
+            }
+            if ui
+                .button(format!("{} Actualizar", crate::icons::REFRESH))
+                .clicked()
+            {
+                self.start_upper_scan();
+            }
+            ui.checkbox(&mut self.upper_include_userfiles, "Mostrar userfiles");
+        });
+        ui.separator();
+
+        if self.upper_deleted > 0 {
+            ui.colored_label(
+                palette.warning,
+                format!(
+                    "[!] {} borrado(s) en el upper no se pueden capturar como mod.",
+                    self.upper_deleted
+                ),
+            );
+        }
+        if self.upper_pending {
+            ui.label("Escaneando el upper…");
+        }
+
+        let rows: Vec<crate::backend::UpperView> = self
+            .upper
+            .iter()
+            .filter(|r| self.upper_include_userfiles || r.kind != "userdata")
+            .cloned()
+            .collect();
+
+        if rows.is_empty() {
+            if !self.upper_pending {
+                ui.label("No hay archivos en el upper.");
+            }
+            return;
+        }
+
+        // Move target (mod folder) shared by all rows.
+        let mod_choices: Vec<(String, String)> = self
+            .snapshot
+            .mods
+            .iter()
+            .map(|m| (m.folder.clone(), m.name.clone()))
+            .collect();
+        if self.move_target.is_none() {
+            self.move_target = mod_choices.first().map(|(f, _)| f.clone());
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Mover a:");
+            let selected = self.move_target.clone().unwrap_or_else(|| "—".to_string());
+            egui::ComboBox::from_id_salt("upper_move_target")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (folder, name) in &mod_choices {
+                        let selected = self.move_target.as_deref() == Some(folder.as_str());
+                        if ui.selectable_label(selected, name).clicked() {
+                            self.move_target = Some(folder.clone());
+                        }
+                    }
+                });
+        });
+        ui.add_space(4.0);
+
+        let mut pending_discard: Option<String> = None;
+        let mut move_req: Option<(String, String)> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("upper_scroll")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                for row in &rows {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&row.kind_label).small().weak());
+                        ui.add(egui::Label::new(egui::RichText::new(&row.name)).truncate())
+                            .on_hover_text(&row.rel);
+                        ui.label(
+                            egui::RichText::new(gta_mo_core::userdata::human_size(row.size))
+                                .small()
+                                .weak(),
+                        );
+                        if row.orphan {
+                            ui.colored_label(
+                                palette.warning,
+                                egui::RichText::new("huérfano").small(),
+                            );
+                        } else {
+                            ui.label(egui::RichText::new(row.providers.join(", ")).small().weak());
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(crate::icons::TRASH).clicked() {
+                                pending_discard = Some(row.rel.clone());
+                            }
+                            if ui
+                                .small_button(format!("{} Mover", crate::icons::ARROW_LEFT))
+                                .clicked()
+                            {
+                                if let Some(target) = self.move_target.clone() {
+                                    move_req = Some((row.rel.clone(), target));
+                                }
+                            }
+                        });
+                    });
+                }
+            });
+
+        if let Some(rel) = pending_discard {
+            self.confirm = Some(ConfirmState {
+                title: "Descartar archivo del upper".into(),
+                message: format!(
+                    "¿Eliminar '{rel}' del upper? Las capas inferiores volverán a verse."
+                ),
+                action: ConfirmAction::DiscardUpper(rel),
+            });
+        }
+        if let Some((rel, folder)) = move_req {
+            self.exec(
+                vec!["ctl".into(), "upper".into(), "move".into(), rel, folder],
+                false,
+            );
+        }
+    }
+
     fn ui_conflicts(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         if self.conflicts.is_empty() {
@@ -3437,6 +3770,9 @@ impl GtaMoApp {
                     false,
                 );
             }
+            InputAction::CaptureUpper => {
+                self.exec(vec!["unmount".into(), "--capture".into(), value], false);
+            }
         }
     }
 
@@ -3493,6 +3829,21 @@ impl GtaMoApp {
                     ],
                     false,
                 );
+            }
+            ConfirmAction::DiscardUpper(rel) => {
+                self.exec(
+                    vec![
+                        "ctl".into(),
+                        "upper".into(),
+                        "discard".into(),
+                        rel,
+                        "--yes".into(),
+                    ],
+                    false,
+                );
+            }
+            ConfirmAction::UnmountDiscard => {
+                self.exec(vec!["unmount".into(), "--discard".into()], false);
             }
         }
     }
@@ -3830,6 +4181,37 @@ fn app_menu_items(
     if overflow.discover || overflow.clean || overflow.launch_opts {
         ui.separator();
     }
+    ui.label(egui::RichText::new("Overlay sin lanzar").small().weak());
+    if app.mount.is_some() {
+        if ui
+            .button(format!("{} Desmontar", crate::icons::SQUARE))
+            .clicked()
+        {
+            app.exec(vec!["unmount".into()], false);
+            ui.close();
+        }
+    } else {
+        if ui
+            .button(format!("{} Montar", crate::icons::PLAY))
+            .clicked()
+        {
+            let slug = app.snapshot.active_slug.clone();
+            app.exec(vec!["mount".into(), "--profile".into(), slug], false);
+            ui.close();
+        }
+        if ui
+            .button(format!("{} Montar (temporal)", crate::icons::PLUS))
+            .clicked()
+        {
+            let slug = app.snapshot.active_slug.clone();
+            app.exec(
+                vec!["mount".into(), "--temp".into(), "--profile".into(), slug],
+                false,
+            );
+            ui.close();
+        }
+    }
+    ui.separator();
     if ui
         .button(format!("{} Preferencias…", crate::icons::SETTINGS))
         .clicked()

@@ -101,11 +101,13 @@ game_root/
 ├── pfx/               # Wine prefix (auto-created by umu-launcher)
 └── run/
     ├── merged/        # Overlay mount point (single)
+    ├── mount.json     # State of a manual `gta-mo mount` (daemon pid, mount id)
     └── profiles/
-        └── <slug>/    # Per-profile state (saves, configs, logs)
-            ├── upper/ # Overlay upperdir (game writes land here)
-            ├── work/  # Overlay workdir
-            └── logs/  # DXVK/Proton logs (when --debug)
+        ├── <slug>/    # Per-profile state (saves, configs, logs)
+        │   ├── upper/ # Overlay upperdir (game writes land here)
+        │   ├── work/  # Overlay workdir
+        │   └── logs/  # DXVK/Proton logs (when --debug)
+        └── tmp-*/     # Throwaway upper of a `gta-mo mount --temp`
 ```
 
 Each profile gets its own `upper/`, so savegames (e.g. with PortableGTA),
@@ -337,6 +339,9 @@ gta-mo ctl which models/player.dff         # who wins that file
 ```
 gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [--no-auto-discover]
 gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/mount namespace (for Steam)
+gta-mo mount [--temp] [--dry-run] [--profile <name>]   # mount the overlay without launching the game
+gta-mo unmount [--capture <mod>] [--discard]           # stop the mount daemon (capture/discard a temp upper)
+gta-mo status [--json]                                 # show the current manual mount, if any
 gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
               [--tag <tag>] [--group <group>] [--author <author>] [--id <id>]
               [--search <text>] [--sort name|folder|author|order|mod_id|version|status] [--dir asc|desc]
@@ -366,7 +371,12 @@ gta-mo ctl data list [--json]                 # profile user data (saves/tracks/
 gta-mo ctl data dir                           # open the profile user-data folder
 gta-mo ctl data open <rel>
 gta-mo ctl data remove <rel> [--yes]
+gta-mo ctl upper list [--include-userfiles] [--orphans] [--json]  # overwrite layer files
+gta-mo ctl upper move <rel> <mod>             # move an upper file into a mod's mounted layer
+gta-mo ctl upper discard <rel> [--yes]        # delete an upper file (lower layers show through)
+gta-mo ctl upper capture <mod> [--from <dir>] # turn the upper into a new mod
 gta-mo ctl open-url <url>                     # open an http(s) URL
+gta-mo ctl open-path <path>                   # open a local file/folder
 gta-mo ctl modloader show [--json]            # Mod Loader priorities for the profile
 gta-mo ctl profile list [--json]
 gta-mo ctl profile create <name>
@@ -430,6 +440,18 @@ gta-mo ctl import <file> [--force]
   profile; `--conflicts` also scans for file conflicts. `conflicts` reports
   paths provided by more than one enabled mod (the first provider in priority
   wins), grouping by severity and ignoring identical duplicates.
+- `mount`/`unmount`/`status` manage the overlay **without launching the game**:
+  `mount` starts a detached daemon that keeps `run/merged` mounted (and holds
+  the launcher lock, so `launch` is refused until you `unmount`). With `--temp`
+  the writes go to a throwaway profile (for installers like MTA) that
+  `unmount --capture <mod>` turns into a mod, or `unmount --discard` deletes.
+- `ctl upper` browses the profile's overlay upper (the "overwrite" layer): files
+  written through `run/merged` that no enabled mod provides are flagged
+  `huérfano`. `upper move` puts a file into a mod's mounted layer (respecting
+  its `mount = [...]`), `upper discard` deletes it, and `upper capture` packs
+  the whole upper into `content/` + `mod.toml`. Overlayfs whiteout markers are
+  reported but cannot be replayed from a mod (a lower layer cannot delete
+  base-game files).
 - `export`/`import` dump and restore the whole state (mods, metadata, profiles,
   dependencies, groups) as JSON. Import replaces the database (asks for
   confirmation unless `--force`).
@@ -517,14 +539,18 @@ Features: mods list with search/tag/group/enabled-status filters and sorting,
 enable/disable and drag&drop load-order controls (with an insertion bar), a rich
 detail panel (author, Mod ID, URL, tags, groups, mount, description, cover,
 screenshot gallery, components, a one-click **Crear mod.toml** for mods
-without a manifest, a **tag editor** and a raw **mod.toml editor**), a
-**variant** badge/selector and declared **conflicts** in the detail panel,
+without a manifest, a **tag editor** and a raw **mod.toml editor**, per-profile
+**notes** and **hide** toggles (per profile and global, with a "Mostrar ocultos"
+filter)), a **variant** badge/selector and declared **conflicts** in the detail panel,
 profiles tab with create/use/rename/copy/delete
 (renaming also moves `run/profiles/<slug>`), a **Datos** tab listing the active
 profile's saves, settings, User Tracks and screenshots written under
 `userfiles/` (with PortableGTA), with screenshot previews in the full-screen
-image viewer, and a recommendation to install PortableGTA, groups tab, a
-**Dependencies** tab
+image viewer, and a recommendation to install PortableGTA, an **Overwrite** tab
+that browses the profile's `upper/` (the overwrite layer), flags files no mod
+provides as *huérfanos* and lets you move them to a mod or discard them, with
+Mount/Unmount controls (including a temporary profile and its capture/discard),
+groups tab, a **Dependencies** tab
 that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run) that
 becomes a **Detener** button while the game runs, Discover/Clean actions, a
@@ -615,6 +641,31 @@ To develop it: `nix develop`, then `cargo run -p gta-mo-gui`.
 3. The binary builds a `fuse-overlayfs` layer stack from the enabled mods of
    the active profile (writing through to that profile's `upper/`) and runs
    the game with `umu-launcher` (Proton)
+
+## Overlay without launching the game
+
+`gta-mo mount` builds the same layer stack as `launch` but stops after mounting
+it at `run/merged`, leaving it available to any program. A detached daemon keeps
+it mounted (and holds the launcher lock, so a concurrent `launch` is refused)
+until `gta-mo unmount`. `gta-mo status` reports the current mount. The GUI's
+**Overwrite** tab offers the same controls.
+
+This is useful to run an installer by hand (e.g. an MTA `.exe` under the same
+`WINEPREFIX`) and inspect what it changed.
+
+**Temporary profiles.** `gta-mo mount --temp` mounts the active profile's mods
+but writes to a throwaway `run/profiles/tmp-*/upper`. After the installer ran:
+
+- `gta-mo unmount --capture <mod>` packs the upper into `mods/<mod>/content/`
+  (plus a minimal `mod.toml` with `mount = ["content"]`) and registers it.
+- `gta-mo unmount --discard` throws the upper away.
+- `gta-mo unmount` keeps it, so it can be captured later with
+  `gta-mo ctl upper capture <mod> --from <dir>`.
+
+The capture skips `userfiles/` (PortableGTA saves/settings/screenshots) and the
+launcher-generated `modloader/modloader.ini`. Overlayfs whiteouts (deletions)
+are **not** captured: a lower-layer mod cannot remove base-game files, so they
+are reported and omitted.
 
 ## Profile user data
 

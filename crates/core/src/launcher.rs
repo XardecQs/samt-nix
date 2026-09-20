@@ -2,9 +2,45 @@ use std::io::IsTerminal;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::{config, db, overlay, resolver};
+use crate::{config, db, mount_state, overlay, resolver, upper};
 
 pub struct LaunchEngine;
+
+/// Config, runtime paths, the open database and the launcher lock, held for the
+/// duration of a launch or a manual mount.
+struct Bootstrap {
+    cfg: config::Config,
+    paths: config::RuntimePaths,
+    conn: rusqlite::Connection,
+    /// Kept alive until the launcher/mount is done: releasing it would let a
+    /// second instance start. After a `fork` the daemon shares this lock.
+    _lock: std::fs::File,
+}
+
+/// Everything needed to mount the overlay for a profile, resolved from the DB.
+struct Prepared {
+    profile: db::Profile,
+    ppaths: config::ProfilePaths,
+    resolved: Vec<String>,
+    modloader_entries: Vec<(String, i64)>,
+    violations: Vec<crate::constraints::Violation>,
+}
+
+/// Result of [`LaunchEngine::mount`].
+pub struct MountOutcome {
+    /// Set instead of `info` for `--dry-run` and for discover/clean shortcuts.
+    pub dry_run: Option<String>,
+    pub info: Option<mount_state::MountInfo>,
+}
+
+/// Result of [`LaunchEngine::unmount`].
+pub struct UnmountOutcome {
+    pub info: mount_state::MountInfo,
+    pub capture: Option<upper::CaptureReport>,
+    pub discarded: bool,
+    /// True when a captured mod was registered in the database.
+    pub registered: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct LaunchOptions {
@@ -39,17 +75,17 @@ pub struct LaunchResult {
 
 impl LaunchEngine {
     pub fn check_system_deps() -> anyhow::Result<()> {
-        let mut missing = Vec::new();
-        for cmd in &["fuse-overlayfs", "umu-run"] {
-            if which::which(cmd).is_err() {
-                missing.push(*cmd);
-            }
+        Self::check_overlay_deps()?;
+        if which::which("umu-run").is_err() {
+            anyhow::bail!("Falta 'umu-run'. Instala umu-launcher para lanzar el juego con Proton.");
         }
-        if !missing.is_empty() {
-            anyhow::bail!(
-                "Faltan dependencias: {}. Asegurate de tener fuse-overlayfs y umu-launcher instalados.",
-                missing.join(", ")
-            );
+        Ok(())
+    }
+
+    /// Only the bits a manual mount needs (`umu-run` is not required).
+    pub fn check_overlay_deps() -> anyhow::Result<()> {
+        if which::which("fuse-overlayfs").is_err() {
+            anyhow::bail!("Falta 'fuse-overlayfs'. Instálalo para montar el overlay.");
         }
         Ok(())
     }
@@ -328,11 +364,92 @@ impl LaunchEngine {
     }
 
     pub fn run(opts: &LaunchOptions, mut log: impl FnMut(&str)) -> anyhow::Result<LaunchResult> {
+        let boot = Self::bootstrap(opts)?;
+        if let Some(result) = Self::shortcut_result(&boot, opts, &mut log)? {
+            return Ok(result);
+        }
+
+        // Only an actual launch needs Proton and the overlay tools; discover and
+        // clean must work without them (e.g. from the GUI's "Descubrir" button).
+        Self::check_system_deps()?;
+        Self::validate_paths(&boot.cfg)?;
+
+        let prepared = Self::plan(&boot, opts, false)?;
+
+        if prepared.resolved.is_empty() {
+            log("Sin mods activos — lanzando juego limpio.");
+
+            if opts.dry_run {
+                return Ok(LaunchResult {
+                    log: Self::dry_run_report(&boot, &prepared, opts.debug),
+                });
+            }
+
+            Self::setup_env(
+                &boot.cfg,
+                &boot.paths.wine_prefix,
+                &prepared.ppaths.log_dir,
+                opts.debug,
+            );
+            let exe = boot.paths.base_game.join(boot.cfg.game_exe());
+            Self::launch_game(&exe, &boot.paths.base_game)?;
+            return Ok(LaunchResult {
+                log: "Juego lanzado (limpio).".into(),
+            });
+        }
+
+        let mut log_output = String::new();
+        log_output.push_str("Mods en orden de prioridad:\n");
+        for folder in &prepared.resolved {
+            log_output.push_str(&format!("  - {}\n", folder));
+        }
+
+        if opts.dry_run {
+            log_output.push_str(&Self::dry_run_report(&boot, &prepared, opts.debug));
+            return Ok(LaunchResult { log: log_output });
+        }
+
+        let lowerdir = Self::build_lowerdir(
+            &boot.paths.mods_dir,
+            &prepared.resolved,
+            &boot.paths.base_game,
+        );
+
+        let mut ov = overlay::OverlayMount::mount(
+            &lowerdir,
+            &prepared.ppaths.upper,
+            &prepared.ppaths.work,
+            &boot.paths.merged,
+        )?;
+        ov.start_guard();
+
+        let game_exe = boot.paths.merged.join(boot.cfg.game_exe());
+        if !game_exe.exists() {
+            anyhow::bail!("{} no encontrado tras el montaje", game_exe.display());
+        }
+
+        Self::setup_env(
+            &boot.cfg,
+            &boot.paths.wine_prefix,
+            &prepared.ppaths.log_dir,
+            opts.debug,
+        );
+        log(log_output.trim_end());
+        log("Lanzando juego...");
+        Self::launch_game(&game_exe, &boot.paths.merged)?;
+
+        drop(ov);
+        Ok(LaunchResult { log: String::new() })
+    }
+
+    /// Loads config, takes the launcher lock, opens/migrates the DB, runs the
+    /// legacy-upper migration and auto-discovers mods when configured.
+    fn bootstrap(opts: &LaunchOptions) -> anyhow::Result<Bootstrap> {
         let cfg = config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
         let paths = config::RuntimePaths::from_config(&cfg);
 
         let lock_file = config::lockfile_path();
-        let _lock = Self::acquire_lock(&lock_file)?;
+        let lock = Self::acquire_lock(&lock_file)?;
 
         let db_path = config::db_path();
         let conn = db::open_db(&db_path)?;
@@ -342,37 +459,60 @@ impl LaunchEngine {
 
         let do_discover = opts.discover || (opts.auto_discover && cfg.auto_discover());
         if do_discover {
-            log("Auto-descubriendo mods...");
+            crate::log::info("Auto-descubriendo mods...");
             db::discover_mods(&conn, &paths.mods_dir)?;
         }
 
-        if opts.discover && !opts.clean {
-            return Ok(LaunchResult {
-                log: "Descubrimiento completado.".into(),
-            });
-        }
+        Ok(Bootstrap {
+            cfg,
+            paths,
+            conn,
+            _lock: lock,
+        })
+    }
 
+    /// Handles `--discover`/`--clean`: these return early and never touch the
+    /// overlay. Returns `Some` when the caller must stop.
+    fn shortcut_result(
+        boot: &Bootstrap,
+        opts: &LaunchOptions,
+        log: &mut impl FnMut(&str),
+    ) -> anyhow::Result<Option<LaunchResult>> {
+        if opts.discover && !opts.clean {
+            return Ok(Some(LaunchResult {
+                log: "Descubrimiento completado.".into(),
+            }));
+        }
         if opts.clean {
             log("Eliminando mods huérfanos...");
-            db::clean_orphans(&conn, &paths.mods_dir)?;
-            return Ok(LaunchResult {
+            db::clean_orphans(&boot.conn, &boot.paths.mods_dir)?;
+            return Ok(Some(LaunchResult {
                 log: "Limpieza completada.".into(),
-            });
+            }));
         }
+        Ok(None)
+    }
 
-        // Only an actual launch needs Proton and the overlay tools; discover and
-        // clean must work without them (e.g. from the GUI's "Descubrir" button).
-        Self::check_system_deps()?;
-        Self::validate_paths(&cfg)?;
+    /// Resolves the profile and its enabled mods into an overlay plan, applying
+    /// dependency resolution, cross-mod constraints and Mod Loader priorities.
+    /// When `temp` is set, the upper/work/logs live in a throwaway profile dir.
+    fn plan(boot: &Bootstrap, opts: &LaunchOptions, temp: bool) -> anyhow::Result<Prepared> {
+        let conn = &boot.conn;
+        let cfg = &boot.cfg;
+        let paths = &boot.paths;
 
-        let profile = Self::resolve_profile(&cfg, &conn, opts.profile.as_deref())?;
+        let profile = Self::resolve_profile(cfg, conn, opts.profile.as_deref())?;
+        let ppaths = if temp {
+            paths.profile_paths(&Self::temp_slug())
+        } else {
+            paths.profile_paths(&profile.slug)
+        };
         let profile_id = profile.id;
-        let ppaths = paths.profile_paths(&profile.slug);
 
-        let all_mods = db::load_all_mods_for_profile(&conn, profile_id)?;
+        let all_mods = db::load_all_mods_for_profile(conn, profile_id)?;
         let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
-        let deps = db::load_dependencies(&conn)?;
-        let enabled_ids = db::load_enabled_mod_ids_for_profile(&conn, profile_id)?;
+        let deps = db::load_dependencies(conn)?;
+        let enabled_ids = db::load_enabled_mod_ids_for_profile(conn, profile_id)?;
 
         let mut graph = resolver::DepGraph::new(mods_map, deps, enabled_ids);
         if opts.deps_enable {
@@ -396,39 +536,13 @@ impl LaunchEngine {
         graph.enable_mods_for_deps()?;
         graph.warn_optional_deps();
         if !opts.dry_run {
-            graph.sync_enabled_to_db(&conn, profile_id)?;
-        }
-
-        if graph.enabled_ids.is_empty() {
-            log("Sin mods activos — lanzando juego limpio.");
-
-            if opts.dry_run {
-                return Ok(LaunchResult {
-                    log: Self::dry_run_report(
-                        &cfg,
-                        &paths,
-                        &profile,
-                        &ppaths,
-                        &[],
-                        &[],
-                        &[],
-                        opts.debug,
-                    ),
-                });
-            }
-
-            Self::setup_env(&cfg, &paths.wine_prefix, &ppaths.log_dir, opts.debug);
-            let exe = paths.base_game.join(cfg.game_exe());
-            Self::launch_game(&exe, &paths.base_game)?;
-            return Ok(LaunchResult {
-                log: "Juego lanzado (limpio).".into(),
-            });
+            graph.sync_enabled_to_db(conn, profile_id)?;
         }
 
         let resolved = graph.resolve();
 
         // Cross-mod constraints (mutually exclusive variants, declared
-        // incompatibilities). Abort a real launch; the dry-run report lists them.
+        // incompatibilities). Abort a real mount; the dry-run report lists them.
         let mut all_folders: Vec<String> =
             graph.mods.values().map(|m| m.folder_name.clone()).collect();
         all_folders.sort();
@@ -491,44 +605,199 @@ impl LaunchEngine {
             }
         }
 
-        let mut log_output = String::new();
-        log_output.push_str("Mods en orden de prioridad:\n");
-        for folder in &resolved {
-            log_output.push_str(&format!("  - {}\n", folder));
+        Ok(Prepared {
+            profile,
+            ppaths,
+            resolved,
+            modloader_entries,
+            violations,
+        })
+    }
+
+    /// Mounts the overlay for a profile and keeps it alive from a detached
+    /// daemon, without launching the game. With `temp`, the writes go to a
+    /// throwaway profile directory (for installers like MTA) that can later be
+    /// captured into a mod with [`Self::unmount`].
+    pub fn mount(opts: &LaunchOptions, temp: bool) -> anyhow::Result<MountOutcome> {
+        let boot = Self::bootstrap(opts)?;
+        let mut sink = |_: &str| {};
+        if let Some(result) = Self::shortcut_result(&boot, opts, &mut sink)? {
+            return Ok(MountOutcome {
+                dry_run: Some(result.log),
+                info: None,
+            });
         }
+
+        let state_path = mount_state::state_path(Path::new(&boot.cfg.game_root));
+        if let Some(existing) = mount_state::read_live(&state_path) {
+            anyhow::bail!(
+                "Ya hay un overlay montado manualmente (perfil '{}', pid {}). \
+                 Desmóntalo con `gta-mo unmount`.",
+                existing.profile_name,
+                existing.pid
+            );
+        }
+
+        Self::validate_paths(&boot.cfg)?;
+
+        let prepared = Self::plan(&boot, opts, temp)?;
 
         if opts.dry_run {
-            log_output.push_str(&Self::dry_run_report(
-                &cfg,
-                &paths,
-                &profile,
-                &ppaths,
-                &resolved,
-                &modloader_entries,
-                &violations,
-                opts.debug,
-            ));
-            return Ok(LaunchResult { log: log_output });
+            let mut report = String::new();
+            report.push_str("Mods en orden de prioridad:\n");
+            for folder in &prepared.resolved {
+                report.push_str(&format!("  - {}\n", folder));
+            }
+            report.push_str(&Self::dry_run_report(&boot, &prepared, opts.debug));
+            return Ok(MountOutcome {
+                dry_run: Some(report),
+                info: None,
+            });
         }
 
-        let lowerdir = Self::build_lowerdir(&paths.mods_dir, &resolved, &paths.base_game);
+        // A real mount needs fuse-overlayfs (`umu-run` is not required).
+        Self::check_overlay_deps()?;
 
-        let mut ov =
-            overlay::OverlayMount::mount(&lowerdir, &ppaths.upper, &ppaths.work, &paths.merged)?;
+        std::fs::create_dir_all(&prepared.ppaths.upper)?;
+        std::fs::create_dir_all(&prepared.ppaths.work)?;
+        std::fs::create_dir_all(&boot.paths.merged)?;
+
+        let lowerdir = Self::build_lowerdir(
+            &boot.paths.mods_dir,
+            &prepared.resolved,
+            &boot.paths.base_game,
+        );
+        let mut ov = overlay::OverlayMount::mount(
+            &lowerdir,
+            &prepared.ppaths.upper,
+            &prepared.ppaths.work,
+            &boot.paths.merged,
+        )?;
         ov.start_guard();
+        let Some(mount_id) = ov.mount_id() else {
+            anyhow::bail!("No se pudo identificar el montaje recién creado.");
+        };
 
-        let game_exe = paths.merged.join(cfg.game_exe());
-        if !game_exe.exists() {
-            anyhow::bail!("{} no encontrado tras el montaje", game_exe.display());
+        // Detached daemon: holds the mount (and the inherited launcher lock)
+        // until it receives SIGTERM/SIGINT.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            anyhow::bail!("fork falló: {}", std::io::Error::last_os_error());
+        }
+        if pid == 0 {
+            unsafe { libc::setsid() };
+            crate::log::info(format!(
+                "Overlay montado en '{}'. Desmonta con `gta-mo unmount`.",
+                boot.paths.merged.display()
+            ));
+            overlay::wait_for_shutdown();
+            drop(ov);
+            mount_state::remove(&state_path);
+            std::process::exit(0);
         }
 
-        Self::setup_env(&cfg, &paths.wine_prefix, &ppaths.log_dir, opts.debug);
-        log(log_output.trim_end());
-        log("Lanzando juego...");
-        Self::launch_game(&game_exe, &paths.merged)?;
+        let info = mount_state::MountInfo {
+            slug: prepared.profile.slug.clone(),
+            profile_name: prepared.profile.name.clone(),
+            temp,
+            upper: prepared.ppaths.upper.clone(),
+            merged: boot.paths.merged.clone(),
+            mount_id,
+            pid: pid as u32,
+        };
+        if let Err(e) = mount_state::write(&state_path, &info) {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            anyhow::bail!("No se pudo escribir el estado del montaje: {e}");
+        }
 
-        drop(ov);
-        Ok(LaunchResult { log: String::new() })
+        // The daemon owns the mount now; do not run our destructor.
+        std::mem::forget(ov);
+        Ok(MountOutcome {
+            dry_run: None,
+            info: Some(info),
+        })
+    }
+
+    /// Stops the daemon started by [`Self::mount`] and, for temporary profiles,
+    /// optionally captures or discards its upper.
+    pub fn unmount(capture: Option<&str>, discard: bool) -> anyhow::Result<UnmountOutcome> {
+        let cfg = config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+        let paths = config::RuntimePaths::from_config(&cfg);
+        let state_path = mount_state::state_path(Path::new(&cfg.game_root));
+
+        let Some(info) = mount_state::read_live(&state_path) else {
+            anyhow::bail!("No hay ningún overlay montado manualmente.");
+        };
+        if discard && !info.temp {
+            anyhow::bail!("Solo se puede descartar el upper de un perfil temporal (--temp).");
+        }
+        if let Some(name) = capture {
+            if !valid_mod_folder(name) {
+                anyhow::bail!("Nombre de mod inválido: '{name}'.");
+            }
+        }
+
+        unsafe { libc::kill(info.pid as libc::pid_t, libc::SIGTERM) };
+        if !wait_until_unmounted(&info.merged, info.mount_id, 100, 100) {
+            crate::log::warn("El daemon no desmontó a tiempo; forzando unmount...");
+            if !overlay::unmount_matching(&info.merged, info.mount_id) {
+                anyhow::bail!("No se pudo desmontar '{}'.", info.merged.display());
+            }
+        }
+        // The daemon holds the launcher lock until it exits; wait briefly so a
+        // following `mount`/`launch` does not race with its shutdown.
+        wait_until_dead(info.pid, 200, 20);
+        mount_state::remove(&state_path);
+
+        let mut capture_report = None;
+        let mut registered = false;
+        if let Some(name) = capture {
+            let dest = paths.mods_dir.join(name);
+            let report = upper::capture(
+                &info.upper,
+                &dest,
+                name,
+                cfg.game_spec().user_data_dir,
+                true,
+            )?;
+            capture_report = Some(report);
+            let db_path = config::db_path();
+            if let Ok(conn) = db::open_db(&db_path) {
+                let _ = db::run_migrations(&conn);
+                registered = db::discover_mods(&conn, &paths.mods_dir).is_ok();
+            }
+        }
+
+        let mut discarded = false;
+        if info.temp && (discard || capture.is_some()) {
+            if let Some(root) = info.upper.parent() {
+                let _ = std::fs::remove_dir_all(root);
+                discarded = true;
+            }
+        }
+
+        Ok(UnmountOutcome {
+            info,
+            capture: capture_report,
+            discarded,
+            registered,
+        })
+    }
+
+    /// Current manual mount, if any (stale records are cleaned up).
+    pub fn status() -> anyhow::Result<Option<mount_state::MountInfo>> {
+        let cfg = config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+        let path = mount_state::state_path(Path::new(&cfg.game_root));
+        Ok(mount_state::read_live(&path))
+    }
+
+    /// A unique throwaway profile slug (temporary mounts).
+    fn temp_slug() -> String {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        format!("tmp-{}-{}", std::process::id(), millis)
     }
 
     fn resolve_profile(
@@ -585,20 +854,20 @@ impl LaunchEngine {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn dry_run_report(
-        cfg: &config::Config,
-        paths: &config::RuntimePaths,
-        profile: &db::Profile,
-        ppaths: &config::ProfilePaths,
-        resolved: &[String],
-        modloader: &[(String, i64)],
-        violations: &[crate::constraints::Violation],
-        debug: bool,
-    ) -> String {
+    fn dry_run_report(boot: &Bootstrap, prepared: &Prepared, debug: bool) -> String {
+        let cfg = &boot.cfg;
+        let paths = &boot.paths;
+        let ppaths = &prepared.ppaths;
+        let resolved = &prepared.resolved;
+        let modloader = &prepared.modloader_entries;
+        let violations = &prepared.violations;
+
         let mut out = String::new();
         out.push_str("\n=== DRY RUN: no se montara overlay ni se lanzara el juego ===\n\n");
-        out.push_str(&format!("Perfil: {} ({})\n", profile.name, profile.slug));
+        out.push_str(&format!(
+            "Perfil: {} ({})\n",
+            prepared.profile.name, prepared.profile.slug
+        ));
         out.push_str("lowerdir capas (ordenadas mayor -> menor prioridad):\n");
 
         if resolved.is_empty() {
@@ -694,6 +963,36 @@ impl LaunchEngine {
 
         out
     }
+}
+
+/// Polls until `merged` is no longer the mount `expected` (or tries run out).
+fn wait_until_unmounted(merged: &Path, expected: u64, tries: u32, delay_ms: u64) -> bool {
+    for i in 0..tries {
+        if overlay::current_mount_id(merged) != Some(expected) {
+            return true;
+        }
+        if i < tries - 1 {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+    }
+    overlay::current_mount_id(merged) != Some(expected)
+}
+
+/// Waits until `pid` is no longer alive (or the tries run out).
+fn wait_until_dead(pid: u32, tries: u32, delay_ms: u64) {
+    for i in 0..tries {
+        if !mount_state::is_alive(pid) {
+            return;
+        }
+        if i < tries - 1 {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+    }
+}
+
+/// A mod folder name must be a single path component (no separators).
+fn valid_mod_folder(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\\')
 }
 
 #[cfg(test)]

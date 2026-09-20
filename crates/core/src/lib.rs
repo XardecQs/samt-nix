@@ -8,6 +8,8 @@ pub mod launcher;
 pub mod log;
 pub mod meta;
 pub mod modloader;
+pub mod mount_state;
 pub mod overlay;
 pub mod resolver;
+pub mod upper;
 pub mod userdata;

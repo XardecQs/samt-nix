@@ -56,6 +56,36 @@ pub fn scan_conflicts(
     Ok(conflicts)
 }
 
+/// Builds the full `game-relative path -> providers` index for the enabled mods
+/// in one walk. Used to annotate a whole directory (e.g. the overlay upper)
+/// without re-walking every mod per file.
+pub fn providers_map(
+    mods_dir: &Path,
+    resolved: &[String],
+    spec: &crate::games::GameSpec,
+) -> anyhow::Result<HashMap<String, PathProviders>> {
+    let mut files: HashMap<String, Vec<(String, PathBuf, u64)>> = HashMap::new();
+    for folder in resolved {
+        for layer in crate::meta::mod_layers(mods_dir, folder) {
+            walk(&layer, &layer, folder, &mut files, 0)?;
+        }
+    }
+    let mut out = HashMap::new();
+    for (path, providers) in files {
+        let duplicate = providers_all_equal(&providers);
+        out.insert(
+            path.clone(),
+            PathProviders {
+                providers: providers.iter().map(|(f, _, _)| f.clone()).collect(),
+                sizes: providers.iter().map(|(_, _, s)| *s).collect(),
+                duplicate,
+                severity: severity_for(&path, spec),
+            },
+        );
+    }
+    Ok(out)
+}
+
 /// Result of asking "who provides this game-relative path".
 pub struct PathProviders {
     /// Folders in overlay priority order (first one wins).

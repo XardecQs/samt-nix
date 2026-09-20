@@ -31,8 +31,62 @@ enum Command {
     Launch(LaunchArgs),
     #[command(about = "Launch from Steam (re-execs inside a user/mount namespace)")]
     Steam(LaunchArgs),
+    #[command(about = "Mount the overlay without launching the game (kept alive by a daemon)")]
+    Mount(MountArgs),
+    #[command(about = "Unmount a manual overlay, optionally capturing/discarding its upper")]
+    Unmount(UnmountArgs),
+    #[command(about = "Show the current manual overlay mount, if any")]
+    Status {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
     #[command(about = "Manage mods, profiles, groups and dependencies")]
     Ctl(CtlArgs),
+}
+
+#[derive(Args)]
+struct MountArgs {
+    #[arg(
+        long,
+        help = "Ephemeral profile with a throwaway upper (for installers like MTA)"
+    )]
+    temp: bool,
+
+    #[arg(long, help = "Print the layer stack and exit without mounting")]
+    dry_run: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "deps_ignore",
+        help = "Auto-enable disabled dependencies without prompting"
+    )]
+    deps_enable: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "deps_enable",
+        help = "Skip disabled dependencies without prompting"
+    )]
+    deps_ignore: bool,
+
+    #[arg(
+        long,
+        help = "Do not auto-discover mods/ before mounting, even if auto_discover is set"
+    )]
+    no_auto_discover: bool,
+}
+
+#[derive(Args)]
+struct UnmountArgs {
+    #[arg(
+        long,
+        value_name = "MOD",
+        help = "Capture the mounted upper into a new mod (mods/<MOD>)"
+    )]
+    capture: Option<String>,
+
+    #[arg(long, help = "Discard a temporary profile's upper")]
+    discard: bool,
 }
 
 #[derive(Args)]
@@ -257,8 +311,15 @@ pub enum CtlCommand {
         #[command(subcommand)]
         action: DataAction,
     },
+    #[command(about = "Manage the profile's overlay upper (overwrite layer)")]
+    Upper {
+        #[command(subcommand)]
+        action: UpperAction,
+    },
     #[command(about = "Open an http(s) URL with xdg-open")]
     OpenUrl { url: String },
+    #[command(about = "Open a local file or folder with xdg-open")]
+    OpenPath { path: String },
     #[command(about = "Manage profiles")]
     Profile {
         #[command(subcommand)]
@@ -376,6 +437,46 @@ pub enum DataAction {
 }
 
 #[derive(Subcommand)]
+pub enum UpperAction {
+    #[command(about = "List the files written to the profile's upper")]
+    List {
+        #[arg(long, help = "Include the PortableGTA userfiles/ subtree")]
+        include_userfiles: bool,
+
+        #[arg(long, help = "Show only files no enabled mod provides")]
+        orphans: bool,
+
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Move an upper file into a mod (its mounted layer)")]
+    Move {
+        #[arg(value_name = "PATH", help = "Path relative to the upper")]
+        path: String,
+        #[arg(value_name = "MOD", help = "Target mod (id, folder or name)")]
+        mod_ident: String,
+    },
+    #[command(about = "Delete an upper file so the lower layers show through again")]
+    Discard {
+        #[arg(value_name = "PATH", help = "Path relative to the upper")]
+        path: String,
+        #[arg(long, help = "Skip confirmation")]
+        yes: bool,
+    },
+    #[command(about = "Capture the whole upper into a new mod")]
+    Capture {
+        #[arg(value_name = "MOD", help = "Name of the mod to create")]
+        name: String,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Upper directory to capture (defaults to the active profile's)"
+        )]
+        from: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum GroupAction {
     #[command(about = "List groups")]
     List {
@@ -458,6 +559,9 @@ fn main() {
         }
         Command::Launch(args) => cmd_launch(args, profile.as_deref()),
         Command::Steam(args) => cmd_steam(args, profile.as_deref()),
+        Command::Mount(args) => cmd_mount(args, profile.as_deref()),
+        Command::Unmount(args) => cmd_unmount(args),
+        Command::Status { json } => cmd_status(json),
         Command::Ctl(args) => {
             let db_path = config::db_path();
             db::ensure_db_dir(&db_path).unwrap_or_else(|e| {
@@ -501,6 +605,108 @@ fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
         println!("{}", result.log);
     }
 
+    Ok(())
+}
+
+fn cmd_mount(args: MountArgs, profile: Option<&str>) -> anyhow::Result<()> {
+    let opts = LaunchOptions {
+        dry_run: args.dry_run,
+        debug: false,
+        discover: false,
+        clean: false,
+        auto_discover: !args.no_auto_discover,
+        profile: profile.map(String::from),
+        deps_enable: args.deps_enable,
+        deps_ignore: args.deps_ignore,
+    };
+    let outcome = LaunchEngine::mount(&opts, args.temp)?;
+    if let Some(report) = outcome.dry_run {
+        println!("{report}");
+        return Ok(());
+    }
+    if let Some(info) = outcome.info {
+        let kind = if info.temp { "temporal" } else { "perfil" };
+        println!(
+            "Overlay montado en '{}' ({kind} '{}').",
+            info.merged.display(),
+            info.profile_name
+        );
+        println!("upper:  {}", info.upper.display());
+        if info.temp {
+            println!(
+                "Captura el upper con `gta-mo unmount --capture <mod>` o descártalo con \
+                 `gta-mo unmount --discard`."
+            );
+        } else {
+            println!("Desmonta con `gta-mo unmount`.");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_unmount(args: UnmountArgs) -> anyhow::Result<()> {
+    let outcome = LaunchEngine::unmount(args.capture.as_deref(), args.discard)?;
+    println!(
+        "Overlay desmontado (perfil '{}').",
+        outcome.info.profile_name
+    );
+
+    if let Some(report) = &outcome.capture {
+        println!("Mod capturado: {} archivo(s).", report.moved);
+        if report.deleted_skipped > 0 {
+            println!(
+                "[!] {} borrado(s) del upper no se pueden reproducir desde un mod (se omitieron).",
+                report.deleted_skipped
+            );
+        }
+        if report.userdata_skipped > 0 {
+            println!(
+                "  {} archivo(s) de userfiles omitidos.",
+                report.userdata_skipped
+            );
+        }
+        if report.generated_skipped > 0 {
+            println!(
+                "  {} archivo(s) generados omitidos.",
+                report.generated_skipped
+            );
+        }
+        if !outcome.registered {
+            println!("[!] No se pudo registrar el mod; ejecuta `gta-mo ctl discover`.");
+        }
+    }
+
+    if outcome.discarded {
+        println!("Perfil temporal descartado.");
+    } else if outcome.info.temp {
+        let dir = outcome.info.upper.parent().unwrap_or(&outcome.info.upper);
+        println!(
+            "Perfil temporal conservado en '{}' (captura o descarta más tarde).",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_status(json: bool) -> anyhow::Result<()> {
+    let info = LaunchEngine::status()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&info)?);
+        return Ok(());
+    }
+    match info {
+        Some(i) => {
+            let kind = if i.temp { "temporal" } else { "perfil" };
+            println!(
+                "Overlay montado: {} ({kind} '{}', pid {}).",
+                i.merged.display(),
+                i.profile_name,
+                i.pid
+            );
+            println!("upper:  {}", i.upper.display());
+        }
+        None => println!("No hay ningún overlay montado manualmente."),
+    }
     Ok(())
 }
 

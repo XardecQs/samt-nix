@@ -2,6 +2,7 @@ use gta_mo_core::config;
 use gta_mo_core::conflicts;
 use gta_mo_core::db;
 use gta_mo_core::resolver;
+use gta_mo_core::upper;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -21,6 +22,22 @@ pub enum GuiEvent {
     /// Result of a detached, read-only command (e.g. `ctl open`): `(ok, message)`.
     /// It never marks the app busy, so it can run while the game is playing.
     Detached(bool, String),
+    /// Upper scan for the Overwrite tab: `(gen, rows, deletions)`.
+    UpperScan(u64, Vec<UpperView>, usize),
+}
+
+/// One file in a profile's overlay upper (overwrite layer).
+#[derive(Debug, Clone)]
+pub struct UpperView {
+    pub rel: String,
+    pub name: String,
+    pub size: u64,
+    /// `userdata` / `modloader-ini` / `game`.
+    pub kind: String,
+    pub kind_label: String,
+    /// No enabled mod provides this path.
+    pub orphan: bool,
+    pub providers: Vec<String>,
 }
 
 /// One file conflict for the Conflicts tab.
@@ -341,6 +358,49 @@ impl Backend {
             };
             let _ = tx.send(GuiEvent::ConflictScan(gen, list));
         });
+    }
+
+    /// Scans a profile's upper and annotates each file with its providing mods,
+    /// on a background thread. Results arrive as [`GuiEvent::UpperScan`].
+    pub fn scan_upper_async(
+        gen: u64,
+        upper_dir: PathBuf,
+        user_data_dir: Option<&'static str>,
+        mods_dir: PathBuf,
+        resolved: Vec<String>,
+        spec: &'static gta_mo_core::games::GameSpec,
+        tx: Sender<GuiEvent>,
+    ) {
+        thread::spawn(move || {
+            let scan = upper::scan(&upper_dir, user_data_dir);
+            let providers =
+                conflicts::providers_map(&mods_dir, &resolved, spec).unwrap_or_default();
+            let rows: Vec<UpperView> = scan
+                .files
+                .into_iter()
+                .map(|e| {
+                    let p = providers
+                        .get(&e.rel)
+                        .map(|pp| pp.providers.clone())
+                        .unwrap_or_default();
+                    UpperView {
+                        rel: e.rel,
+                        name: e.name,
+                        size: e.size,
+                        kind: e.kind.key().to_string(),
+                        kind_label: e.kind.label().to_string(),
+                        orphan: p.is_empty(),
+                        providers: p,
+                    }
+                })
+                .collect();
+            let _ = tx.send(GuiEvent::UpperScan(gen, rows, scan.deleted.len()));
+        });
+    }
+
+    /// Current manual overlay mount (reads `run/mount.json`).
+    pub fn mount_status(&self) -> Option<gta_mo_core::mount_state::MountInfo> {
+        gta_mo_core::launcher::LaunchEngine::status().ok().flatten()
     }
 
     /// Runs a read-only CLI command (e.g. `ctl open`) **without** joining the

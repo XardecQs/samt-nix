@@ -955,3 +955,110 @@ fn modloader_show_reports_priorities() {
     assert_eq!(v["entries"][0]["priority"].as_i64().unwrap(), 60);
     assert!(v["path"].as_str().unwrap().ends_with("modloader.ini"));
 }
+
+fn combined(out: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[test]
+fn upper_lists_moves_and_discards() {
+    let t = TempDb::new("upper");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(game_root.join("mods/mymod/content")).unwrap();
+    std::fs::write(
+        game_root.join("mods/mymod/mod.toml"),
+        "mount = [\"content\"]\n",
+    )
+    .unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "discover"]);
+    t.run_ok(&["ctl", "enable", "mymod"]);
+
+    let upper = game_root.join("run/profiles/default/upper");
+    std::fs::create_dir_all(upper.join("data")).unwrap();
+    std::fs::create_dir_all(upper.join("models")).unwrap();
+    std::fs::write(upper.join("data/new.cfg"), "x").unwrap();
+    std::fs::write(upper.join("models/x.dff"), "override").unwrap();
+    std::fs::write(upper.join("models/.wh.gone.dff"), "").unwrap();
+
+    let out = combined(&t.run(&["ctl", "upper", "list"]));
+    assert!(out.contains("data/new.cfg"), "salida: {out}");
+    assert!(out.contains("huérfano"), "salida: {out}");
+    assert!(out.contains("borrado"), "salida: {out}");
+
+    // Moving respects the target's `mount = ["content"]`.
+    t.run_ok(&["ctl", "upper", "move", "data/new.cfg", "mymod"]);
+    assert!(game_root.join("mods/mymod/content/data/new.cfg").exists());
+    assert!(!upper.join("data/new.cfg").exists());
+
+    // Discarding removes the file from the upper.
+    t.run_ok(&["ctl", "upper", "discard", "models/x.dff", "--yes"]);
+    assert!(!upper.join("models/x.dff").exists());
+
+    // Escapes are refused.
+    let out = t.run(&["ctl", "upper", "discard", "../escape", "--yes"]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn upper_capture_creates_and_registers_a_mod() {
+    let t = TempDb::new("uppercap");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    let upper = game_root.join("run/profiles/default/upper");
+    std::fs::create_dir_all(upper.join("models")).unwrap();
+    std::fs::create_dir_all(upper.join("userfiles")).unwrap();
+    std::fs::create_dir_all(upper.join("modloader")).unwrap();
+    std::fs::write(upper.join("models/x.dff"), "x").unwrap();
+    std::fs::write(upper.join("models/.wh.gone.dff"), "").unwrap();
+    std::fs::write(upper.join("userfiles/GTASAsf1.b"), "save").unwrap();
+    std::fs::write(upper.join("modloader/modloader.ini"), "ini").unwrap();
+
+    let out = combined(&t.run(&["ctl", "upper", "capture", "Captured"]));
+    assert!(
+        game_root
+            .join("mods/Captured/content/models/x.dff")
+            .exists(),
+        "salida: {out}"
+    );
+    assert!(!game_root.join("mods/Captured/content/userfiles").exists());
+    assert!(!game_root.join("mods/Captured/content/modloader").exists());
+    let manifest = std::fs::read_to_string(game_root.join("mods/Captured/mod.toml")).unwrap();
+    assert!(manifest.contains("mount"));
+    assert!(manifest.contains("content"));
+
+    let v = json(&t.run_ok(&["ctl", "list", "--json"]));
+    assert!(v
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["folder"] == "Captured"));
+}
+
+#[test]
+fn mount_dry_run_and_status_need_no_overlay() {
+    let t = TempDb::new("mountdry");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(game_root.join("base")).unwrap();
+    std::fs::create_dir_all(game_root.join("mods/m1")).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "discover"]);
+    t.run_ok(&["ctl", "enable", "m1"]);
+
+    let out = t.run_ok(&["mount", "--dry-run"]);
+    assert!(out.contains("DRY RUN"), "salida: {out}");
+    assert!(out.contains("merged"), "salida: {out}");
+
+    let out = t.run_ok(&["status"]);
+    assert!(out.contains("No hay ningún overlay"), "salida: {out}");
+    let v = json(&t.run_ok(&["status", "--json"]));
+    assert!(v.is_null(), "status JSON sin montaje debe ser null: {v}");
+}

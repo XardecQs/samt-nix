@@ -266,7 +266,9 @@ pub fn run(
             super::ModloaderAction::Show { json } => cmd_modloader_show(conn, profile_ident, *json),
         },
         super::CtlCommand::Data { action } => cmd_data(conn, action, profile_ident),
+        super::CtlCommand::Upper { action } => cmd_upper(conn, action, profile_ident),
         super::CtlCommand::OpenUrl { url } => cmd_open_url(url),
+        super::CtlCommand::OpenPath { path } => cmd_open_path(path),
         super::CtlCommand::Profile { action } => cmd_profile(conn, action),
         super::CtlCommand::Group { action } => cmd_group(conn, action, profile_ident),
     }
@@ -2495,6 +2497,16 @@ fn cmd_open_url(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn cmd_open_path(path: &str) -> anyhow::Result<()> {
+    let target = std::path::PathBuf::from(path);
+    if !target.exists() {
+        anyhow::bail!("No existe: {}", target.display());
+    }
+    xdg_open(&target)?;
+    log::info(format!("Abriendo '{}'...", target.display()));
+    Ok(())
+}
+
 fn cmd_data(
     conn: &Connection,
     action: &super::DataAction,
@@ -2602,6 +2614,178 @@ fn cmd_data(
             }
             gta_mo_core::userdata::remove(&upper, subdir, path)?;
             log::info(format!("Eliminado: '{path}'."));
+            Ok(())
+        }
+    }
+}
+
+/// `ctl upper ...`: manage the overlay upper (overwrite layer) of a profile.
+fn cmd_upper(
+    conn: &Connection,
+    action: &super::UpperAction,
+    profile_ident: Option<&str>,
+) -> anyhow::Result<()> {
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+    let spec = cfg.game_spec();
+    let profile = resolve_active_profile(conn, profile_ident)?;
+    let upper = || paths.profile_paths(&profile.slug).upper;
+
+    match action {
+        super::UpperAction::List {
+            include_userfiles,
+            orphans,
+            json,
+        } => {
+            let scan = gta_mo_core::upper::scan(&upper(), spec.user_data_dir);
+            let resolved = resolve_enabled_order(conn, &profile)?;
+            let providers = gta_mo_core::conflicts::providers_map(&paths.mods_dir, &resolved, spec)
+                .unwrap_or_default();
+
+            let rows: Vec<(gta_mo_core::upper::Entry, Vec<String>)> = scan
+                .files
+                .into_iter()
+                .filter(|e| *include_userfiles || e.kind != gta_mo_core::upper::Kind::UserData)
+                .map(|e| {
+                    let p = providers
+                        .get(&e.rel)
+                        .map(|pp| pp.providers.clone())
+                        .unwrap_or_default();
+                    (e, p)
+                })
+                .filter(|(_, p)| !*orphans || p.is_empty())
+                .collect();
+
+            if *json {
+                #[derive(Serialize)]
+                struct UpperJson {
+                    path: String,
+                    name: String,
+                    size: u64,
+                    kind: String,
+                    orphan: bool,
+                    providers: Vec<String>,
+                }
+                let out: Vec<UpperJson> = rows
+                    .iter()
+                    .map(|(e, p)| UpperJson {
+                        path: e.rel.clone(),
+                        name: e.name.clone(),
+                        size: e.size,
+                        kind: e.kind.key().to_string(),
+                        orphan: p.is_empty(),
+                        providers: p.clone(),
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
+
+            if rows.is_empty() {
+                println!("El upper del perfil '{}' está vacío.", profile.name);
+                return Ok(());
+            }
+            let table: Vec<Vec<String>> = rows
+                .iter()
+                .map(|(e, p)| {
+                    vec![
+                        e.kind.label().to_string(),
+                        e.rel.clone(),
+                        gta_mo_core::userdata::human_size(e.size),
+                        if p.is_empty() {
+                            "huérfano".to_string()
+                        } else {
+                            p.join(", ")
+                        },
+                    ]
+                })
+                .collect();
+            println!(
+                "{}",
+                render_table(
+                    vec![
+                        "Tipo".to_string(),
+                        "Archivo".to_string(),
+                        "Tamaño".to_string(),
+                        "Origen".to_string(),
+                    ],
+                    table,
+                )
+            );
+            log::info(format!(
+                "Total: {} archivo(s) en el upper del perfil '{}'.",
+                rows.len(),
+                profile.name
+            ));
+            if !scan.deleted.is_empty() {
+                log::warn(format!(
+                    "{} borrado(s) en el upper no se pueden reproducir desde un mod.",
+                    scan.deleted.len()
+                ));
+            }
+            Ok(())
+        }
+        super::UpperAction::Move { path, mod_ident } => {
+            let mod_id = db::resolve_mod_ident(conn, mod_ident)?;
+            let m = db::get_mod_by_id(conn, mod_id)?
+                .ok_or_else(|| anyhow::anyhow!("Mod no encontrado: {mod_ident}"))?;
+            let layer = gta_mo_core::upper::layer_root_for(&paths.mods_dir, &m.folder_name);
+            let dest = gta_mo_core::upper::move_to_layer(&upper(), path, &layer)?;
+            log::info(format!(
+                "Movido '{path}' a '{}' (mod '{}').",
+                dest.display(),
+                m.folder_name
+            ));
+            Ok(())
+        }
+        super::UpperAction::Discard { path, yes } => {
+            gta_mo_core::upper::resolve_entry(&upper(), path)?;
+            if !yes {
+                eprintln!();
+                log::warn(format!(
+                    "Vas a eliminar '{}' del upper del perfil '{}'.",
+                    path, profile.name
+                ));
+                eprint!("Confirmar eliminación? [s/N]: ");
+                std::io::Write::flush(&mut std::io::stderr()).ok();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let confirm = input.trim().to_lowercase();
+                if confirm != "s" && confirm != "si" {
+                    log::info("Cancelado.");
+                    return Ok(());
+                }
+            }
+            gta_mo_core::upper::discard(&upper(), path)?;
+            log::info(format!("Eliminado del upper: '{path}'."));
+            Ok(())
+        }
+        super::UpperAction::Capture { name, from } => {
+            let source = match from {
+                Some(dir) => std::path::PathBuf::from(dir),
+                None => upper(),
+            };
+            if !source.is_dir() {
+                anyhow::bail!("El upper no existe: {}", source.display());
+            }
+            let dest = paths.mods_dir.join(name);
+            let report =
+                gta_mo_core::upper::capture(&source, &dest, name, spec.user_data_dir, true)?;
+            log::info(format!(
+                "Mod '{name}' creado: {} archivo(s) movido(s).",
+                report.moved
+            ));
+            if report.deleted_skipped > 0 {
+                log::warn(format!(
+                    "{} borrado(s) del upper se omitieron (no reproducibles).",
+                    report.deleted_skipped
+                ));
+            }
+            let (added, updated) = db::discover_mods(conn, &paths.mods_dir)?;
+            log::info(format!(
+                "Registrado en la base de datos (nuevos: {added}, actualizados: {updated})."
+            ));
             Ok(())
         }
     }
