@@ -16,6 +16,8 @@ pub struct ModMeta {
     pub author: Vec<String>,
     pub url: Option<String>,
     pub description: Option<String>,
+    /// License or usage terms stated by the author (e.g. `MIT`), if any.
+    pub license: Option<String>,
     pub cover: Option<String>,
     pub guides: Option<Vec<String>>,
     /// Directory (or list of paths) with extra images for the detail gallery,

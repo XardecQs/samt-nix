@@ -232,7 +232,7 @@ fn fresh_database_bootstraps_to_latest_schema() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8);
+    assert_eq!(version, 10);
     let profile: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM profiles WHERE slug = 'default'",
@@ -779,6 +779,45 @@ fn tag_set_writes_to_mod_toml() {
     // An invalid tag is rejected.
     let out = t.run(&["ctl", "tag", "set", "m1", "Bad Tag"]);
     assert!(!out.status.success());
+}
+
+#[test]
+fn hide_and_notes_are_per_profile() {
+    let t = TempDb::new("hiddennotes");
+    t.run_ok(&["ctl", "add", "m1"]);
+    t.run_ok(&["ctl", "profile", "create", "Second"]);
+
+    // Hidden mods are excluded from the list by default.
+    t.run_ok(&["ctl", "hide", "m1"]);
+    let v = json(&t.run_ok(&["ctl", "list", "--json"]));
+    assert!(
+        v.as_array().unwrap().is_empty(),
+        "un mod oculto no se lista"
+    );
+
+    // --hidden includes them and marks them.
+    let v = json(&t.run_ok(&["ctl", "list", "--json", "--hidden"]));
+    assert!(v[0]["hidden"].as_bool().unwrap());
+
+    // Hidden is per profile: the other profile still sees it.
+    let v = json(&t.run_ok(&["--profile", "second", "ctl", "list", "--json"]));
+    assert!(!v[0]["hidden"].as_bool().unwrap());
+
+    // A global hide affects every profile.
+    t.run_ok(&["ctl", "hide", "m1", "--global"]);
+    let v = json(&t.run_ok(&["--profile", "second", "ctl", "list", "--json", "--hidden"]));
+    assert!(v[0]["hidden"].as_bool().unwrap());
+
+    // Notes are per profile and round-trip.
+    t.run_ok(&["ctl", "note", "m1", "causa CTD en la zona X"]);
+    let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    assert_eq!(v["notes"].as_str().unwrap(), "causa CTD en la zona X");
+    let v = json(&t.run_ok(&["--profile", "second", "ctl", "info", "m1", "--json"]));
+    assert!(v["notes"].is_null(), "la nota es por perfil");
+
+    t.run_ok(&["ctl", "note", "m1", "--clear"]);
+    let v = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    assert!(v["notes"].is_null());
 }
 
 #[test]

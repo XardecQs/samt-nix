@@ -10,6 +10,20 @@ pub struct ModEntry {
     pub name: String,
     pub enabled: bool,
     pub load_order: i64,
+    /// Global hidden flag (`mods.hidden`).
+    pub hidden_global: bool,
+    /// Per-profile override (`profile_mods.hidden`); `None` inherits the global
+    /// flag.
+    pub hidden_profile: Option<bool>,
+    /// Free-form notes for this mod within the profile (`profile_mods.notes`).
+    pub notes: Option<String>,
+}
+
+impl ModEntry {
+    /// Effective hidden state: the profile override wins over the global flag.
+    pub fn hidden(&self) -> bool {
+        self.hidden_profile.unwrap_or(self.hidden_global)
+    }
 }
 
 /// Identity data of a mod, without any profile-scoped state (enabled/order).
@@ -29,6 +43,8 @@ pub struct ModMetaCache {
     pub author: Vec<String>,
     pub url: Option<String>,
     pub description: Option<String>,
+    /// License/usage terms from the manifest (metadata only).
+    pub license: Option<String>,
     pub cover: Option<String>,
     pub mount: Vec<String>,
     pub guides: Vec<String>,
@@ -461,16 +477,17 @@ pub fn insert_group(conn: &Connection, name: &str, slug: &str) -> anyhow::Result
 pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> anyhow::Result<()> {
     conn.execute(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
-         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10, screenshots = ?11,
-         variant_group = ?12, variant_name = ?13, conflicts = ?14, modloader_priority = ?15,
-         modloader_folders = ?16
-         WHERE id = ?17",
+         license = ?6, cover = ?7, mount = ?8, guides = ?9, tags = ?10, components = ?11,
+         screenshots = ?12, variant_group = ?13, variant_name = ?14, conflicts = ?15,
+         modloader_priority = ?16, modloader_folders = ?17
+         WHERE id = ?18",
         params![
             cache.mod_id,
             cache.version,
             json_vec(&cache.author),
             cache.url,
             cache.description,
+            cache.license,
             cache.cover,
             json_vec(&cache.mount),
             json_vec(&cache.guides),
@@ -675,12 +692,14 @@ pub fn mods_in_group(
     group_id: i64,
     profile_id: i64,
 ) -> anyhow::Result<Vec<i64>> {
+    // DISTINCT: a mod can hold both a global and a per-profile membership in
+    // the same group; that is still a single member.
     let mut stmt = conn.prepare(
-        "SELECT mod_id FROM mod_groups
+        "SELECT DISTINCT mod_id FROM mod_groups
          WHERE group_id = ?1 AND (profile_id IS NULL OR profile_id = ?2)",
     )?;
     let rows = stmt.query_map(params![group_id, profile_id], |row| row.get(0))?;
-    rows.collect::<Result<Vec<i64>, _>>().map_err(Into::into)
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 /// Groups a mod belongs to (global memberships plus the profile's own).
@@ -689,8 +708,10 @@ pub fn groups_of_mod_in_profile(
     mod_id: i64,
     profile_id: i64,
 ) -> anyhow::Result<Vec<Group>> {
+    // DISTINCT: global and per-profile memberships in the same group must not
+    // list the group twice for a mod.
     let mut stmt = conn.prepare(
-        "SELECT g.id, g.name, g.slug, g.created_at
+        "SELECT DISTINCT g.id, g.name, g.slug, g.created_at
          FROM groups g
          JOIN mod_groups mg ON mg.group_id = g.id
          WHERE mg.mod_id = ?1 AND (mg.profile_id IS NULL OR mg.profile_id = ?2)
@@ -719,7 +740,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Applies any pending schema migration. The whole chain runs inside a single
 /// transaction: a failure rolls everything back and `user_version` is only
@@ -756,6 +777,12 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         }
         if version < 8 {
             migrate_to_v8(conn)?;
+        }
+        if version < 9 {
+            migrate_to_v9(conn)?;
+        }
+        if version < 10 {
+            migrate_to_v10(conn)?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
@@ -814,6 +841,63 @@ fn migrate_to_v8(conn: &Connection) -> anyhow::Result<()> {
         ),
     ] {
         if !cols.iter().any(|c| c.as_str() == name) {
+            log::info(format!("Migrando schema: {sql}"));
+            conn.execute(sql, [])?;
+        }
+    }
+    Ok(())
+}
+
+/// Adds the `license` metadata cache column. Introspection based and idempotent.
+fn migrate_to_v10(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if !cols.iter().any(|c| c.as_str() == "license") {
+        log::info("Migrando schema: ALTER TABLE mods ADD COLUMN license TEXT");
+        conn.execute("ALTER TABLE mods ADD COLUMN license TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// Adds the hidden flags (`mods.hidden` global, `profile_mods.hidden` override)
+/// and per-profile `notes`. Introspection based and idempotent.
+fn migrate_to_v9(conn: &Connection) -> anyhow::Result<()> {
+    let mod_cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if !mod_cols.iter().any(|c| c.as_str() == "hidden") {
+        log::info("Migrando schema: ALTER TABLE mods ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
+        conn.execute(
+            "ALTER TABLE mods ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+
+    // `profile_mods` exists on every real database (it is created by the v1
+    // bootstrap), but guard anyway so partial/legacy fixtures migrate cleanly.
+    let have_pm: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'profile_mods'",
+        [],
+        |row| row.get(0),
+    )?;
+    if have_pm == 0 {
+        return Ok(());
+    }
+    let pm_cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('profile_mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for (name, sql) in [
+        (
+            "hidden",
+            "ALTER TABLE profile_mods ADD COLUMN hidden INTEGER",
+        ),
+        ("notes", "ALTER TABLE profile_mods ADD COLUMN notes TEXT"),
+    ] {
+        if !pm_cols.iter().any(|c| c.as_str() == name) {
             log::info(format!("Migrando schema: {sql}"));
             conn.execute(sql, [])?;
         }
@@ -1005,7 +1089,8 @@ pub fn load_all_mods_for_profile(
 ) -> anyhow::Result<Vec<ModEntry>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.folder_name, m.name,
-                COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0)
+                COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0),
+                COALESCE(m.hidden, 0), pm.hidden, pm.notes
          FROM mods m
          LEFT JOIN profile_mods pm ON pm.mod_id = m.id AND pm.profile_id = ?1
          ORDER BY pm.load_order DESC",
@@ -1018,6 +1103,9 @@ pub fn load_all_mods_for_profile(
                 name: row.get(2)?,
                 enabled: row.get::<_, i64>(3)? != 0,
                 load_order: row.get(4)?,
+                hidden_global: row.get::<_, i64>(5)? != 0,
+                hidden_profile: row.get::<_, Option<i64>>(6)?.map(|v| v != 0),
+                notes: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1150,6 +1238,49 @@ pub fn set_mod_enabled(
          VALUES (?1, ?2, ?3, 0)
          ON CONFLICT(profile_id, mod_id) DO UPDATE SET enabled = excluded.enabled",
         params![profile_id, mod_id, enabled as i64],
+    )?;
+    Ok(())
+}
+
+/// Sets a mod's **global** hidden flag (`mods.hidden`), inherited by every
+/// profile that has no per-profile override.
+pub fn set_mod_hidden_global(conn: &Connection, mod_id: i64, hidden: bool) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE mods SET hidden = ?1 WHERE id = ?2",
+        params![hidden as i64, mod_id],
+    )?;
+    Ok(())
+}
+
+/// Sets the per-profile hidden override for a mod. `None` clears the override
+/// so the global flag applies again.
+pub fn set_profile_mod_hidden(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+    hidden: Option<bool>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order, hidden)
+         VALUES (?1, ?2, 0, 0, ?3)
+         ON CONFLICT(profile_id, mod_id) DO UPDATE SET hidden = excluded.hidden",
+        params![profile_id, mod_id, hidden.map(|h| h as i64)],
+    )?;
+    Ok(())
+}
+
+/// Sets (or clears with `None`) the free-form notes of a mod in a profile.
+pub fn set_profile_mod_notes(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+    notes: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order, notes)
+         VALUES (?1, ?2, 0, 0, ?3)
+         ON CONFLICT(profile_id, mod_id) DO UPDATE SET notes = excluded.notes",
+        params![profile_id, mod_id, notes],
     )?;
     Ok(())
 }
@@ -1365,6 +1496,7 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
         author: meta.author.clone(),
         url: meta.url.clone(),
         description: meta.description.clone(),
+        license: meta.license.clone(),
         cover: meta.cover.clone(),
         mount: meta.mount.clone().unwrap_or_default(),
         guides: meta.guides.clone().unwrap_or_default(),
@@ -1386,8 +1518,9 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
 /// Loads the cached metadata for a mod (empty default if none was discovered).
 pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache> {
     let mut stmt = conn.prepare(
-        "SELECT mod_id, version, author, url, description, cover, mount, guides, tags, components, screenshots,
-                variant_group, variant_name, conflicts, modloader_priority, modloader_folders
+        "SELECT mod_id, version, author, url, description, license, cover, mount, guides, tags,
+                components, screenshots, variant_group, variant_name, conflicts,
+                modloader_priority, modloader_folders
          FROM mods WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
@@ -1397,17 +1530,18 @@ pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache>
             author: parse_authors(row.get(2)?),
             url: row.get(3)?,
             description: row.get(4)?,
-            cover: row.get(5)?,
-            mount: parse_json_list(row.get(6)?),
-            guides: parse_json_list(row.get(7)?),
-            tags: parse_json_list(row.get(8)?),
-            components: parse_components(row.get(9)?),
-            screenshots: parse_json_list(row.get(10)?),
-            variant_group: row.get(11)?,
-            variant_name: row.get(12)?,
-            conflicts: parse_json_list(row.get(13)?),
-            modloader_priority: row.get(14)?,
-            modloader_folders: parse_json_list(row.get(15)?),
+            license: row.get(5)?,
+            cover: row.get(6)?,
+            mount: parse_json_list(row.get(7)?),
+            guides: parse_json_list(row.get(8)?),
+            tags: parse_json_list(row.get(9)?),
+            components: parse_components(row.get(10)?),
+            screenshots: parse_json_list(row.get(11)?),
+            variant_group: row.get(12)?,
+            variant_name: row.get(13)?,
+            conflicts: parse_json_list(row.get(14)?),
+            modloader_priority: row.get(15)?,
+            modloader_folders: parse_json_list(row.get(16)?),
         })
     })?;
     Ok(rows.next().transpose()?.unwrap_or_default())
@@ -1421,16 +1555,17 @@ pub fn update_mod_meta(
 ) -> anyhow::Result<()> {
     conn.execute(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
-         cover = ?6, mount = ?7, guides = ?8, tags = ?9, components = ?10, screenshots = ?11,
-         variant_group = ?12, variant_name = ?13, conflicts = ?14, modloader_priority = ?15,
-         modloader_folders = ?16
-         WHERE id = ?17",
+         license = ?6, cover = ?7, mount = ?8, guides = ?9, tags = ?10, components = ?11,
+         screenshots = ?12, variant_group = ?13, variant_name = ?14, conflicts = ?15,
+         modloader_priority = ?16, modloader_folders = ?17
+         WHERE id = ?18",
         params![
             meta.as_ref().and_then(|m| m.id.clone()),
             meta.as_ref().and_then(|m| m.version.clone()),
             meta.as_ref().and_then(|m| json_vec(&m.author)),
             meta.as_ref().and_then(|m| m.url.clone()),
             meta.as_ref().and_then(|m| m.description.clone()),
+            meta.as_ref().and_then(|m| m.license.clone()),
             meta.as_ref().and_then(|m| m.cover.clone()),
             json_list(&meta.as_ref().and_then(|m| m.mount.clone())),
             json_list(&meta.as_ref().and_then(|m| m.guides.clone())),
@@ -1528,7 +1663,8 @@ pub fn get_dependencies_of(
 ) -> anyhow::Result<Vec<(ModEntry, bool)>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.folder_name, m.name,
-                COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0), d.required
+                COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0), d.required,
+                COALESCE(m.hidden, 0), pm.hidden, pm.notes
          FROM mod_dependencies d
          JOIN mods m ON d.dependency_id = m.id
          LEFT JOIN profile_mods pm ON pm.mod_id = m.id AND pm.profile_id = ?1
@@ -1542,6 +1678,9 @@ pub fn get_dependencies_of(
                 name: row.get(2)?,
                 enabled: row.get::<_, i64>(3)? != 0,
                 load_order: row.get(4)?,
+                hidden_global: row.get::<_, i64>(6)? != 0,
+                hidden_profile: row.get::<_, Option<i64>>(7)?.map(|v| v != 0),
+                notes: row.get(8)?,
             },
             row.get::<_, i64>(5)? != 0,
         ))
@@ -1556,7 +1695,8 @@ pub fn get_dependents_of(
 ) -> anyhow::Result<Vec<ModEntry>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.folder_name, m.name,
-                COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0)
+                COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0),
+                COALESCE(m.hidden, 0), pm.hidden, pm.notes
          FROM mod_dependencies d
          JOIN mods m ON d.mod_id = m.id
          LEFT JOIN profile_mods pm ON pm.mod_id = m.id AND pm.profile_id = ?1
@@ -1569,6 +1709,9 @@ pub fn get_dependents_of(
             name: row.get(2)?,
             enabled: row.get::<_, i64>(3)? != 0,
             load_order: row.get(4)?,
+            hidden_global: row.get::<_, i64>(5)? != 0,
+            hidden_profile: row.get::<_, Option<i64>>(6)?.map(|v| v != 0),
+            notes: row.get(7)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -2071,6 +2214,7 @@ mod tests {
             "author",
             "url",
             "description",
+            "license",
             "cover",
             "mount",
             "guides",
@@ -2083,6 +2227,7 @@ mod tests {
             "conflicts",
             "modloader_priority",
             "modloader_folders",
+            "hidden",
         ] {
             assert!(cols.contains(&c.to_string()), "falta columna {c}");
         }
@@ -2376,6 +2521,28 @@ mod tests {
         // delete cascades memberships
         delete_group(&conn, gid).unwrap();
         assert!(mods_in_group(&conn, gid, default.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn global_and_profile_membership_do_not_duplicate() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+        let m1 = add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
+        let gid = create_group(&conn, "G").unwrap();
+        let default = active_profile(&conn).unwrap();
+
+        // The same mod in the same group, both global and per-profile: it is a
+        // single membership, computed once.
+        assert!(add_group_membership(&conn, gid, m1, None).unwrap());
+        assert!(add_group_membership(&conn, gid, m1, Some(default.id)).unwrap());
+
+        assert_eq!(mods_in_group(&conn, gid, default.id).unwrap(), vec![m1]);
+        assert_eq!(
+            groups_of_mod_in_profile(&conn, m1, default.id)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

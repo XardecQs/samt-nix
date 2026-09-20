@@ -8,8 +8,7 @@ const LICENSE: &str = "GPL-3.0-or-later";
 
 pub fn show_about(ctx: &egui::Context, settings: &GuiSettings, open: &mut bool) {
     let mut close = false;
-    let narrow = ctx.screen_rect().width() < crate::app::NARROW_BREAKPOINT;
-    crate::app::overlay_page(ctx, "gta_mo_about", narrow, 520.0, |ui| {
+    crate::app::overlay_page(ctx, "gta_mo_about", 520.0, |ui| {
         if crate::app::overlay_header(ui, "Acerca de", "Cerrar") {
             close = true;
         }
@@ -77,13 +76,12 @@ fn diagnostics(settings: &GuiSettings) -> String {
 
 pub fn show_shortcuts(ctx: &egui::Context, open: &mut bool) {
     let mut close = false;
-    let narrow = ctx.screen_rect().width() < crate::app::NARROW_BREAKPOINT;
-    crate::app::overlay_page(ctx, "gta_mo_shortcuts", narrow, 480.0, |ui| {
+    crate::app::overlay_page(ctx, "gta_mo_shortcuts", 480.0, |ui| {
         if crate::app::overlay_header(ui, "Atajos de teclado", "Cerrar") {
             close = true;
         }
         egui::ScrollArea::vertical()
-            .auto_shrink(false)
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 egui::Grid::new("shortcuts")
                     .num_columns(2)

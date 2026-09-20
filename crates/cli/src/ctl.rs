@@ -109,6 +109,8 @@ struct ModJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cover: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mount: Vec<String>,
@@ -128,6 +130,9 @@ struct ModJson {
     conflicts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     modloader_priority: Option<i64>,
+    hidden: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
 }
 
 pub fn run(
@@ -154,6 +159,8 @@ pub fn run(
             search,
             sort,
             dir,
+            hidden,
+            only_hidden,
             json,
         } => {
             let filter = if *enabled {
@@ -179,6 +186,8 @@ pub fn run(
                 filters,
                 sort.clone(),
                 dir.clone(),
+                *hidden,
+                *only_hidden,
                 *json,
             )
         }
@@ -238,6 +247,18 @@ pub fn run(
             super::TagAction::Add { ident, tags } => cmd_tag_add(conn, ident, tags),
             super::TagAction::Remove { ident, tags } => cmd_tag_remove(conn, ident, tags),
         },
+        super::CtlCommand::Hide { ident, global } => {
+            let profile = active()?;
+            cmd_set_hidden(conn, &profile, ident, *global, true)
+        }
+        super::CtlCommand::Unhide { ident, global } => {
+            let profile = active()?;
+            cmd_set_hidden(conn, &profile, ident, *global, false)
+        }
+        super::CtlCommand::Note { ident, text, clear } => {
+            let profile = active()?;
+            cmd_note(conn, &profile, ident, text, *clear)
+        }
         super::CtlCommand::Manifest { action } => match action {
             super::ManifestAction::Set { ident } => cmd_manifest_set(conn, ident),
         },
@@ -977,6 +998,8 @@ fn cmd_list(
     filters: ListFilters,
     sort: Option<String>,
     dir: Option<String>,
+    include_hidden: bool,
+    only_hidden: bool,
     json: bool,
 ) -> anyhow::Result<()> {
     let mods_dir = mods_dir_from_config();
@@ -1001,6 +1024,15 @@ fn cmd_list(
             _ => true,
         })
         .filter(|m| mod_matches_filters(conn, mods_dir.as_deref(), m, &filters, &group_ids))
+        .filter(|m| {
+            if only_hidden {
+                m.hidden()
+            } else if include_hidden {
+                true
+            } else {
+                !m.hidden()
+            }
+        })
         .collect::<Vec<_>>();
 
     if let Some(field) = &sort {
@@ -1063,6 +1095,7 @@ fn cmd_list(
                 author: meta.author,
                 url: meta.url,
                 description: meta.description,
+                license: meta.license,
                 cover: meta.cover,
                 mount: meta.mount,
                 guides: meta.guides,
@@ -1073,6 +1106,8 @@ fn cmd_list(
                 variant,
                 conflicts: meta.conflicts,
                 modloader_priority: meta.modloader_priority,
+                hidden: m.hidden(),
+                notes: m.notes.clone(),
             });
         }
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -1103,6 +1138,11 @@ fn cmd_list(
             "NO".red().to_string()
         };
         let (name, meta) = display_meta(conn, mods_dir.as_deref(), m.id, &m.folder_name, &m.name);
+        let name = if m.hidden() {
+            format!("{name} (oculto)")
+        } else {
+            name
+        };
         let mut row = vec![
             m.id.to_string(),
             status,
@@ -1576,6 +1616,11 @@ fn cmd_info(
     };
     let profiles = db::mod_enabled_in_profiles(conn, id)?;
     let groups = db::groups_of_mod_in_profile(conn, id, profile.id)?;
+    let entry = db::load_all_mods_for_profile(conn, profile.id)?
+        .into_iter()
+        .find(|e| e.id == id);
+    let hidden = entry.as_ref().map(|e| e.hidden()).unwrap_or(false);
+    let notes = entry.and_then(|e| e.notes);
 
     if json {
         #[derive(Serialize)]
@@ -1590,6 +1635,7 @@ fn cmd_info(
             author: Vec<String>,
             url: Option<String>,
             description: Option<String>,
+            license: Option<String>,
             cover: Option<String>,
             mount: Vec<String>,
             guides: Vec<String>,
@@ -1604,6 +1650,8 @@ fn cmd_info(
             variant: Option<VariantJson>,
             conflicts: Vec<String>,
             modloader_priority: Option<i64>,
+            hidden: bool,
+            notes: Option<String>,
         }
 
         #[derive(Serialize)]
@@ -1677,6 +1725,7 @@ fn cmd_info(
             author: meta.author,
             url: meta.url,
             description: meta.description,
+            license: meta.license,
             cover: meta.cover,
             mount: meta.mount,
             guides,
@@ -1697,6 +1746,8 @@ fn cmd_info(
             variant,
             conflicts: meta.conflicts,
             modloader_priority: meta.modloader_priority,
+            hidden,
+            notes,
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -1738,6 +1789,9 @@ fn cmd_info(
         if let Some(d) = &meta.description {
             rows.push(vec![label("Descripción"), d.yellow().to_string()]);
         }
+        if let Some(l) = &meta.license {
+            rows.push(vec![label("Licencia"), l.clone()]);
+        }
         if let Some(c) = &meta.cover {
             rows.push(vec![label("Carátula"), c.clone()]);
         }
@@ -1750,6 +1804,14 @@ fn cmd_info(
         rows.push(vec![label("Tipo"), kind.clone().magenta().to_string()]);
         rows.push(vec![label("Estado"), status.clone()]);
         rows.push(vec![label("Orden"), order.to_string()]);
+        if hidden {
+            rows.push(vec![label("Oculto"), "sí".yellow().to_string()]);
+        }
+        if let Some(n) = &notes {
+            if !n.trim().is_empty() {
+                rows.push(vec![label("Nota"), n.clone()]);
+            }
+        }
         if !groups.is_empty() {
             let names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
             rows.push(vec![label("Grupos"), names.join(", ").cyan().to_string()]);
@@ -1921,6 +1983,9 @@ fn cmd_info(
             meta.author.join(", ").magenta().to_string(),
         ));
     }
+    if let Some(l) = &meta.license {
+        rows.push(("Licencia".to_string(), l.clone()));
+    }
     rows.push((
         "Estado".to_string(),
         format!(
@@ -1934,6 +1999,14 @@ fn cmd_info(
         ),
     ));
     rows.push(("Perfil".to_string(), profile.name.clone()));
+    if hidden {
+        rows.push(("Visibilidad".to_string(), "oculto".yellow().to_string()));
+    }
+    if let Some(n) = &notes {
+        if !n.trim().is_empty() {
+            rows.push(("Nota".to_string(), n.clone()));
+        }
+    }
     if !groups.is_empty() {
         let names: Vec<String> = groups.iter().map(|g| g.name.clone()).take(3).collect();
         let shown = if groups.len() > 3 {
@@ -2270,6 +2343,68 @@ fn cmd_manifest_set(conn: &Connection, ident: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Hides/unhides a mod either globally or in the active profile.
+fn cmd_set_hidden(
+    conn: &Connection,
+    profile: &db::Profile,
+    ident: &str,
+    global: bool,
+    hidden: bool,
+) -> anyhow::Result<()> {
+    let m = resolve_mod(conn, ident)?;
+    if global {
+        db::set_mod_hidden_global(conn, m.id, hidden)?;
+        log::info(format!(
+            "'{}' {} globalmente.",
+            m.folder_name,
+            if hidden { "oculto" } else { "visible" }
+        ));
+    } else {
+        db::set_profile_mod_hidden(conn, profile.id, m.id, Some(hidden))?;
+        log::info(format!(
+            "'{}' {} en el perfil '{}'.",
+            m.folder_name,
+            if hidden { "oculto" } else { "visible" },
+            profile.name
+        ));
+    }
+    Ok(())
+}
+
+/// Shows or edits a mod's notes for the active profile.
+fn cmd_note(
+    conn: &Connection,
+    profile: &db::Profile,
+    ident: &str,
+    text: &[String],
+    clear: bool,
+) -> anyhow::Result<()> {
+    let m = resolve_mod(conn, ident)?;
+    if clear {
+        db::set_profile_mod_notes(conn, profile.id, m.id, None)?;
+        log::info(format!("'{}': nota eliminada.", m.folder_name));
+        return Ok(());
+    }
+    if text.is_empty() {
+        let notes = db::load_all_mods_for_profile(conn, profile.id)?
+            .into_iter()
+            .find(|e| e.id == m.id)
+            .and_then(|e| e.notes);
+        match notes {
+            Some(n) if !n.trim().is_empty() => println!("{n}"),
+            _ => log::info("(sin nota)"),
+        }
+        return Ok(());
+    }
+    let note = text.join(" ");
+    db::set_profile_mod_notes(conn, profile.id, m.id, Some(&note))?;
+    log::info(format!(
+        "'{}': nota guardada en el perfil '{}'.",
+        m.folder_name, profile.name
+    ));
+    Ok(())
+}
+
 // ---------- Mod Loader priorities ----------
 
 fn cmd_modloader_show(
@@ -2496,6 +2631,8 @@ struct ExportMod {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     cover: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     mount: Vec<String>,
@@ -2525,6 +2662,7 @@ impl ExportMod {
             author: cache.author.clone(),
             url: cache.url.clone(),
             description: cache.description.clone(),
+            license: cache.license.clone(),
             cover: cache.cover.clone(),
             mount: cache.mount.clone(),
             guides: cache.guides.clone(),
@@ -2559,6 +2697,7 @@ impl ExportMod {
             author: self.author.clone(),
             url: self.url.clone(),
             description: self.description.clone(),
+            license: self.license.clone(),
             cover: self.cover.clone(),
             mount: self.mount.clone(),
             guides: self.guides.clone(),

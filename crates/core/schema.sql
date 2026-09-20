@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS mods (
     author TEXT,
     url TEXT,
     description TEXT,
+    license TEXT,
     cover TEXT,
     mount TEXT,
     guides TEXT,
@@ -20,6 +21,7 @@ CREATE TABLE IF NOT EXISTS mods (
     conflicts TEXT,
     modloader_priority INTEGER,
     modloader_folders TEXT,
+    hidden INTEGER NOT NULL DEFAULT 0,
     CHECK(
         length(folder_name) > 0
         AND folder_name NOT LIKE '%|%'
@@ -48,6 +50,8 @@ CREATE TABLE IF NOT EXISTS profile_mods (
     mod_id INTEGER NOT NULL,
     enabled INTEGER DEFAULT 0 CHECK(enabled IN (0, 1)),
     load_order INTEGER DEFAULT 0,
+    hidden INTEGER,
+    notes TEXT,
     PRIMARY KEY (profile_id, mod_id),
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
     FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE

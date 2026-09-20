@@ -167,6 +167,7 @@ version = "1.2.0"
 author = ["Autor1", "Autor2"]     # string o lista
 url = "https://github.com/..."
 description = "Descripción larga..."
+license = "MIT"                   # licencia/términos del autor (opcional)
 tags = ["essential", "bugfix"]    # opcional, para organizar/filtrar
 
 cover = "cover.png"                # ruta relativa dentro del mod
@@ -339,6 +340,7 @@ gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/m
 gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
               [--tag <tag>] [--group <group>] [--author <author>] [--id <id>]
               [--search <text>] [--sort name|folder|author|order|mod_id|version|status] [--dir asc|desc]
+              [--hidden|--only-hidden]
 gta-mo ctl add <folder> [--name <name>]
 gta-mo ctl init <folder>                    # create folder + mod.toml template and register the mod
 gta-mo ctl remove <id|folder>
@@ -356,6 +358,9 @@ gta-mo ctl dep remove <mod> <dependency>
 gta-mo ctl tag set <mod> [<tag>...]           # replace tags (no tags = clear)
 gta-mo ctl tag add <mod> <tag>...
 gta-mo ctl tag remove <mod> <tag>...
+gta-mo ctl hide <id|folder> [--global]        # hide from the list (per profile, or all with --global)
+gta-mo ctl unhide <id|folder> [--global]      # show it again
+gta-mo ctl note <id|folder> [<text>...]       # show/set per-profile notes (--clear to remove)
 gta-mo ctl manifest set <mod>                 # replace mod.toml with stdin content
 gta-mo ctl data list [--json]                 # profile user data (saves/tracks/screenshots)
 gta-mo ctl data dir                           # open the profile user-data folder
@@ -407,7 +412,17 @@ gta-mo ctl import <file> [--force]
   plus the profile's own), `--author`, `--id` (stable `author:slug` or folder),
   and `--search` (case-insensitive over name, folder, authors, id, description
   and tags). `--sort` orders by a field (`--dir asc|desc`); without it the list
-  keeps the load-order priority.
+  keeps the load-order priority. Hidden mods are omitted unless `--hidden` (show
+  them too) or `--only-hidden` is given.
+- `hide`/`unhide` mark a mod as hidden so it disappears from the list without
+  affecting the launch. Without `--global` the flag is per profile; `--global`
+  hides it everywhere (a later per-profile `unhide` still overrides it).
+- `note` stores free-form text per mod and per profile (e.g. "causa CTD en la
+  zona X"); `ctl info`/`--json` and the GUI show it.
+- The overlay order respects the configured priority: a dependency is only
+  placed below the mod that requires it, never hoisted above unrelated
+  higher-priority mods. This is the order `launch` mounts and the order the GUI
+  shows as the effective list.
 - `info` shows a compact summary by default; `-v` prints the full output
   (components, guides, dependents, profiles as tables). `open` opens the mod
   folder (or its `--url`) with `xdg-open`.

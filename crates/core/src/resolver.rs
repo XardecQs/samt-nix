@@ -1,5 +1,5 @@
 use crate::db::{DepRef, ModEntry};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Maximum dependency-chain depth walked recursively. Guards against a stack
 /// overflow from a pathological or maliciously deep dependency graph.
@@ -278,81 +278,99 @@ impl DepGraph {
         }
     }
 
+    /// Topological order (top priority first) biased by `load_order`.
+    ///
+    /// A mod is only emitted once every enabled mod that depends on it has
+    /// already been emitted (so a dependency is always layered *below* its
+    /// dependents and the dependent's files win). Among the mods that are
+    /// ready, the one with the highest `load_order` goes first, so unrelated
+    /// dependencies are never hoisted above higher-priority mods just because
+    /// a low-priority mod happens to require them.
     pub fn resolve(&self) -> Vec<String> {
+        let enabled: HashSet<i64> = self.enabled_ids.iter().copied().collect();
+
+        // dep -> enabled parents that depend on it; plus how many of those
+        // parents are still pending (the dep cannot be emitted until 0).
+        let mut dependents_of: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut pending_dependents: HashMap<i64, usize> = HashMap::new();
+        for mid in &self.enabled_ids {
+            if self.skip_ids.contains(mid) {
+                continue;
+            }
+            let required = self.deps.get(mid).into_iter().flatten().copied();
+            let optional = self
+                .optional_deps
+                .get(mid)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|d| enabled.contains(d));
+            for dep in required.chain(optional) {
+                if self.skip_ids.contains(&dep) {
+                    continue;
+                }
+                dependents_of.entry(dep).or_default().push(*mid);
+                *pending_dependents.entry(dep).or_default() += 1;
+            }
+        }
+
+        // Max-heap by (load_order, id): highest priority first.
+        let mut ready: BinaryHeap<(i64, i64)> = BinaryHeap::new();
+        for mid in &self.enabled_ids {
+            if self.skip_ids.contains(mid) {
+                continue;
+            }
+            if pending_dependents.get(mid).copied().unwrap_or(0) == 0 {
+                if let Some(m) = self.mods.get(mid) {
+                    ready.push((m.load_order, *mid));
+                }
+            }
+        }
+
         let mut visited: HashSet<i64> = HashSet::new();
         let mut resolved: Vec<String> = Vec::new();
 
-        let dependency_of: HashSet<i64> = self
-            .enabled_ids
-            .iter()
-            .flat_map(|mid| {
-                self.deps
-                    .get(mid)
-                    .into_iter()
-                    .chain(self.optional_deps.get(mid))
-                    .flatten()
-                    .copied()
-            })
-            .collect();
-
-        for mid in &self.enabled_ids {
-            if dependency_of.contains(mid) {
+        while let Some((_, mid)) = ready.pop() {
+            if !visited.insert(mid) {
                 continue;
             }
-            self.dfs_resolve(*mid, &mut visited, &mut resolved, 0);
+            if let Some(m) = self.mods.get(&mid) {
+                resolved.push(m.folder_name.clone());
+            }
+            if let Some(parents) = dependents_of.get(&mid) {
+                for parent in parents {
+                    let Some(count) = pending_dependents.get_mut(parent) else {
+                        continue;
+                    };
+                    *count = count.saturating_sub(1);
+                    if *count == 0 && !visited.contains(parent) {
+                        if let Some(m) = self.mods.get(parent) {
+                            ready.push((m.load_order, *parent));
+                        }
+                    }
+                }
+            }
+        }
+
+        // A dependency cycle would leave nodes unreachable: emit whatever is
+        // left by priority so nothing is silently dropped (cycles are reported
+        // separately by `detect_cycles`).
+        let mut leftover: Vec<(i64, i64)> = self
+            .enabled_ids
+            .iter()
+            .filter(|id| !visited.contains(id) && !self.skip_ids.contains(id))
+            .filter_map(|id| self.mods.get(id).map(|m| (m.load_order, *id)))
+            .collect();
+        leftover.sort_by_key(|b| std::cmp::Reverse(*b));
+        for (_, id) in leftover {
+            if visited.insert(id) {
+                if let Some(m) = self.mods.get(&id) {
+                    resolved.push(m.folder_name.clone());
+                }
+            }
         }
 
         resolved
-    }
-
-    fn dfs_resolve(
-        &self,
-        mid: i64,
-        visited: &mut HashSet<i64>,
-        resolved: &mut Vec<String>,
-        depth: usize,
-    ) {
-        if visited.contains(&mid) || depth > MAX_DEP_DEPTH {
-            return;
-        }
-        if self.skip_ids.contains(&mid) {
-            return;
-        }
-
-        visited.insert(mid);
-
-        if let Some(m) = self.mods.get(&mid) {
-            resolved.push(m.folder_name.clone());
-        }
-
-        if let Some(dep_ids) = self.deps.get(&mid) {
-            let mut sorted_deps: Vec<(i64, i64)> = dep_ids
-                .iter()
-                .filter_map(|did| self.mods.get(did).map(|m| (m.load_order, *did)))
-                .collect();
-            sorted_deps.sort_by_key(|b| std::cmp::Reverse(b.0));
-
-            for (_, did) in sorted_deps {
-                self.dfs_resolve(did, visited, resolved, depth + 1);
-            }
-        }
-
-        if let Some(opt_ids) = self.optional_deps.get(&mid) {
-            let mut sorted_opt: Vec<(i64, i64)> = opt_ids
-                .iter()
-                .filter_map(|did| {
-                    self.mods
-                        .get(did)
-                        .filter(|m| m.enabled)
-                        .map(|m| (m.load_order, *did))
-                })
-                .collect();
-            sorted_opt.sort_by_key(|b| std::cmp::Reverse(b.0));
-
-            for (_, did) in sorted_opt {
-                self.dfs_resolve(did, visited, resolved, depth + 1);
-            }
-        }
     }
 
     fn mod_folder(&self, id: i64) -> &str {
@@ -495,6 +513,9 @@ mod tests {
                 name: folder.to_string(),
                 enabled,
                 load_order: order,
+                hidden_global: false,
+                hidden_profile: None,
+                notes: None,
             })
             .map(|m| (m.id, m))
             .collect()
@@ -517,6 +538,20 @@ mod tests {
         let d = deps(&[(1, 2, true)]);
         let g = DepGraph::new(m, d, vec![1, 2]);
         assert_eq!(g.resolve(), vec!["mod".to_string(), "dep".to_string()]);
+    }
+
+    #[test]
+    fn unrelated_low_priority_dep_is_not_hoisted() {
+        // "a" (order 20) depends on "dep" (order 1); "b" (order 18) is
+        // independent. The dependency must stay below its dependent but must
+        // not jump above the higher-priority "b".
+        let m = mods(&[(1, "dep", true, 1), (2, "b", true, 18), (3, "a", true, 20)]);
+        let d = deps(&[(3, 1, true)]);
+        let g = DepGraph::new(m, d, vec![3, 2, 1]);
+        assert_eq!(
+            g.resolve(),
+            vec!["a".to_string(), "b".to_string(), "dep".to_string()]
+        );
     }
 
     #[test]
@@ -543,7 +578,9 @@ mod tests {
             (3, "opt_off", false, 10),
         ]);
         let d = deps(&[(1, 2, false), (1, 3, false)]);
-        let g = DepGraph::new(m, d, vec![1]);
+        // `enabled_ids` is the authoritative enabled set: opt_off is enabled in
+        // its entry but disabled in the profile, so it must stay out.
+        let g = DepGraph::new(m, d, vec![1, 2]);
         let out = g.resolve();
         assert!(out.contains(&"opt_on".to_string()));
         assert!(!out.contains(&"opt_off".to_string()));

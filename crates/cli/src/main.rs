@@ -110,6 +110,16 @@ pub enum CtlCommand {
         #[arg(long, value_parser = ["asc", "desc"], help = "Sort direction (default asc, desc for --sort order)")]
         dir: Option<String>,
 
+        #[arg(long = "hidden", group = "hidden_filter", help = "Include hidden mods")]
+        hidden: bool,
+
+        #[arg(
+            long = "only-hidden",
+            group = "hidden_filter",
+            help = "Show only hidden mods"
+        )]
+        only_hidden: bool,
+
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
@@ -207,6 +217,30 @@ pub enum CtlCommand {
     Tag {
         #[command(subcommand)]
         action: TagAction,
+    },
+    #[command(about = "Hide a mod from the list (per profile; --global for all profiles)")]
+    Hide {
+        ident: String,
+        #[arg(long, help = "Hide it globally instead of only in the active profile")]
+        global: bool,
+    },
+    #[command(about = "Unhide a mod")]
+    Unhide {
+        ident: String,
+        #[arg(long, help = "Clear the global flag instead of the profile override")]
+        global: bool,
+    },
+    #[command(about = "Show or edit a mod's notes for the active profile")]
+    Note {
+        ident: String,
+        #[arg(
+            value_name = "TEXT",
+            num_args = 0..,
+            help = "Note text (omit to print the current note)"
+        )]
+        text: Vec<String>,
+        #[arg(long, help = "Clear the note")]
+        clear: bool,
     },
     #[command(about = "Edit a mod's mod.toml manifest")]
     Manifest {

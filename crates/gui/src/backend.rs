@@ -18,6 +18,9 @@ pub enum GuiEvent {
     LogLine(String),
     CommandDone(bool, String),
     ConflictScan(u64, Vec<ConflictView>),
+    /// Result of a detached, read-only command (e.g. `ctl open`): `(ok, message)`.
+    /// It never marks the app busy, so it can run while the game is playing.
+    Detached(bool, String),
 }
 
 /// One file conflict for the Conflicts tab.
@@ -244,6 +247,9 @@ impl Backend {
                     variant_name: meta.variant_name.clone(),
                     conflicts: meta.conflicts.clone(),
                     modloader_priority: meta.modloader_priority,
+                    hidden: m.hidden(),
+                    hidden_global: m.hidden_global,
+                    notes: m.notes.clone(),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -334,6 +340,37 @@ impl Backend {
                 Err(_) => Vec::new(),
             };
             let _ = tx.send(GuiEvent::ConflictScan(gen, list));
+        });
+    }
+
+    /// Runs a read-only CLI command (e.g. `ctl open`) **without** joining the
+    /// serialized job queue, so it still works while a launch (the game) is
+    /// running. Errors are reported as [`GuiEvent::Detached`] and never clear
+    /// the app's `busy` state.
+    pub fn spawn_cli_detached(&self, args: Vec<String>, tx: Sender<GuiEvent>) {
+        let bin = self.bin.clone();
+        thread::spawn(move || {
+            let out = Command::new(&bin).args(&args).stdin(Stdio::null()).output();
+            match out {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    let msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                    let _ = tx.send(GuiEvent::Detached(
+                        false,
+                        if msg.is_empty() {
+                            format!("El comando terminó con error: {}", o.status)
+                        } else {
+                            msg
+                        },
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(GuiEvent::Detached(
+                        false,
+                        format!("No se pudo ejecutar gta-mo: {e}"),
+                    ));
+                }
+            }
         });
     }
 
@@ -445,6 +482,7 @@ fn merge_meta_caches(cached: db::ModMetaCache, live: db::ModMetaCache) -> db::Mo
         },
         url: live.url.or(cached.url),
         description: live.description.or(cached.description),
+        license: live.license.or(cached.license),
         cover: live.cover.or(cached.cover),
         mount: if live.mount.is_empty() {
             cached.mount
@@ -539,6 +577,7 @@ mod tests {
             author: vec!["Old".into()],
             url: None,
             description: None,
+            license: None,
             cover: Some("c.png".into()),
             mount: vec![],
             guides: vec![],

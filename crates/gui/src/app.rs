@@ -75,6 +75,12 @@ struct ManifestEditor {
     error: Option<String>,
 }
 
+/// State of the per-profile notes editor dialog.
+struct NotesEditor {
+    folder: String,
+    content: String,
+}
+
 /// One row of the Data tab (owned so `self` can be used while rendering).
 struct UserDataRow {
     rel: String,
@@ -123,6 +129,7 @@ pub struct GtaMoApp {
     input: Option<InputState>,
     confirm: Option<ConfirmState>,
     manifest_editor: Option<ManifestEditor>,
+    notes_editor: Option<NotesEditor>,
     /// Profile user data (saves/tracks/screenshots), refreshed on `refresh`.
     userdata: Vec<gta_mo_core::userdata::Entry>,
     /// Whether an enabled mod provides PortableGTA.
@@ -196,6 +203,7 @@ impl GtaMoApp {
             input: None,
             confirm: None,
             manifest_editor: None,
+            notes_editor: None,
             userdata: Vec::new(),
             portablegta: false,
             userdata_error: None,
@@ -366,6 +374,12 @@ impl GtaMoApp {
         self.pump();
     }
 
+    /// Runs a read-only command out of band (never enters `pending`, so it works
+    /// while the game is playing). Used for `ctl open` / `ctl data open`.
+    fn open_detached(&self, args: Vec<String>) {
+        self.backend.spawn_cli_detached(args, self.tx.clone());
+    }
+
     /// Queues a command whose stdin is the given text (e.g. `ctl manifest set`).
     fn exec_stdin(&mut self, args: Vec<String>, stdin: String) {
         self.pending.push_back(Job {
@@ -405,6 +419,12 @@ impl GtaMoApp {
                     if gen == self.scan_gen {
                         self.conflicts = list;
                         self.conflicts_pending = false;
+                    }
+                }
+                GuiEvent::Detached(ok, msg) => {
+                    if !ok {
+                        self.log.push(format!("[error] {msg}"));
+                        self.toasts.push(ctx, crate::toasts::ToastKind::Error, msg);
                     }
                 }
                 GuiEvent::CommandDone(ok, msg) => {
@@ -815,6 +835,7 @@ impl eframe::App for GtaMoApp {
             && (self.input.is_some()
                 || self.confirm.is_some()
                 || self.manifest_editor.is_some()
+                || self.notes_editor.is_some()
                 || self.show_preferences
                 || self.show_about
                 || self.show_shortcuts)
@@ -823,6 +844,7 @@ impl eframe::App for GtaMoApp {
             self.input = None;
             self.confirm = None;
             self.manifest_editor = None;
+            self.notes_editor = None;
             self.show_preferences = false;
             self.show_about = false;
             self.show_shortcuts = false;
@@ -1358,6 +1380,7 @@ impl GtaMoApp {
             + (self.filters.status != StatusFilter::All) as usize
             + (self.filters.sort != SortField::Order) as usize
             + (!self.filters.search.trim().is_empty()) as usize
+            + self.filters.show_hidden as usize
     }
 
     fn ui_filter_controls(&mut self, ui: &mut egui::Ui) {
@@ -1437,6 +1460,9 @@ impl GtaMoApp {
                     }
                 }
             });
+
+        ui.separator();
+        ui.checkbox(&mut self.filters.show_hidden, "Mostrar ocultos");
     }
 
     fn ui_new_mod_button(&mut self, ui: &mut egui::Ui) {
@@ -1656,6 +1682,11 @@ impl GtaMoApp {
                             ui.label(m.meta.author.join(", "));
                             ui.end_row();
                         }
+                        if let Some(l) = &m.meta.license {
+                            ui.label("Licencia:");
+                            ui.label(l);
+                            ui.end_row();
+                        }
                         if let Some(u) = &m.meta.url {
                             ui.label("URL:");
                             let resp = ui.add(
@@ -1669,10 +1700,12 @@ impl GtaMoApp {
                             );
                             if resp.clicked() {
                                 let folder = m.folder.clone();
-                                self.exec(
-                                    vec!["ctl".into(), "open".into(), folder, "--url".into()],
-                                    false,
-                                );
+                                self.open_detached(vec![
+                                    "ctl".into(),
+                                    "open".into(),
+                                    folder,
+                                    "--url".into(),
+                                ]);
                             }
                             resp.on_hover_text(u);
                             ui.end_row();
@@ -1973,11 +2006,51 @@ impl GtaMoApp {
                             action: ConfirmAction::DeleteMod(folder.clone()),
                         });
                     }
+                    let mut hidden_here = m.hidden;
+                    if ui
+                        .add_enabled(
+                            !(self.busy || self.playing),
+                            egui::Checkbox::new(&mut hidden_here, "Oculto aquí"),
+                        )
+                        .on_hover_text("Ocultar este mod en el perfil activo")
+                        .changed()
+                    {
+                        let cmd = if hidden_here { "hide" } else { "unhide" };
+                        self.exec(vec!["ctl".into(), cmd.into(), folder.clone()], false);
+                    }
+                    let mut hidden_global = m.hidden_global;
+                    if ui
+                        .add_enabled(
+                            !(self.busy || self.playing),
+                            egui::Checkbox::new(&mut hidden_global, "Oculto global"),
+                        )
+                        .on_hover_text("Ocultar este mod en todos los perfiles")
+                        .changed()
+                    {
+                        let cmd = if hidden_global { "hide" } else { "unhide" };
+                        self.exec(
+                            vec!["ctl".into(), cmd.into(), folder.clone(), "--global".into()],
+                            false,
+                        );
+                    }
+                    if ui
+                        .add_enabled(
+                            !(self.busy || self.playing),
+                            egui::Button::new(format!("{} Nota", crate::icons::PENCIL)),
+                        )
+                        .on_hover_text("Editar las notas de este mod en el perfil activo")
+                        .clicked()
+                    {
+                        self.notes_editor = Some(NotesEditor {
+                            folder: folder.clone(),
+                            content: m.notes.clone().unwrap_or_default(),
+                        });
+                    }
                     if ui
                         .button(format!("{} Abrir carpeta", crate::icons::FOLDER_OPEN))
                         .clicked()
                     {
-                        self.exec(vec!["ctl".into(), "open".into(), folder], false);
+                        self.open_detached(vec!["ctl".into(), "open".into(), folder]);
                     }
                     if m.meta.url.is_some() {
                         let folder = m.folder.clone();
@@ -1985,10 +2058,12 @@ impl GtaMoApp {
                             .button(format!("{} Abrir URL", crate::icons::LINK))
                             .clicked()
                         {
-                            self.exec(
-                                vec!["ctl".into(), "open".into(), folder, "--url".into()],
-                                false,
-                            );
+                            self.open_detached(vec![
+                                "ctl".into(),
+                                "open".into(),
+                                folder,
+                                "--url".into(),
+                            ]);
                         }
                     }
                 });
@@ -2533,16 +2608,13 @@ impl GtaMoApp {
                 .button(format!("{} Abrir carpeta", crate::icons::FOLDER_OPEN))
                 .clicked()
             {
-                self.exec(
-                    vec![
-                        "ctl".into(),
-                        "data".into(),
-                        "dir".into(),
-                        "--profile".into(),
-                        slug.clone(),
-                    ],
-                    false,
-                );
+                self.open_detached(vec![
+                    "ctl".into(),
+                    "data".into(),
+                    "dir".into(),
+                    "--profile".into(),
+                    slug.clone(),
+                ]);
             }
             if ui
                 .button(format!("{} Actualizar", crate::icons::REFRESH))
@@ -2701,17 +2773,14 @@ impl GtaMoApp {
                                         ))
                                         .clicked()
                                     {
-                                        self.exec(
-                                            vec![
-                                                "ctl".into(),
-                                                "data".into(),
-                                                "open".into(),
-                                                row.rel.clone(),
-                                                "--profile".into(),
-                                                slug.clone(),
-                                            ],
-                                            false,
-                                        );
+                                        self.open_detached(vec![
+                                            "ctl".into(),
+                                            "data".into(),
+                                            "open".into(),
+                                            row.rel.clone(),
+                                            "--profile".into(),
+                                            slug.clone(),
+                                        ]);
                                     }
                                 },
                             );
@@ -2794,7 +2863,7 @@ impl GtaMoApp {
             }
         }
         if let Some(folder) = open_folder {
-            self.exec(vec!["ctl".into(), "open".into(), folder], false);
+            self.open_detached(vec!["ctl".into(), "open".into(), folder]);
         }
     }
 
@@ -3094,8 +3163,7 @@ impl GtaMoApp {
             let mut submit = false;
             let title = input.title.clone();
             let label = input.label.clone();
-            let narrow = ctx.screen_rect().width() < NARROW_BREAKPOINT;
-            overlay_page(ctx, "gta_mo_input", narrow, 560.0, |ui| {
+            overlay_page(ctx, "gta_mo_input", 560.0, |ui| {
                 if overlay_header(ui, &title, "Atrás") {
                     close = true;
                 }
@@ -3138,8 +3206,7 @@ impl GtaMoApp {
             };
             let mut close = false;
             let mut ok = false;
-            let narrow = ctx.screen_rect().width() < NARROW_BREAKPOINT;
-            overlay_page(ctx, "gta_mo_confirm", narrow, 520.0, |ui| {
+            overlay_page(ctx, "gta_mo_confirm", 520.0, |ui| {
                 if overlay_header(ui, &title, "Atrás") {
                     close = true;
                 }
@@ -3169,8 +3236,7 @@ impl GtaMoApp {
             let mut save = false;
             let mut reload = false;
             let title = format!("mod.toml — {}", ed.folder);
-            let narrow = ctx.screen_rect().width() < NARROW_BREAKPOINT;
-            overlay_page(ctx, "gta_mo_manifest", narrow, 780.0, |ui| {
+            overlay_page(ctx, "gta_mo_manifest", 780.0, |ui| {
                 if overlay_header(ui, &title, "Atrás") {
                     close = true;
                 }
@@ -3233,6 +3299,80 @@ impl GtaMoApp {
                 self.manifest_editor = None;
             } else {
                 self.manifest_editor = Some(ed);
+            }
+        }
+
+        if self.notes_editor.is_some() {
+            let mut ed = self.notes_editor.take().expect("checked is_some");
+            let mut close = false;
+            let mut save = false;
+            let mut clear = false;
+            let title = format!("Nota — {}", ed.folder);
+            overlay_page(ctx, "gta_mo_notes", 620.0, |ui| {
+                if overlay_header(ui, &title, "Atrás") {
+                    close = true;
+                }
+                ui.label("Notas para este mod en el perfil activo:");
+                ui.add_space(4.0);
+                let available = (ui.available_height() - 40.0).max(120.0);
+                egui::ScrollArea::vertical()
+                    .max_height(available)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut ed.content)
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(8)
+                                .hint_text(
+                                    "P. ej. «causa CTD al entrar en la zona X; requiere el parche Y»",
+                                ),
+                        );
+                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Guardar").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Borrar").clicked() {
+                        clear = true;
+                    }
+                    if ui.button("Cancelar").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if clear {
+                self.exec(
+                    vec![
+                        "ctl".into(),
+                        "note".into(),
+                        ed.folder.clone(),
+                        "--clear".into(),
+                    ],
+                    false,
+                );
+            } else if save {
+                let content = ed.content.trim_end().to_string();
+                if content.trim().is_empty() {
+                    self.exec(
+                        vec![
+                            "ctl".into(),
+                            "note".into(),
+                            ed.folder.clone(),
+                            "--clear".into(),
+                        ],
+                        false,
+                    );
+                } else {
+                    self.exec(
+                        vec!["ctl".into(), "note".into(), ed.folder.clone(), content],
+                        false,
+                    );
+                }
+            }
+            if clear || save || close {
+                self.notes_editor = None;
+            } else {
+                self.notes_editor = Some(ed);
             }
         }
     }
@@ -3476,25 +3616,34 @@ fn contain_rect(bounds: egui::Rect, size: egui::Vec2) -> egui::Rect {
 pub(crate) fn overlay_page<R>(
     ctx: &egui::Context,
     id: &str,
-    narrow: bool,
     max_w: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::ModalResponse<R> {
-    let screen = ctx.screen_rect();
     let palette = theme::active(ctx);
     let frame = egui::Frame::new()
         .fill(palette.surface)
         .stroke(egui::Stroke::new(1.0_f32, palette.border))
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(12));
-    let card_w = (screen.width() - 40.0)
-        .min(if narrow { f32::INFINITY } else { max_w })
-        .max(220.0);
-    let card_h = (screen.height() - 40.0).max(220.0);
+    // Center on the whole window (not the tab area) so the dialog looks
+    // centered even when the sidebar is visible.
+    let window = ctx.screen_rect();
+    let max_width = (window.width() - 40.0).min(max_w).max(220.0);
+    let max_height = (window.height() - 40.0).max(220.0);
+    // Grow to fit the contents, capped to the window.
+    let modal_area = egui::Area::new(egui::Id::new(id))
+        .kind(egui::UiKind::Modal)
+        .sense(egui::Sense::hover())
+        .fixed_pos(window.center())
+        .pivot(egui::Align2::CENTER_CENTER)
+        .order(egui::Order::Foreground)
+        .interactable(true);
     egui::Modal::new(egui::Id::new(id))
+        .area(modal_area)
         .frame(frame)
         .show(ctx, |ui| {
-            ui.set_min_size(egui::vec2(card_w, card_h));
+            ui.set_max_width(max_width);
+            ui.set_max_height(max_height);
             add_contents(ui)
         })
 }

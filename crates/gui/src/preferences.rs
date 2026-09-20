@@ -9,13 +9,12 @@ use eframe::egui;
 pub fn show(ctx: &egui::Context, settings: &mut GuiSettings, open: &mut bool) -> bool {
     let mut changed = false;
     let mut close = false;
-    let narrow = ctx.screen_rect().width() < crate::app::NARROW_BREAKPOINT;
-    crate::app::overlay_page(ctx, "gta_mo_preferences", narrow, 560.0, |ui| {
+    crate::app::overlay_page(ctx, "gta_mo_preferences", 560.0, |ui| {
         if crate::app::overlay_header(ui, "Preferencias", "Cerrar") {
             close = true;
         }
         egui::ScrollArea::vertical()
-            .auto_shrink(false)
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 changed |= appearance(ui, settings);
                 ui.add_space(10.0);

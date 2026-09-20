@@ -10,6 +10,7 @@
 # author = ["Autor"]       # string o lista
 # url = "https://github.com/..."
 # description = "Descripción del mod."
+# license = "MIT"          # licencia/términos indicados por el autor (si los hay)
 # tags = ["tag1", "tag2"]  # para organizar/filtrar
 
 # Carátula y guías (rutas relativas dentro de esta carpeta)

@@ -30,6 +30,12 @@ pub struct ModView {
     pub conflicts: Vec<String>,
     /// Mod Loader priority, when declared.
     pub modloader_priority: Option<i64>,
+    /// Effective hidden state (profile override, else global flag).
+    pub hidden: bool,
+    /// Global hidden flag (`mods.hidden`).
+    pub hidden_global: bool,
+    /// Notes for this mod in the active profile.
+    pub notes: Option<String>,
 }
 
 impl ModView {
@@ -123,6 +129,8 @@ pub struct Filters {
     pub status: StatusFilter,
     pub sort: SortField,
     pub desc: bool,
+    /// Include mods hidden in the active profile.
+    pub show_hidden: bool,
 }
 
 impl Default for Filters {
@@ -134,12 +142,16 @@ impl Default for Filters {
             status: StatusFilter::All,
             sort: SortField::Order,
             desc: true,
+            show_hidden: false,
         }
     }
 }
 
 pub fn filter_and_sort(mods: &mut Vec<ModView>, filters: &Filters) {
     mods.retain(|m| {
+        if m.hidden && !filters.show_hidden {
+            return false;
+        }
         let status_ok = match filters.status {
             StatusFilter::All => true,
             StatusFilter::Enabled => m.enabled,
@@ -211,6 +223,9 @@ mod tests {
             variant_name: None,
             conflicts: vec![],
             modloader_priority: None,
+            hidden: false,
+            hidden_global: false,
+            notes: None,
         }
     }
 
