@@ -6,6 +6,9 @@ const BIN: &str = env!("CARGO_BIN_EXE_gta-mo");
 struct TempDb {
     dir: PathBuf,
     db: PathBuf,
+    /// Private `XDG_RUNTIME_DIR` so the launcher lock never collides with the
+    /// developer's own running app (`gta-mo-gui` / a manual `gta-mo mount`).
+    runtime: PathBuf,
     config: Option<PathBuf>,
 }
 
@@ -14,10 +17,13 @@ impl TempDb {
         let dir = std::env::temp_dir().join(format!("gta-mo-it-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
         let db = dir.join("test.db");
         Self {
             dir,
             db,
+            runtime,
             config: None,
         }
     }
@@ -39,6 +45,7 @@ impl TempDb {
     fn run(&self, args: &[&str]) -> Output {
         let mut cmd = Command::new(BIN);
         cmd.env("GTA_MO_DB", &self.db);
+        cmd.env("XDG_RUNTIME_DIR", &self.runtime);
         if let Some(cfg) = &self.config {
             cmd.env("GTA_MO_CONFIG", cfg);
         }
@@ -61,6 +68,7 @@ impl TempDb {
         use std::process::Stdio;
         let mut cmd = Command::new(BIN);
         cmd.env("GTA_MO_DB", &self.db);
+        cmd.env("XDG_RUNTIME_DIR", &self.runtime);
         if let Some(cfg) = &self.config {
             cmd.env("GTA_MO_CONFIG", cfg);
         }
@@ -983,6 +991,7 @@ fn upper_lists_moves_and_discards() {
     std::fs::create_dir_all(upper.join("data")).unwrap();
     std::fs::create_dir_all(upper.join("models")).unwrap();
     std::fs::write(upper.join("data/new.cfg"), "x").unwrap();
+    std::fs::write(upper.join("data/second.cfg"), "y").unwrap();
     std::fs::write(upper.join("models/x.dff"), "override").unwrap();
     std::fs::write(upper.join("models/.wh.gone.dff"), "").unwrap();
 
@@ -991,10 +1000,21 @@ fn upper_lists_moves_and_discards() {
     assert!(out.contains("huérfano"), "salida: {out}");
     assert!(out.contains("borrado"), "salida: {out}");
 
-    // Moving respects the target's `mount = ["content"]`.
-    t.run_ok(&["ctl", "upper", "move", "data/new.cfg", "mymod"]);
+    // Moving (in bulk) respects the target's `mount = ["content"]`.
+    t.run_ok(&[
+        "ctl",
+        "upper",
+        "move",
+        "mymod",
+        "data/new.cfg",
+        "data/second.cfg",
+    ]);
     assert!(game_root.join("mods/mymod/content/data/new.cfg").exists());
+    assert!(game_root
+        .join("mods/mymod/content/data/second.cfg")
+        .exists());
     assert!(!upper.join("data/new.cfg").exists());
+    assert!(!upper.join("data/second.cfg").exists());
 
     // Discarding removes the file from the upper.
     t.run_ok(&["ctl", "upper", "discard", "models/x.dff", "--yes"]);

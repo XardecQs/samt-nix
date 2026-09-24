@@ -3,6 +3,7 @@
 mod about;
 mod app;
 mod backend;
+mod file_browser;
 mod fonts;
 mod icons;
 mod lightbox;
@@ -11,6 +12,7 @@ mod motion;
 mod preferences;
 mod settings;
 mod theme;
+mod thumbs;
 mod toasts;
 
 use eframe::egui;

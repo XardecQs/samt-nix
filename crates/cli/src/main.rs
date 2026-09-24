@@ -427,10 +427,14 @@ pub enum DataAction {
         #[arg(value_name = "PATH", help = "Path relative to the user-data folder")]
         path: String,
     },
-    #[command(about = "Delete a user-data file")]
+    #[command(about = "Delete one or more user-data files")]
     Remove {
-        #[arg(value_name = "PATH", help = "Path relative to the user-data folder")]
-        path: String,
+        #[arg(
+            value_name = "PATH",
+            num_args = 1..,
+            help = "Path(s) relative to the user-data folder"
+        )]
+        paths: Vec<String>,
         #[arg(long, help = "Skip confirmation")]
         yes: bool,
     },
@@ -449,17 +453,25 @@ pub enum UpperAction {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
-    #[command(about = "Move an upper file into a mod (its mounted layer)")]
+    #[command(about = "Move one or more upper files into a mod (their mounted layer)")]
     Move {
-        #[arg(value_name = "PATH", help = "Path relative to the upper")]
-        path: String,
         #[arg(value_name = "MOD", help = "Target mod (id, folder or name)")]
         mod_ident: String,
+        #[arg(
+            value_name = "PATH",
+            num_args = 1..,
+            help = "Path(s) relative to the upper"
+        )]
+        paths: Vec<String>,
     },
-    #[command(about = "Delete an upper file so the lower layers show through again")]
+    #[command(about = "Delete upper files so the lower layers show through again")]
     Discard {
-        #[arg(value_name = "PATH", help = "Path relative to the upper")]
-        path: String,
+        #[arg(
+            value_name = "PATH",
+            num_args = 1..,
+            help = "Path(s) relative to the upper"
+        )]
+        paths: Vec<String>,
         #[arg(long, help = "Skip confirmation")]
         yes: bool,
     },

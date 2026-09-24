@@ -2507,6 +2507,19 @@ fn cmd_open_path(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Asks for a `[s/N]` confirmation on stderr returning whether the user agreed.
+/// A closed/empty stdin (headless, GUI) counts as "no".
+fn confirm(prompt: &str) -> anyhow::Result<bool> {
+    eprintln!();
+    log::warn(prompt);
+    eprint!("Confirmar? [s/N]: ");
+    std::io::Write::flush(&mut std::io::stderr()).ok();
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_lowercase();
+    Ok(answer == "s" || answer == "si")
+}
+
 fn cmd_data(
     conn: &Connection,
     action: &super::DataAction,
@@ -2593,27 +2606,33 @@ fn cmd_data(
             let target = gta_mo_core::userdata::resolve_entry(&upper, subdir, path)?;
             xdg_open(&target)
         }
-        super::DataAction::Remove { path, yes } => {
-            // Validate before asking.
-            gta_mo_core::userdata::resolve_entry(&upper, subdir, path)?;
-            if !yes {
-                eprintln!();
-                log::warn(format!(
-                    "Vas a eliminar '{}' del perfil '{}'.",
-                    path, profile.name
-                ));
-                eprint!("Confirmar eliminación? [s/N]: ");
-                std::io::Write::flush(&mut std::io::stderr()).ok();
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                let confirm = input.trim().to_lowercase();
-                if confirm != "s" && confirm != "si" {
-                    log::info("Cancelado.");
-                    return Ok(());
+        super::DataAction::Remove { paths, yes } => {
+            // Validate everything before asking.
+            for path in paths {
+                gta_mo_core::userdata::resolve_entry(&upper, subdir, path)?;
+            }
+            if !yes
+                && !confirm(&format!(
+                    "Vas a eliminar {} archivo(s) del perfil '{}'.",
+                    paths.len(),
+                    profile.name
+                ))?
+            {
+                log::info("Cancelado.");
+                return Ok(());
+            }
+            let mut removed = 0usize;
+            let mut errors = Vec::new();
+            for path in paths {
+                match gta_mo_core::userdata::remove(&upper, subdir, path) {
+                    Ok(()) => removed += 1,
+                    Err(e) => errors.push(format!("{path}: {e}")),
                 }
             }
-            gta_mo_core::userdata::remove(&upper, subdir, path)?;
-            log::info(format!("Eliminado: '{path}'."));
+            log::info(format!("Eliminado(s): {removed} archivo(s)."));
+            if !errors.is_empty() {
+                anyhow::bail!("Fallos al eliminar:\n  {}", errors.join("\n  "));
+            }
             Ok(())
         }
     }
@@ -2726,39 +2745,62 @@ fn cmd_upper(
             }
             Ok(())
         }
-        super::UpperAction::Move { path, mod_ident } => {
+        super::UpperAction::Move {
+            mod_ident,
+            paths: rels,
+        } => {
             let mod_id = db::resolve_mod_ident(conn, mod_ident)?;
             let m = db::get_mod_by_id(conn, mod_id)?
                 .ok_or_else(|| anyhow::anyhow!("Mod no encontrado: {mod_ident}"))?;
             let layer = gta_mo_core::upper::layer_root_for(&paths.mods_dir, &m.folder_name);
-            let dest = gta_mo_core::upper::move_to_layer(&upper(), path, &layer)?;
-            log::info(format!(
-                "Movido '{path}' a '{}' (mod '{}').",
-                dest.display(),
-                m.folder_name
-            ));
-            Ok(())
-        }
-        super::UpperAction::Discard { path, yes } => {
-            gta_mo_core::upper::resolve_entry(&upper(), path)?;
-            if !yes {
-                eprintln!();
-                log::warn(format!(
-                    "Vas a eliminar '{}' del upper del perfil '{}'.",
-                    path, profile.name
-                ));
-                eprint!("Confirmar eliminación? [s/N]: ");
-                std::io::Write::flush(&mut std::io::stderr()).ok();
-                let mut input = String::new();
-                std::io::stdin().read_line(&mut input)?;
-                let confirm = input.trim().to_lowercase();
-                if confirm != "s" && confirm != "si" {
-                    log::info("Cancelado.");
-                    return Ok(());
+            // Validate everything before moving anything.
+            for rel in rels {
+                gta_mo_core::upper::resolve_entry(&upper(), rel)?;
+            }
+            let mut moved = 0usize;
+            let mut errors = Vec::new();
+            for rel in rels {
+                match gta_mo_core::upper::move_to_layer(&upper(), rel, &layer) {
+                    Ok(_) => moved += 1,
+                    Err(e) => errors.push(format!("{rel}: {e}")),
                 }
             }
-            gta_mo_core::upper::discard(&upper(), path)?;
-            log::info(format!("Eliminado del upper: '{path}'."));
+            log::info(format!(
+                "Movido(s) {moved} archivo(s) al mod '{}'.",
+                m.folder_name
+            ));
+            if !errors.is_empty() {
+                anyhow::bail!("Fallos al mover:\n  {}", errors.join("\n  "));
+            }
+            Ok(())
+        }
+        super::UpperAction::Discard { paths: rels, yes } => {
+            // Validate everything before asking.
+            for rel in rels {
+                gta_mo_core::upper::resolve_entry(&upper(), rel)?;
+            }
+            if !yes
+                && !confirm(&format!(
+                    "Vas a eliminar {} archivo(s) del upper del perfil '{}'.",
+                    rels.len(),
+                    profile.name
+                ))?
+            {
+                log::info("Cancelado.");
+                return Ok(());
+            }
+            let mut removed = 0usize;
+            let mut errors = Vec::new();
+            for rel in rels {
+                match gta_mo_core::upper::discard(&upper(), rel) {
+                    Ok(()) => removed += 1,
+                    Err(e) => errors.push(format!("{rel}: {e}")),
+                }
+            }
+            log::info(format!("Eliminado(s) del upper: {removed} archivo(s)."));
+            if !errors.is_empty() {
+                anyhow::bail!("Fallos al eliminar:\n  {}", errors.join("\n  "));
+            }
             Ok(())
         }
         super::UpperAction::Capture { name, from } => {

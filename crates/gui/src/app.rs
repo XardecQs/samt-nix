@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
 use crate::backend::{Backend, GuiEvent};
+use crate::file_browser::{self, BrowserAction, FileBrowserState, FileEntry};
 use crate::model::{filter_and_sort, Filters, Snapshot, SortField, StatusFilter};
 use crate::settings::{Density, GuiSettings};
 use crate::theme::{self, ThemePref};
@@ -33,11 +34,6 @@ struct HeaderOverflow {
     clean: bool,
     discover: bool,
 }
-
-/// Límites al decodificar imágenes de mods (no confiables): evita bombas de
-/// descompresión. 8192px de lado y 64 MiB de asignación por imagen.
-const MAX_IMAGE_DIM: u32 = 8192;
-const MAX_IMAGE_ALLOC: u64 = 64 * 1024 * 1024;
 
 enum InputAction {
     Create,
@@ -83,20 +79,13 @@ struct NotesEditor {
     content: String,
 }
 
-/// One row of the Data tab (owned so `self` can be used while rendering).
-struct UserDataRow {
-    rel: String,
-    name: String,
-    size: u64,
-}
-
 #[allow(clippy::enum_variant_names)]
 enum ConfirmAction {
     DeleteProfile(String),
     DeleteMod(String),
     DeleteGroup(String),
-    DeleteUserData(String),
-    DiscardUpper(String),
+    DeleteUserData(Vec<String>),
+    DiscardUpper(Vec<String>),
     UnmountDiscard,
 }
 
@@ -151,8 +140,10 @@ pub struct GtaMoApp {
     upper_gen: u64,
     /// Current manual overlay mount, if any (see `gta-mo mount`).
     mount: Option<gta_mo_core::mount_state::MountInfo>,
-    /// Target mod chosen in the Overwrite tab's "move to mod" control.
-    move_target: Option<String>,
+    /// Overlay upper browser (list + tree).
+    overwrite_browser: FileBrowserState,
+    /// PortableGTA userfiles browser (grid default).
+    data_browser: FileBrowserState,
     relations: Option<crate::backend::ModRelations>,
     relations_for: Option<i64>,
     conflicts: Vec<crate::backend::ConflictView>,
@@ -163,9 +154,8 @@ pub struct GtaMoApp {
     group_pick: Option<String>,
     drag_folder: Option<String>,
     drop_index: usize,
-    covers: HashMap<String, egui::TextureHandle>,
-    covers_order: VecDeque<String>,
-    cover_missing: HashSet<String>,
+    /// Shared LRU cache of cover/screenshot/upper image textures.
+    thumbs: crate::thumbs::ThumbCache,
     status: Option<String>,
     settings: GuiSettings,
     base_ppp: f32,
@@ -231,7 +221,8 @@ impl GtaMoApp {
             upper_include_userfiles: false,
             upper_gen: 0,
             mount: None,
-            move_target: None,
+            overwrite_browser: FileBrowserState::new(crate::file_browser::ViewMode::List),
+            data_browser: FileBrowserState::new(crate::file_browser::ViewMode::Grid),
             relations: None,
             relations_for: None,
             conflicts: Vec::new(),
@@ -242,9 +233,7 @@ impl GtaMoApp {
             group_pick: None,
             drag_folder: None,
             drop_index: 0,
-            covers: HashMap::new(),
-            covers_order: VecDeque::new(),
-            cover_missing: HashSet::new(),
+            thumbs: crate::thumbs::ThumbCache::new(),
             status: None,
             settings,
             base_ppp,
@@ -659,43 +648,7 @@ impl GtaMoApp {
         key: String,
         path: &std::path::Path,
     ) -> Option<egui::TextureHandle> {
-        if let Some(t) = self.covers.get(&key) {
-            return Some(t.clone());
-        }
-        if self.cover_missing.contains(&key) {
-            return None;
-        }
-        // Portadas/capturas provienen de mod.toml no confiable: acota dimensiones
-        // y memoria para que una imagen maliciosa (bomba de descompresión) no
-        // agote la RAM del proceso.
-        let decoded = image::ImageReader::open(path).ok().and_then(|mut reader| {
-            let mut limits = image::Limits::default();
-            limits.max_image_width = Some(MAX_IMAGE_DIM);
-            limits.max_image_height = Some(MAX_IMAGE_DIM);
-            limits.max_alloc = Some(MAX_IMAGE_ALLOC);
-            reader.limits(limits);
-            reader.decode().ok()
-        });
-        let Some(img) = decoded else {
-            self.cover_missing.insert(key);
-            return None;
-        };
-        let img = img.to_rgba8();
-        let (w, h) = (img.width(), img.height());
-        let color =
-            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
-        let tex = ctx.load_texture(&key, color, egui::TextureOptions::LINEAR);
-
-        // LRU: capa el número de texturas y descarta solo la más antigua.
-        if self.covers.len() >= 128 {
-            if let Some(old) = self.covers_order.pop_front() {
-                self.covers.remove(&old);
-            }
-        }
-        self.covers.insert(key.clone(), tex.clone());
-        self.covers_order.retain(|k| k != &key);
-        self.covers_order.push_back(key);
-        Some(tex)
+        self.thumbs.get(ctx, &key, path)
     }
 
     /// Draws one row of the mods list: optional cover thumbnail, enable
@@ -2685,198 +2638,120 @@ impl GtaMoApp {
             ui.add_space(8.0);
         }
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(format!("Datos del perfil '{slug}'")).strong());
-            if ui
-                .button(format!("{} Abrir carpeta", crate::icons::FOLDER_OPEN))
-                .clicked()
-            {
-                self.open_detached(vec![
-                    "ctl".into(),
-                    "data".into(),
-                    "dir".into(),
-                    "--profile".into(),
-                    slug.clone(),
-                ]);
-            }
-            if ui
-                .button(format!("{} Actualizar", crate::icons::REFRESH))
-                .clicked()
-            {
-                self.reload_userdata();
-            }
-        });
-        ui.separator();
-
         if let Some(err) = self.userdata_error.clone() {
             ui.colored_label(palette.danger, err);
             return;
         }
-        if self.userdata.is_empty() {
-            let msg = if self.portablegta {
-                "Aún no hay partidas, capturas ni tracks en este perfil."
-            } else {
-                "No hay datos. Instala y activa PortableGTA para que el juego guarde aquí."
-            };
-            ui.label(msg);
-            return;
-        }
 
-        // Own the rows so `self.exec` can be called while rendering.
-        let cats = [
-            Category::Saves,
-            Category::Settings,
-            Category::UserTracks,
-            Category::Screenshots,
-            Category::Other,
-        ];
-        let grouped: Vec<(Category, Vec<UserDataRow>)> = cats
+        let entries: Vec<FileEntry> = self
+            .userdata
             .iter()
-            .map(|c| {
-                let items = self
-                    .userdata
-                    .iter()
-                    .filter(|e| e.category == *c)
-                    .map(|e| UserDataRow {
-                        rel: e.rel.clone(),
-                        name: e.name.clone(),
-                        size: e.size,
-                    })
-                    .collect();
-                (*c, items)
+            .map(|e| FileEntry {
+                rel: e.rel.clone(),
+                name: e.name.clone(),
+                size: e.size,
+                kind: e.category.key().to_string(),
+                kind_label: e.category.label().to_string(),
+                secondary: String::new(),
+                is_image: e.category == Category::Screenshots,
             })
             .collect();
+        let root = self.userdata_base.clone().unwrap_or_default();
 
-        // Screenshot entries, with a gallery item for the image viewer.
-        let shots: Vec<(UserDataRow, crate::lightbox::GalleryItem)> = self
-            .userdata_base
-            .as_ref()
-            .map(|base| {
-                self.userdata
-                    .iter()
-                    .filter(|e| e.category == Category::Screenshots)
-                    .map(|e| {
-                        (
-                            UserDataRow {
-                                rel: e.rel.clone(),
-                                name: e.name.clone(),
-                                size: e.size,
-                            },
-                            crate::lightbox::GalleryItem {
-                                key: format!("data/{slug}/{}", e.rel),
-                                path: base.join(&e.rel),
-                                label: e.name.clone(),
-                            },
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let title = format!("Datos del perfil '{slug}'");
+        let empty_msg = if self.portablegta {
+            "Aún no hay partidas, capturas ni tracks en este perfil."
+        } else {
+            "No hay datos. Instala y activa PortableGTA para que el juego guarde aquí."
+        };
+        let config = file_browser::BrowserConfig {
+            id: "data_browser",
+            title: &title,
+            root,
+            key_prefix: format!("data/{slug}"),
+            can_move: false,
+            can_delete: true,
+            move_targets: Vec::new(),
+            empty_msg,
+        };
+        let resp = file_browser::show(
+            ui,
+            &mut self.data_browser,
+            &config,
+            &entries,
+            &mut self.thumbs,
+        );
 
-        let mut pending_remove: Option<String> = None;
-        egui::ScrollArea::vertical()
-            .id_salt("data_scroll")
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                for (cat, items) in &grouped {
-                    if items.is_empty() {
-                        continue;
-                    }
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(format!("{} ({})", cat.label(), items.len())).strong(),
-                    );
-                    if *cat == Category::Screenshots {
-                        ui.horizontal_wrapped(|ui| {
-                            for (i, (row, item)) in shots.iter().enumerate() {
-                                ui.vertical(|ui| {
-                                    let key = item.key.clone();
-                                    if let Some(tex) = self.load_image(ui.ctx(), key, &item.path) {
-                                        let resp = ui
-                                            .add(
-                                                egui::Image::new(&tex)
-                                                    .fit_to_exact_size(egui::vec2(150.0, 90.0))
-                                                    .corner_radius(4)
-                                                    .sense(egui::Sense::click()),
-                                            )
-                                            .on_hover_text("Ampliar");
-                                        if resp.clicked() {
-                                            let items: Vec<crate::lightbox::GalleryItem> =
-                                                shots.iter().map(|(_, it)| it.clone()).collect();
-                                            self.lightbox =
-                                                Some(crate::lightbox::Lightbox::from_rect(
-                                                    items, i, resp.rect,
-                                                ));
-                                        }
-                                    } else {
-                                        ui.label(
-                                            egui::RichText::new("No se pudo cargar").small().weak(),
-                                        );
-                                    }
-                                    ui.horizontal(|ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&row.name).small(),
-                                            )
-                                            .truncate(),
-                                        )
-                                        .on_hover_text(&row.rel);
-                                        if ui.small_button(crate::icons::TRASH).clicked() {
-                                            pending_remove = Some(row.rel.clone());
-                                        }
-                                    });
-                                });
-                            }
-                        });
-                        ui.add_space(6.0);
-                        continue;
-                    }
-                    for row in items {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Label::new(egui::RichText::new(&row.name)).truncate())
-                                .on_hover_text(&row.rel);
-                            ui.label(
-                                egui::RichText::new(gta_mo_core::userdata::human_size(row.size))
-                                    .small()
-                                    .weak(),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .small_button(format!("{} Eliminar", crate::icons::TRASH))
-                                        .clicked()
-                                    {
-                                        pending_remove = Some(row.rel.clone());
-                                    }
-                                    if ui
-                                        .small_button(format!(
-                                            "{} Abrir",
-                                            crate::icons::FOLDER_OPEN
-                                        ))
-                                        .clicked()
-                                    {
-                                        self.open_detached(vec![
-                                            "ctl".into(),
-                                            "data".into(),
-                                            "open".into(),
-                                            row.rel.clone(),
-                                            "--profile".into(),
-                                            slug.clone(),
-                                        ]);
-                                    }
-                                },
-                            );
-                        });
-                    }
+        if resp.open_folder {
+            self.open_detached(vec![
+                "ctl".into(),
+                "data".into(),
+                "dir".into(),
+                "--profile".into(),
+                slug.clone(),
+            ]);
+        }
+        if resp.refresh {
+            self.reload_userdata();
+        }
+        for action in resp.actions {
+            match action {
+                BrowserAction::Open(rels) => self.open_data_entries(&rels),
+                BrowserAction::Delete(rels) => {
+                    self.confirm = Some(ConfirmState {
+                        title: "Eliminar datos".into(),
+                        message: format!(
+                            "¿Eliminar {} archivo(s) del perfil '{slug}'?",
+                            rels.len()
+                        ),
+                        action: ConfirmAction::DeleteUserData(rels),
+                    });
                 }
-            });
-        if let Some(rel) = pending_remove {
-            self.confirm = Some(ConfirmState {
-                title: "Eliminar dato".into(),
-                message: format!("¿Eliminar '{rel}' del perfil '{slug}'?"),
-                action: ConfirmAction::DeleteUserData(rel),
-            });
+                BrowserAction::MoveToMod(_) => {}
+            }
+        }
+    }
+
+    /// Gallery of the profile's screenshots for the image viewer.
+    fn data_gallery(&self) -> Vec<crate::lightbox::GalleryItem> {
+        use gta_mo_core::userdata::Category;
+        let Some(base) = &self.userdata_base else {
+            return Vec::new();
+        };
+        self.userdata
+            .iter()
+            .filter(|e| e.category == Category::Screenshots)
+            .map(|e| crate::lightbox::GalleryItem {
+                key: format!("data/{}/{}", self.snapshot.active_slug, e.rel),
+                path: base.join(&e.rel),
+                label: e.name.clone(),
+            })
+            .collect()
+    }
+
+    /// Opens user-data entries: images in the lightbox, the rest with `xdg-open`.
+    fn open_data_entries(&mut self, rels: &[String]) {
+        let Some(base) = self.userdata_base.clone() else {
+            return;
+        };
+        let is_image = |r: &String| gta_mo_core::meta::is_image_file(std::path::Path::new(r));
+        if let Some(first) = rels.iter().find(|r| is_image(r)) {
+            let gallery = self.data_gallery();
+            let target = base.join(first.as_str());
+            if let Some(index) = gallery.iter().position(|g| g.path == target) {
+                self.lightbox = Some(crate::lightbox::Lightbox::new(gallery, index));
+            }
+        }
+        let slug = self.snapshot.active_slug.clone();
+        for rel in rels.iter().filter(|r| !is_image(r)) {
+            self.open_detached(vec![
+                "ctl".into(),
+                "data".into(),
+                "open".into(),
+                rel.clone(),
+                "--profile".into(),
+                slug.clone(),
+            ]);
         }
     }
 
@@ -2994,31 +2869,7 @@ impl GtaMoApp {
         });
         ui.add_space(6.0);
 
-        // --- Upper header ---
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(format!("Upper del perfil '{slug}'")).strong());
-            if let Some(dir) = self.upper_dir.clone() {
-                if ui
-                    .button(format!("{} Abrir carpeta", crate::icons::FOLDER_OPEN))
-                    .clicked()
-                {
-                    self.open_detached(vec![
-                        "ctl".into(),
-                        "open-path".into(),
-                        dir.display().to_string(),
-                    ]);
-                }
-            }
-            if ui
-                .button(format!("{} Actualizar", crate::icons::REFRESH))
-                .clicked()
-            {
-                self.start_upper_scan();
-            }
-            ui.checkbox(&mut self.upper_include_userfiles, "Mostrar userfiles");
-        });
-        ui.separator();
-
+        // --- Upper tree ---
         if self.upper_deleted > 0 {
             ui.colored_label(
                 palette.warning,
@@ -3031,102 +2882,124 @@ impl GtaMoApp {
         if self.upper_pending {
             ui.label("Escaneando el upper…");
         }
+        ui.checkbox(&mut self.upper_include_userfiles, "Mostrar userfiles");
+        ui.add_space(4.0);
 
-        let rows: Vec<crate::backend::UpperView> = self
+        let entries: Vec<FileEntry> = self
             .upper
             .iter()
             .filter(|r| self.upper_include_userfiles || r.kind != "userdata")
-            .cloned()
+            .map(|r| FileEntry {
+                rel: r.rel.clone(),
+                name: r.name.clone(),
+                size: r.size,
+                kind: r.kind.clone(),
+                kind_label: r.kind_label.clone(),
+                secondary: if r.orphan {
+                    "huérfano".to_string()
+                } else {
+                    r.providers.join(", ")
+                },
+                is_image: gta_mo_core::meta::is_image_file(std::path::Path::new(&r.rel)),
+            })
             .collect();
-
-        if rows.is_empty() {
-            if !self.upper_pending {
-                ui.label("No hay archivos en el upper.");
-            }
-            return;
-        }
-
-        // Move target (mod folder) shared by all rows.
-        let mod_choices: Vec<(String, String)> = self
+        let root = self.upper_dir.clone().unwrap_or_default();
+        let move_targets: Vec<(String, String)> = self
             .snapshot
             .mods
             .iter()
             .map(|m| (m.folder.clone(), m.name.clone()))
             .collect();
-        if self.move_target.is_none() {
-            self.move_target = mod_choices.first().map(|(f, _)| f.clone());
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Mover a:");
-            let selected = self.move_target.clone().unwrap_or_else(|| "—".to_string());
-            egui::ComboBox::from_id_salt("upper_move_target")
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    for (folder, name) in &mod_choices {
-                        let selected = self.move_target.as_deref() == Some(folder.as_str());
-                        if ui.selectable_label(selected, name).clicked() {
-                            self.move_target = Some(folder.clone());
-                        }
-                    }
-                });
-        });
-        ui.add_space(4.0);
+        let title = format!("Upper del perfil '{slug}'");
+        let config = file_browser::BrowserConfig {
+            id: "overwrite_browser",
+            title: &title,
+            root,
+            key_prefix: format!("upper/{slug}"),
+            can_move: !move_targets.is_empty(),
+            can_delete: true,
+            move_targets,
+            empty_msg: "No hay archivos en el upper.",
+        };
+        let resp = file_browser::show(
+            ui,
+            &mut self.overwrite_browser,
+            &config,
+            &entries,
+            &mut self.thumbs,
+        );
 
-        let mut pending_discard: Option<String> = None;
-        let mut move_req: Option<(String, String)> = None;
-        egui::ScrollArea::vertical()
-            .id_salt("upper_scroll")
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                for row in &rows {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&row.kind_label).small().weak());
-                        ui.add(egui::Label::new(egui::RichText::new(&row.name)).truncate())
-                            .on_hover_text(&row.rel);
-                        ui.label(
-                            egui::RichText::new(gta_mo_core::userdata::human_size(row.size))
-                                .small()
-                                .weak(),
-                        );
-                        if row.orphan {
-                            ui.colored_label(
-                                palette.warning,
-                                egui::RichText::new("huérfano").small(),
-                            );
-                        } else {
-                            ui.label(egui::RichText::new(row.providers.join(", ")).small().weak());
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(crate::icons::TRASH).clicked() {
-                                pending_discard = Some(row.rel.clone());
-                            }
-                            if ui
-                                .small_button(format!("{} Mover", crate::icons::ARROW_LEFT))
-                                .clicked()
-                            {
-                                if let Some(target) = self.move_target.clone() {
-                                    move_req = Some((row.rel.clone(), target));
-                                }
-                            }
-                        });
+        if resp.open_folder {
+            if let Some(dir) = self.upper_dir.clone() {
+                self.open_detached(vec![
+                    "ctl".into(),
+                    "open-path".into(),
+                    dir.display().to_string(),
+                ]);
+            }
+        }
+        if resp.refresh {
+            self.start_upper_scan();
+        }
+        for action in resp.actions {
+            match action {
+                BrowserAction::Open(rels) => self.open_upper_entries(&rels),
+                BrowserAction::Delete(rels) => {
+                    self.confirm = Some(ConfirmState {
+                        title: "Descartar archivos del upper".into(),
+                        message: format!(
+                            "¿Eliminar {} archivo(s) del upper? Las capas inferiores volverán a verse.",
+                            rels.len()
+                        ),
+                        action: ConfirmAction::DiscardUpper(rels),
                     });
                 }
-            });
-
-        if let Some(rel) = pending_discard {
-            self.confirm = Some(ConfirmState {
-                title: "Descartar archivo del upper".into(),
-                message: format!(
-                    "¿Eliminar '{rel}' del upper? Las capas inferiores volverán a verse."
-                ),
-                action: ConfirmAction::DiscardUpper(rel),
-            });
+                BrowserAction::MoveToMod(rels) => {
+                    if let Some(target) = self.overwrite_browser.move_target.clone() {
+                        let mut args = vec!["ctl".into(), "upper".into(), "move".into(), target];
+                        args.extend(rels);
+                        self.exec(args, false);
+                    }
+                }
+            }
         }
-        if let Some((rel, folder)) = move_req {
-            self.exec(
-                vec!["ctl".into(), "upper".into(), "move".into(), rel, folder],
-                false,
-            );
+    }
+
+    /// Gallery of the upper's images for the image viewer.
+    fn upper_gallery(&self) -> Vec<crate::lightbox::GalleryItem> {
+        let Some(root) = &self.upper_dir else {
+            return Vec::new();
+        };
+        self.upper
+            .iter()
+            .filter(|r| gta_mo_core::meta::is_image_file(std::path::Path::new(&r.rel)))
+            .map(|r| crate::lightbox::GalleryItem {
+                key: format!("upper/{}/{}", self.snapshot.active_slug, r.rel),
+                path: root.join(&r.rel),
+                label: r.name.clone(),
+            })
+            .collect()
+    }
+
+    /// Opens upper entries: images in the lightbox, the rest with the OS handler.
+    fn open_upper_entries(&mut self, rels: &[String]) {
+        let Some(root) = self.upper_dir.clone() else {
+            return;
+        };
+        let is_image = |r: &String| gta_mo_core::meta::is_image_file(std::path::Path::new(r));
+        if let Some(first) = rels.iter().find(|r| is_image(r)) {
+            let gallery = self.upper_gallery();
+            let target = root.join(first.as_str());
+            if let Some(index) = gallery.iter().position(|g| g.path == target) {
+                self.lightbox = Some(crate::lightbox::Lightbox::new(gallery, index));
+            }
+        }
+        for rel in rels.iter().filter(|r| !is_image(r)) {
+            self.open_detached(vec![
+                "ctl".into(),
+                "open-path".into(),
+                root.join(rel).display().to_string(),
+            ]);
         }
     }
 
@@ -3815,32 +3688,20 @@ impl GtaMoApp {
                     false,
                 );
             }
-            ConfirmAction::DeleteUserData(rel) => {
+            ConfirmAction::DeleteUserData(rels) => {
                 let slug = self.snapshot.active_slug.clone();
-                self.exec(
-                    vec![
-                        "ctl".into(),
-                        "data".into(),
-                        "remove".into(),
-                        rel,
-                        "--yes".into(),
-                        "--profile".into(),
-                        slug,
-                    ],
-                    false,
-                );
+                let mut args = vec!["ctl".into(), "data".into(), "remove".into()];
+                args.extend(rels);
+                args.push("--yes".into());
+                args.push("--profile".into());
+                args.push(slug);
+                self.exec(args, false);
             }
-            ConfirmAction::DiscardUpper(rel) => {
-                self.exec(
-                    vec![
-                        "ctl".into(),
-                        "upper".into(),
-                        "discard".into(),
-                        rel,
-                        "--yes".into(),
-                    ],
-                    false,
-                );
+            ConfirmAction::DiscardUpper(rels) => {
+                let mut args = vec!["ctl".into(), "upper".into(), "discard".into()];
+                args.extend(rels);
+                args.push("--yes".into());
+                self.exec(args, false);
             }
             ConfirmAction::UnmountDiscard => {
                 self.exec(vec!["unmount".into(), "--discard".into()], false);

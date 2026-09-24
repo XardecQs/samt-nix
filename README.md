@@ -370,10 +370,10 @@ gta-mo ctl manifest set <mod>                 # replace mod.toml with stdin cont
 gta-mo ctl data list [--json]                 # profile user data (saves/tracks/screenshots)
 gta-mo ctl data dir                           # open the profile user-data folder
 gta-mo ctl data open <rel>
-gta-mo ctl data remove <rel> [--yes]
+gta-mo ctl data remove <rel>... [--yes]       # delete one or more user-data files
 gta-mo ctl upper list [--include-userfiles] [--orphans] [--json]  # overwrite layer files
-gta-mo ctl upper move <rel> <mod>             # move an upper file into a mod's mounted layer
-gta-mo ctl upper discard <rel> [--yes]        # delete an upper file (lower layers show through)
+gta-mo ctl upper move <mod> <rel>...          # move upper files into a mod's mounted layer
+gta-mo ctl upper discard <rel>... [--yes]     # delete upper files (lower layers show through)
 gta-mo ctl upper capture <mod> [--from <dir>] # turn the upper into a new mod
 gta-mo ctl open-url <url>                     # open an http(s) URL
 gta-mo ctl open-path <path>                   # open a local file/folder
@@ -447,11 +447,12 @@ gta-mo ctl import <file> [--force]
   `unmount --capture <mod>` turns into a mod, or `unmount --discard` deletes.
 - `ctl upper` browses the profile's overlay upper (the "overwrite" layer): files
   written through `run/merged` that no enabled mod provides are flagged
-  `huérfano`. `upper move` puts a file into a mod's mounted layer (respecting
-  its `mount = [...]`), `upper discard` deletes it, and `upper capture` packs
-  the whole upper into `content/` + `mod.toml`. Overlayfs whiteout markers are
-  reported but cannot be replayed from a mod (a lower layer cannot delete
-  base-game files).
+  `huérfano`. `upper move` puts files into a mod's mounted layer (respecting
+  its `mount = [...]`), `upper discard` deletes them, and `upper capture` packs
+  the whole upper into `content/` + `mod.toml`. `move`, `discard` and `data
+  remove` accept several paths at once (best-effort, with a per-file error
+  summary). Overlayfs whiteout markers are reported but cannot be replayed from
+  a mod (a lower layer cannot delete base-game files).
 - `export`/`import` dump and restore the whole state (mods, metadata, profiles,
   dependencies, groups) as JSON. Import replaces the database (asks for
   confirmation unless `--force`).
@@ -545,16 +546,20 @@ filter)), a **variant** badge/selector and declared **conflicts** in the detail 
 profiles tab with create/use/rename/copy/delete
 (renaming also moves `run/profiles/<slug>`), a **Datos** tab listing the active
 profile's saves, settings, User Tracks and screenshots written under
-`userfiles/` (with PortableGTA), with screenshot previews in the full-screen
-image viewer, and a recommendation to install PortableGTA, an **Overwrite** tab
-that browses the profile's `upper/` (the overwrite layer), flags files no mod
-provides as *huérfanos* and lets you move them to a mod or discard them, with
-Mount/Unmount controls (including a temporary profile and its capture/discard),
-groups tab, a **Dependencies** tab
+`userfiles/` (with PortableGTA) plus a recommendation to install PortableGTA,
+an **Overwrite** tab that browses the profile's `upper/` (the overwrite layer)
+and flags files no mod provides as *huérfanos*, with Mount/Unmount controls
+(including a temporary profile and its capture/discard), groups tab, a
+**Dependencies** tab
 that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run) that
 becomes a **Detener** button while the game runs, Discover/Clean actions, a
 streaming Log tab, and a status bar.
+
+**Datos** and **Overwrite** share one explorer widget: a folder-tree sidebar, a
+list or thumbnail-grid content area, search and kind filter, multi-selection
+(Ctrl/Shift toggles and ranges) with bulk move/delete, and thumbnails that open
+in the full-screen image viewer.
 
 ### Appearance
 
