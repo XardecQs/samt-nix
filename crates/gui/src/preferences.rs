@@ -228,6 +228,33 @@ fn graph(ui: &mut egui::Ui, g: &mut GraphSettings) -> bool {
         .changed();
 
     ui.add_space(4.0);
+    ui.label("Nodos y etiquetas:");
+    egui::Grid::new("prefs_graph_nodes")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Radio del nodo");
+            changed |= ui
+                .add(egui::Slider::new(&mut g.node_radius, 2.0..=14.0).fixed_decimals(1))
+                .changed();
+            ui.end_row();
+
+            ui.label("Tamaño de fuente");
+            changed |= ui
+                .add(egui::Slider::new(&mut g.label_font, 8.0..=24.0).fixed_decimals(0))
+                .on_hover_text("Tamaño de la etiqueta en píxeles, constante con el zoom")
+                .changed();
+            ui.end_row();
+        });
+    changed |= ui
+        .checkbox(&mut g.label_bg, "Fondo en las etiquetas")
+        .on_hover_text("Añade un recuadro detrás del texto para mejor legibilidad")
+        .changed();
+    changed |= ui
+        .checkbox(&mut g.highlight_selected, "Resaltar el nodo seleccionado")
+        .changed();
+
+    ui.add_space(4.0);
     egui::CollapsingHeader::new("Fuerza (avanzado)")
         .id_salt("prefs_graph_force")
         .default_open(false)

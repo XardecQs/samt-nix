@@ -5,6 +5,7 @@ mod app;
 mod backend;
 mod file_browser;
 mod fonts;
+mod graph_node;
 mod icons;
 mod lightbox;
 mod model;

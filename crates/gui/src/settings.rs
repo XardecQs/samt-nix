@@ -175,6 +175,15 @@ pub struct GraphSettings {
     pub arrow_size: f32,
     #[serde(default = "default_true")]
     pub show_arrows: bool,
+    #[serde(default = "default_node_radius")]
+    pub node_radius: f32,
+    /// Label font size in screen pixels.
+    #[serde(default = "default_label_font")]
+    pub label_font: f32,
+    #[serde(default = "default_true")]
+    pub label_bg: bool,
+    #[serde(default = "default_true")]
+    pub highlight_selected: bool,
     #[serde(default = "default_true")]
     pub auto_settle: bool,
     #[serde(default)]
@@ -198,11 +207,23 @@ impl Default for GraphSettings {
             edge_width: default_edge_width(),
             arrow_size: default_arrow_size(),
             show_arrows: true,
+            node_radius: default_node_radius(),
+            label_font: default_label_font(),
+            label_bg: true,
+            highlight_selected: true,
             auto_settle: true,
             force: ForcePrefs::default(),
             hierarchical: HierarchicalPrefs::default(),
         }
     }
+}
+
+fn default_node_radius() -> f32 {
+    5.0
+}
+
+fn default_label_font() -> f32 {
+    12.0
 }
 
 fn default_edge_width() -> f32 {
@@ -382,6 +403,9 @@ mod tests {
         assert_eq!(s.graph.edge_width, 2.0);
         assert_eq!(s.graph.arrow_size, 15.0);
         assert!(s.graph.show_arrows);
+        assert_eq!(s.graph.node_radius, 5.0);
+        assert_eq!(s.graph.label_font, 12.0);
+        assert!(s.graph.label_bg && s.graph.highlight_selected);
 
         let s = GuiSettings {
             graph: GraphSettings {

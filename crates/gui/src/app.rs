@@ -37,7 +37,7 @@ type DepGraph = egui_graphs::Graph<
     crate::model::GEdgeKind,
     petgraph::Directed,
     petgraph::graph::DefaultIx,
-    egui_graphs::DefaultNodeShape,
+    crate::graph_node::ModNodeShape,
     egui_graphs::DefaultEdgeShape,
 >;
 
@@ -47,7 +47,7 @@ type HierGraphView<'a> = egui_graphs::GraphView<
     crate::model::GEdgeKind,
     petgraph::Directed,
     petgraph::graph::DefaultIx,
-    egui_graphs::DefaultNodeShape,
+    crate::graph_node::ModNodeShape,
     egui_graphs::DefaultEdgeShape,
     egui_graphs::LayoutStateHierarchical,
     egui_graphs::LayoutHierarchical,
@@ -59,7 +59,7 @@ type ForceGraphView<'a> = egui_graphs::GraphView<
     crate::model::GEdgeKind,
     petgraph::Directed,
     petgraph::graph::DefaultIx,
-    egui_graphs::DefaultNodeShape,
+    crate::graph_node::ModNodeShape,
     egui_graphs::DefaultEdgeShape,
     egui_graphs::FruchtermanReingoldWithCenterGravityState,
     egui_graphs::LayoutForceDirected<egui_graphs::FruchtermanReingoldWithCenterGravity>,
@@ -2868,11 +2868,10 @@ impl GtaMoApp {
         }
     }
 
-    /// Refreshes labels/colors of an existing graph without moving the nodes.
-    fn update_graph_appearance(&mut self) {
-        let Some(graph) = self.graph.as_mut() else {
-            return;
-        };
+    /// Applies the configured node style, label visibility and selection
+    /// highlight to every node (called every frame).
+    fn apply_graph_node_style(&self, graph: &mut DepGraph, accent: egui::Color32) {
+        let cfg = &self.settings.graph;
         let info: HashMap<i64, (String, egui::Color32)> = self
             .snapshot
             .mods
@@ -2884,17 +2883,27 @@ impl GtaMoApp {
                 )
             })
             .collect();
-        let indices: Vec<petgraph::stable_graph::NodeIndex> = graph.g().node_indices().collect();
-        for ix in indices {
-            let Some(id) = graph.node(ix).map(|n| *n.payload()) else {
+        for node in graph.g_mut().node_weights_mut() {
+            let id = *node.payload();
+            let Some((name, base_color)) = info.get(&id) else {
                 continue;
             };
-            if let Some((name, color)) = info.get(&id) {
-                if let Some(node) = graph.node_mut(ix) {
-                    node.set_label(name.clone());
-                    node.set_color(*color);
-                }
-            }
+            let selected = node.selected();
+            let show_label = cfg.labels_always || selected || node.hovered();
+            node.set_label(if show_label {
+                name.clone()
+            } else {
+                String::new()
+            });
+            node.set_color(if selected && cfg.highlight_selected {
+                accent
+            } else {
+                *base_color
+            });
+            let display = node.display_mut();
+            display.radius = cfg.node_radius;
+            display.label_font = cfg.label_font;
+            display.label_bg = cfg.label_bg;
         }
     }
 
@@ -3016,9 +3025,8 @@ impl GtaMoApp {
                 self.graph = Some(self.build_dep_graph());
                 self.graph_signature = signature;
                 just_built = true;
-            } else {
-                self.update_graph_appearance();
             }
+            // Appearance-only changes are handled by `apply_graph_node_style`.
             self.graph_stale = false;
         }
         if just_built || self.graph_reset_layout {
@@ -3080,6 +3088,7 @@ impl GtaMoApp {
             None => return,
         };
         self.apply_graph_edge_style(&mut graph, ui);
+        self.apply_graph_node_style(&mut graph, theme::active(ui.ctx()).accent);
         let resp = match self.settings.graph.layout {
             GraphLayout::Hierarchical => {
                 let mut view = HierGraphView::new(&mut graph)
