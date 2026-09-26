@@ -11,6 +11,7 @@ use crate::file_browser::{self, BrowserAction, FileBrowserState, FileEntry};
 use crate::model::{filter_and_sort, Filters, Snapshot, SortField, StatusFilter};
 use crate::settings::{Density, GraphLayout, GuiSettings};
 use crate::theme::{self, ThemePref};
+use crate::thumbs::{ThumbSize, ThumbState};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -723,17 +724,21 @@ impl GtaMoApp {
     ) -> Option<egui::TextureHandle> {
         let key = format!("{folder}/{cover}");
         let path = self.backend.cover_path(folder, cover)?;
-        self.load_image(ctx, key, &path)
+        self.load_image(ctx, key, &path, ThumbSize::Small)
     }
 
-    /// Loads (and LRU-caches) one image from disk as a texture.
+    /// Loads (LRU-caches and asynchronously decodes) one image as a texture.
     fn load_image(
         &mut self,
         ctx: &egui::Context,
         key: String,
         path: &std::path::Path,
+        size: ThumbSize,
     ) -> Option<egui::TextureHandle> {
-        self.thumbs.get(ctx, &key, path)
+        match self.thumbs.get(ctx, &key, path, size) {
+            ThumbState::Ready(tex) => Some(tex),
+            _ => None,
+        }
     }
 
     /// Draws one row of the mods list: optional cover thumbnail, enable
@@ -945,6 +950,7 @@ impl GtaMoApp {
 impl eframe::App for GtaMoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_events(ctx);
+        self.thumbs.poll(ctx);
         self.handle_lightbox_input(ctx);
 
         // Escape closes the top dialog before the detail overlay can see it, so
@@ -2350,7 +2356,9 @@ impl GtaMoApp {
                         for (i, rel) in shots.iter().take(24).enumerate() {
                             let key = format!("{}/{}", m.folder, rel);
                             if let Some(path) = self.backend.cover_path(&m.folder, rel) {
-                                if let Some(tex) = self.load_image(ui.ctx(), key, &path) {
+                                if let Some(tex) =
+                                    self.load_image(ui.ctx(), key, &path, ThumbSize::Small)
+                                {
                                     let resp = ui
                                         .add(
                                             egui::Image::new(&tex)
@@ -3774,7 +3782,7 @@ impl GtaMoApp {
             let it = &lb.items[index];
             (it.key.clone(), it.path.clone(), it.label.clone())
         };
-        let tex = self.load_image(ctx, key, &path);
+        let tex = self.load_image(ctx, key, &path, ThumbSize::Full);
         let palette = theme::active(ctx);
         let screen = ctx.screen_rect();
         let source = lb.source;

@@ -9,7 +9,7 @@ use eframe::egui;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use crate::thumbs::ThumbCache;
+use crate::thumbs::{ThumbCache, ThumbSize, ThumbState};
 
 /// How the content area is rendered.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -613,8 +613,8 @@ fn thumb_in(
         return false;
     }
     let key = format!("{}/{}", config.key_prefix, e.rel);
-    match thumbs.get(ui.ctx(), &key, &config.root.join(&e.rel)) {
-        Some(tex) => {
+    match thumbs.get(ui.ctx(), &key, &config.root.join(&e.rel), ThumbSize::Small) {
+        ThumbState::Ready(tex) => {
             ui.put(
                 rect,
                 egui::Image::new(&tex)
@@ -623,7 +623,7 @@ fn thumb_in(
             );
             true
         }
-        None => false,
+        _ => false,
     }
 }
 
