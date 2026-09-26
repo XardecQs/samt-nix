@@ -3044,8 +3044,10 @@ impl GtaMoApp {
             }
         });
 
+        // Selection is managed by us (single click selects, double opens the
+        // detail), so the widget's toggling selection is disabled.
         let interactions = egui_graphs::SettingsInteraction::new()
-            .with_node_selection_enabled(self.settings.graph.node_selection)
+            .with_node_selection_enabled(false)
             .with_dragging_enabled(self.settings.graph.dragging);
         let navigation = egui_graphs::SettingsNavigation::default()
             .with_zoom_and_pan_enabled(true)
@@ -3059,22 +3061,23 @@ impl GtaMoApp {
             Some(g) => g,
             None => return,
         };
-        let rect = match self.settings.graph.layout {
+        let resp = match self.settings.graph.layout {
             GraphLayout::Hierarchical => {
                 let mut view = HierGraphView::new(&mut graph)
                     .with_interactions(&interactions)
                     .with_navigations(&navigation)
                     .with_styles(&style);
-                ui.add(&mut view).rect
+                ui.add(&mut view)
             }
             GraphLayout::Force => {
                 let mut view = ForceGraphView::new(&mut graph)
                     .with_interactions(&interactions)
                     .with_navigations(&navigation)
                     .with_styles(&style);
-                ui.add(&mut view).rect
+                ui.add(&mut view)
             }
         };
+        let rect = resp.rect;
 
         // Auto-pause the force simulation once it has settled.
         if self.settings.graph.layout == GraphLayout::Force && self.settings.graph.auto_settle {
@@ -3088,11 +3091,51 @@ impl GtaMoApp {
             }
         }
 
-        let selected = graph
-            .selected_nodes()
-            .first()
-            .copied()
-            .and_then(|ix| graph.node(ix).map(|n| *n.payload()));
+        // Node interaction: single click selects, double click opens the detail.
+        let meta = egui_graphs::Metadata::load(ui);
+        let hit_id = if self.overlay_open() {
+            None
+        } else {
+            resp.interact_pointer_pos()
+                .and_then(|p| graph.node_by_screen_pos(&meta, p))
+                .and_then(|ix| graph.node(ix).map(|n| *n.payload()))
+        };
+        if !self.overlay_open() {
+            if resp.double_clicked() {
+                if let Some(id) = hit_id {
+                    self.graph_selected = Some(id);
+                    self.selected_mod = Some(id);
+                    self.reload_relations();
+                    self.tab = Tab::Mods;
+                    self.detail_opened = Some(std::time::Instant::now());
+                }
+            } else if resp.clicked() && self.settings.graph.node_selection {
+                match hit_id {
+                    Some(id) => {
+                        if self.graph_selected != Some(id) {
+                            self.graph_selected = Some(id);
+                            self.selected_mod = Some(id);
+                            self.reload_relations();
+                        }
+                    }
+                    None => self.graph_selected = None,
+                }
+            }
+        }
+
+        // Reflect our selection as the widget's highlight.
+        let selected_idx: Vec<petgraph::stable_graph::NodeIndex> = self
+            .graph_selected
+            .and_then(|id| {
+                graph
+                    .g()
+                    .node_indices()
+                    .find(|ix| graph.node(*ix).map(|n| *n.payload()) == Some(id))
+            })
+            .into_iter()
+            .collect();
+        graph.set_selected_nodes(selected_idx);
+
         self.graph = Some(graph);
 
         // Apply zoom after the widget so it is not overwritten this frame.
@@ -3122,12 +3165,7 @@ impl GtaMoApp {
             Self::apply_graph_zoom(ui, wheel_pos.unwrap_or_else(|| rect.center()), factor);
         }
 
-        if let Some(id) = selected {
-            if self.graph_selected != Some(id) {
-                self.graph_selected = Some(id);
-                self.selected_mod = Some(id);
-                self.reload_relations();
-            }
+        if let Some(id) = self.graph_selected {
             if let Some(m) = self.snapshot.mods.iter().find(|m| m.id == id) {
                 let name = m.name.clone();
                 ui.add_space(4.0);
@@ -3139,8 +3177,6 @@ impl GtaMoApp {
                     }
                 });
             }
-        } else {
-            self.graph_selected = None;
         }
     }
 
