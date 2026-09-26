@@ -266,13 +266,59 @@ pub fn show(
     let visible = visible_entries(&tree, state, entries, searching);
     let ordered: Vec<String> = visible.iter().map(|&i| entries[i].rel.clone()).collect();
 
-    // Ctrl+A selects every visible entry (only when no widget has focus, so a
-    // focused search field still selects its text).
-    if ui.memory(|m| m.focused().is_none())
-        && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
-    {
-        state.selected = ordered.iter().cloned().collect();
-        state.last_clicked = ordered.last().cloned();
+    // Keyboard shortcuts. Ctrl+F focuses the search box from anywhere.
+    if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+        ui.memory_mut(|m| m.request_focus(egui::Id::new((config.id, "search"))));
+    }
+    // The rest only act when no widget has focus (so a focused search field
+    // keeps its caret/selection editing).
+    if ui.memory(|m| m.focused().is_none()) {
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+            state.selected = ordered.iter().cloned().collect();
+            state.last_clicked = ordered.last().cloned();
+        }
+        if !ordered.is_empty() {
+            let cur = state
+                .last_clicked
+                .as_ref()
+                .and_then(|r| ordered.iter().position(|x| x == r));
+            let step = ui.input(|i| {
+                if i.key_pressed(egui::Key::ArrowDown) {
+                    1i32
+                } else if i.key_pressed(egui::Key::ArrowUp) {
+                    -1
+                } else {
+                    0
+                }
+            });
+            if step != 0 {
+                let n = ordered.len() as i32;
+                let next = match cur {
+                    Some(p) => (p as i32 + step).rem_euclid(n) as usize,
+                    None => {
+                        if step > 0 {
+                            0
+                        } else {
+                            ordered.len() - 1
+                        }
+                    }
+                };
+                state.selected.clear();
+                state.selected.insert(ordered[next].clone());
+                state.last_clicked = Some(ordered[next].clone());
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Some(rel) = state.last_clicked.clone() {
+                    resp.actions.push(BrowserAction::Open(vec![rel]));
+                }
+            }
+            if config.can_delete && ui.input(|i| i.key_pressed(egui::Key::Delete)) {
+                let sel: Vec<String> = state.selected.iter().cloned().collect();
+                if !sel.is_empty() {
+                    resp.actions.push(BrowserAction::Delete(sel));
+                }
+            }
+        }
     }
 
     let narrow = ui.available_width() < 640.0;
@@ -408,6 +454,7 @@ fn header(
         ui.separator();
         ui.add(
             egui::TextEdit::singleline(&mut state.search)
+                .id(egui::Id::new((config.id, "search")))
                 .hint_text("Buscar…")
                 .desired_width(160.0),
         );
