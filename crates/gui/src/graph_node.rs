@@ -80,7 +80,7 @@ impl<N: Clone, E: Clone, Ty: EdgeType, Ix: IndexType> DisplayNode<N, E, Ty, Ix> 
             shapes.push(Shape::circle_stroke(
                 center,
                 radius + 1.5,
-                Stroke::new(1.5, stroke_color),
+                Stroke::new(1.5_f32, stroke_color),
             ));
         }
 
