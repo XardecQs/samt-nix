@@ -107,6 +107,15 @@ pub fn config_dir_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("gta-mo"))
 }
 
+/// Base directory for gta-mo caches (`$XDG_CACHE_HOME/gta-mo` or
+/// `~/.cache/gta-mo`).
+pub fn cache_dir_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .map(|d| d.join("gta-mo"))
+}
+
 pub fn find_config_file() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("GTA_MO_CONFIG") {
         let p = PathBuf::from(val);
