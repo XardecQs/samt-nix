@@ -95,6 +95,8 @@ pub struct FileBrowserState {
     selected: HashSet<String>,
     last_clicked: Option<String>,
     pub move_target: Option<String>,
+    /// Grid thumbnail width in px (height follows the aspect ratio).
+    pub thumb_px: f32,
 }
 
 impl FileBrowserState {
@@ -111,6 +113,7 @@ impl FileBrowserState {
             selected: HashSet::new(),
             last_clicked: None,
             move_target: None,
+            thumb_px: 116.0,
         }
     }
 }
@@ -448,6 +451,10 @@ fn header(
             {
                 state.view = ViewMode::List;
             }
+            if state.view == ViewMode::Grid {
+                ui.add(egui::Slider::new(&mut state.thumb_px, 80.0..=220.0).show_value(false))
+                    .on_hover_text("Tamaño de miniatura");
+            }
         });
     });
     action_bar(ui, state, config, resp);
@@ -684,9 +691,9 @@ fn grid_card(
     resp: &mut BrowserResponse,
 ) {
     let selected = state.selected.contains(&e.rel);
-    let thumb_size = egui::vec2(116.0, 84.0);
+    let thumb_size = egui::vec2(state.thumb_px, state.thumb_px * 0.72);
     ui.allocate_ui_with_layout(
-        egui::vec2(126.0, 132.0),
+        egui::vec2(thumb_size.x + 10.0, thumb_size.y + 48.0),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
             let frame = egui::Frame::new()
