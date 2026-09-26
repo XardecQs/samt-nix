@@ -62,6 +62,67 @@ in {
         }
       '';
     };
+
+    gameDesktopEntry = lib.mkOption {
+      default = { };
+      description = ''
+        Install a `.desktop` entry for the **game window**. GNOME does not
+        implement `xdg_toplevel_icon_v1`, so a Proton/umu game window only shows
+        an icon if a desktop entry with a matching `StartupWMClass` exists. The
+        icon file is provided by the user (the game's icon is not redistributed).
+        Find the real window class with `xprop WM_CLASS` (XWayland) or
+        `wmctrl -lx` while the game is running.
+      '';
+      type = lib.types.submodule {
+        options = {
+          enable = lib.mkEnableOption "a desktop entry for the game window";
+
+          name = lib.mkOption {
+            type = lib.types.str;
+            default = "GTA San Andreas";
+            description = "Visible name of the desktop entry.";
+          };
+
+          exec = lib.mkOption {
+            type = lib.types.str;
+            default = "${cfg.package}/bin/gta-mo launch";
+            defaultText = lib.literalExpression ''"''${cfg.package}/bin/gta-mo launch"'';
+            description = "Command run when the entry is clicked.";
+          };
+
+          icon = lib.mkOption {
+            type = lib.types.str;
+            default = "";
+            description = ''
+              Icon: an absolute path (e.g. a file in your Nix store) or a theme
+              icon name. Leave empty to omit the `Icon=` line.
+            '';
+            example = "/home/user/icons/gtasa.png";
+          };
+
+          wmClass = lib.mkOption {
+            type = lib.types.str;
+            default =
+              if (cfg.settings ? game_exe) && cfg.settings.game_exe != null
+              then cfg.settings.game_exe
+              else "gta_sa.exe";
+            defaultText = lib.literalExpression ''
+              cfg.settings.game_exe or "gta_sa.exe"
+            '';
+            description = ''
+              `StartupWMClass` of the game window (defaults to the configured
+              `game_exe`, e.g. `gta_sa.exe`).
+            '';
+          };
+
+          noDisplay = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Hide the entry from the application grid (`NoDisplay=true`).";
+          };
+        };
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -71,5 +132,22 @@ in {
 
     xdg.configFile."gta-mo/config.toml".source =
       settingsFormat.generate "gta-mo-config.toml" cfg.settings;
+
+    xdg.dataFile = lib.mkIf cfg.gameDesktopEntry.enable {
+      "applications/gta-sa.desktop".text = ''
+        [Desktop Entry]
+        Type=Application
+        Name=${cfg.gameDesktopEntry.name}
+        Comment=GTA San Andreas (via gta-mo)
+        Exec=${cfg.gameDesktopEntry.exec}
+        Terminal=false
+        Categories=Game;
+        StartupWMClass=${cfg.gameDesktopEntry.wmClass}
+      '' + lib.optionalString (cfg.gameDesktopEntry.icon != "") ''
+        Icon=${cfg.gameDesktopEntry.icon}
+      '' + lib.optionalString cfg.gameDesktopEntry.noDisplay ''
+        NoDisplay=true
+      '';
+    };
   };
 }
