@@ -611,7 +611,9 @@ alternatives and `[variant]` families. Edges can be filtered with the
 viewport) plus **＋/－/⤢ Ajustar** buttons, node dragging, node selection (which
 opens the mod's detail), a **Fuerza** layout (default; it settles and pauses on
 its own) with a **Jerárquico** alternative, and a **Reorganizar** button.
-Positions are kept when only the enabled state changes.
+Positions are kept when only the enabled state changes. All of this (plus the
+advanced force/hierarchical parameters) is configurable in
+**Preferencias → Grafo** and persisted in `gui.toml`.
 
 **Datos** and **Overwrite** share one explorer widget: a folder-tree sidebar, a
 list or thumbnail-grid content area, search and kind filter, multi-selection
@@ -626,6 +628,11 @@ The GUI follows the system **light/dark** theme by default and can be forced in
 - **Accent color** (8 presets — blue, purple, magenta, red, amber, yellow,
   green, gray — plus a custom color picker), high-contrast mode,
   UI density, interface scale, "reduce motion" and whether to show covers.
+- A **Grafo** section configures the dependency graph: default layout (Fuerza/
+  Jerárquico), which edge kinds to show, labels/dragging/selection, zoom speed
+  and fit padding, "settle and pause" for the force layout, and advanced
+  **Fuerza**/**Jerárquico** parameters (center gravity, attraction, repulsion,
+  damping, spacing, orientation…).
 - A semantic color palette (`crates/gui/src/theme.rs`) whose text/background
   pairs are verified to meet **WCAG AA** contrast in both themes by unit tests.
 

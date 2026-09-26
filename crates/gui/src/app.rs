@@ -9,7 +9,7 @@ use eframe::egui;
 use crate::backend::{Backend, GuiEvent};
 use crate::file_browser::{self, BrowserAction, FileBrowserState, FileEntry};
 use crate::model::{filter_and_sort, Filters, Snapshot, SortField, StatusFilter};
-use crate::settings::{Density, GuiSettings};
+use crate::settings::{Density, GraphLayout, GuiSettings};
 use crate::theme::{self, ThemePref};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,13 +29,6 @@ enum Tab {
 enum DepsView {
     List,
     Graph,
-}
-
-/// Graph layout.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GraphLayout {
-    Hierarchical,
-    Force,
 }
 
 /// Dependency graph (node payload = mod id, edge payload = relation kind).
@@ -228,11 +221,6 @@ pub struct GtaMoApp {
     stopping: bool,
     /// Dependencies tab: list or graph.
     deps_view: DepsView,
-    /// Graph layout and edge filters.
-    graph_layout: GraphLayout,
-    graph_show_optional: bool,
-    graph_show_conflicts: bool,
-    graph_show_variants: bool,
     /// Built dependency graph (invalidated on refresh / reorganize).
     graph: Option<DepGraph>,
     /// Mod currently selected in the graph (to react only to changes).
@@ -321,10 +309,6 @@ impl GtaMoApp {
             child_pid: Arc::new(Mutex::new(None)),
             stopping: false,
             deps_view: DepsView::List,
-            graph_layout: GraphLayout::Force,
-            graph_show_optional: true,
-            graph_show_conflicts: true,
-            graph_show_variants: true,
             graph: None,
             graph_selected: None,
             graph_stale: false,
@@ -1245,6 +1229,8 @@ impl eframe::App for GtaMoApp {
             if changed {
                 self.settings.save();
                 self.apply_settings(ctx);
+                // Re-apply the graph layout parameters on the next draw.
+                self.graph_reset_layout = true;
                 self.toasts.push(
                     ctx,
                     crate::toasts::ToastKind::Info,
@@ -2639,6 +2625,7 @@ impl GtaMoApp {
 
     fn ui_dependencies(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        let mut prefs_changed = false;
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.deps_view, DepsView::List, "Lista");
             ui.selectable_value(&mut self.deps_view, DepsView::Graph, "Grafo");
@@ -2646,7 +2633,7 @@ impl GtaMoApp {
                 ui.separator();
                 if ui
                     .selectable_value(
-                        &mut self.graph_layout,
+                        &mut self.settings.graph.layout,
                         GraphLayout::Hierarchical,
                         "Jerárquico",
                     )
@@ -2655,14 +2642,20 @@ impl GtaMoApp {
                     self.graph_stale = true;
                     self.graph_reset_layout = true;
                     self.graph_fit_pending = true;
+                    prefs_changed = true;
                 }
                 if ui
-                    .selectable_value(&mut self.graph_layout, GraphLayout::Force, "Fuerza")
+                    .selectable_value(
+                        &mut self.settings.graph.layout,
+                        GraphLayout::Force,
+                        "Fuerza",
+                    )
                     .clicked()
                 {
                     self.graph_stale = true;
                     self.graph_reset_layout = true;
                     self.graph_fit_pending = true;
+                    prefs_changed = true;
                 }
                 if ui.button("Reorganizar").clicked() {
                     self.graph = None;
@@ -2671,25 +2664,31 @@ impl GtaMoApp {
                     self.graph_fit_pending = true;
                 }
                 if ui
-                    .checkbox(&mut self.graph_show_optional, "Opcionales")
+                    .checkbox(&mut self.settings.graph.show_optional, "Opcionales")
                     .changed()
                 {
                     self.graph_stale = true;
+                    prefs_changed = true;
                 }
                 if ui
-                    .checkbox(&mut self.graph_show_conflicts, "Conflictos")
+                    .checkbox(&mut self.settings.graph.show_conflicts, "Conflictos")
                     .changed()
                 {
                     self.graph_stale = true;
+                    prefs_changed = true;
                 }
                 if ui
-                    .checkbox(&mut self.graph_show_variants, "Variantes")
+                    .checkbox(&mut self.settings.graph.show_variants, "Variantes")
                     .changed()
                 {
                     self.graph_stale = true;
+                    prefs_changed = true;
                 }
             }
         });
+        if prefs_changed {
+            self.settings.save();
+        }
         ui.separator();
         if self.deps_view == DepsView::Graph {
             self.ui_dep_graph(ui);
@@ -2828,9 +2827,9 @@ impl GtaMoApp {
             .filter(|e| {
                 Self::edge_visible(
                     e.kind,
-                    self.graph_show_optional,
-                    self.graph_show_conflicts,
-                    self.graph_show_variants,
+                    self.settings.graph.show_optional,
+                    self.settings.graph.show_conflicts,
+                    self.settings.graph.show_variants,
                 )
             })
             .map(|e| (e.from, e.to, e.kind))
@@ -2903,9 +2902,9 @@ impl GtaMoApp {
         for e in &self.snapshot.edges {
             if !Self::edge_visible(
                 e.kind,
-                self.graph_show_optional,
-                self.graph_show_conflicts,
-                self.graph_show_variants,
+                self.settings.graph.show_optional,
+                self.settings.graph.show_conflicts,
+                self.settings.graph.show_variants,
             ) {
                 continue;
             }
@@ -2917,19 +2916,40 @@ impl GtaMoApp {
     }
 
     /// Resets the active layout so a rebuilt graph is positioned again (the
-    /// hierarchical layout only runs once; the force one restarts).
+    /// hierarchical layout only runs once; the force one restarts), applying the
+    /// configured parameters.
     fn reset_graph_layout(&self, ui: &mut egui::Ui) {
-        match self.graph_layout {
+        let g = &self.settings.graph;
+        match g.layout {
             GraphLayout::Hierarchical => {
                 HierGraphView::reset_layout(ui);
+                let mut state = HierGraphView::get_layout_state(ui);
+                state.row_dist = g.hierarchical.row_dist;
+                state.col_dist = g.hierarchical.col_dist;
+                state.center_parent = g.hierarchical.center_parent;
+                state.orientation = match g.hierarchical.orientation {
+                    crate::settings::HierOrientation::TopDown => {
+                        egui_graphs::LayoutHierarchicalOrientation::TopDown
+                    }
+                    crate::settings::HierOrientation::LeftRight => {
+                        egui_graphs::LayoutHierarchicalOrientation::LeftRight
+                    }
+                };
+                HierGraphView::set_layout_state(ui, state);
             }
             GraphLayout::Force => {
                 ForceGraphView::reset_layout(ui);
                 let mut state = ForceGraphView::get_layout_state(ui);
                 state.base.is_running = true;
                 state.base.step_count = 0;
-                state.base.k_scale = 0.6;
-                state.extras.0.params.c = 0.8;
+                state.base.dt = g.force.dt;
+                state.base.epsilon = g.force.epsilon;
+                state.base.damping = g.force.damping;
+                state.base.max_step = g.force.max_step;
+                state.base.k_scale = g.force.k_scale;
+                state.base.c_attract = g.force.c_attract;
+                state.base.c_repulse = g.force.c_repulse;
+                state.extras.0.params.c = g.force.gravity;
                 ForceGraphView::set_layout_state(ui, state);
             }
         }
@@ -2977,7 +2997,7 @@ impl GtaMoApp {
 
         // Fit once on build/reorganize/reset (free zoom/pan otherwise).
         if self.graph_fit_pending {
-            match self.graph_layout {
+            match self.settings.graph.layout {
                 GraphLayout::Hierarchical => HierGraphView::reset_metadata(ui),
                 GraphLayout::Force => ForceGraphView::reset_metadata(ui),
             }
@@ -3012,18 +3032,21 @@ impl GtaMoApp {
         });
 
         let interactions = egui_graphs::SettingsInteraction::new()
-            .with_node_selection_enabled(true)
-            .with_dragging_enabled(true);
+            .with_node_selection_enabled(self.settings.graph.node_selection)
+            .with_dragging_enabled(self.settings.graph.dragging);
         let navigation = egui_graphs::SettingsNavigation::default()
             .with_zoom_and_pan_enabled(true)
-            .with_fit_to_screen_enabled(false);
-        let style = egui_graphs::SettingsStyle::default().with_labels_always(true);
+            .with_fit_to_screen_enabled(false)
+            .with_zoom_speed(self.settings.graph.zoom_speed)
+            .with_fit_to_screen_padding(self.settings.graph.fit_padding);
+        let style = egui_graphs::SettingsStyle::default()
+            .with_labels_always(self.settings.graph.labels_always);
 
         let mut graph = match self.graph.take() {
             Some(g) => g,
             None => return,
         };
-        let rect = match self.graph_layout {
+        let rect = match self.settings.graph.layout {
             GraphLayout::Hierarchical => {
                 let mut view = HierGraphView::new(&mut graph)
                     .with_interactions(&interactions)
@@ -3041,7 +3064,7 @@ impl GtaMoApp {
         };
 
         // Auto-pause the force simulation once it has settled.
-        if self.graph_layout == GraphLayout::Force {
+        if self.settings.graph.layout == GraphLayout::Force && self.settings.graph.auto_settle {
             let mut state = ForceGraphView::get_layout_state(ui);
             if state.base.is_running
                 && state.base.step_count > 400

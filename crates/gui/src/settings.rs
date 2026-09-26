@@ -20,6 +20,188 @@ impl Density {
     }
 }
 
+/// Default layout of the dependency graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphLayout {
+    #[default]
+    Force,
+    Hierarchical,
+}
+
+impl GraphLayout {
+    pub fn label(self) -> &'static str {
+        match self {
+            GraphLayout::Force => "Fuerza",
+            GraphLayout::Hierarchical => "Jerárquico",
+        }
+    }
+}
+
+/// Orientation of the hierarchical layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HierOrientation {
+    #[default]
+    TopDown,
+    LeftRight,
+}
+
+impl HierOrientation {
+    pub fn label(self) -> &'static str {
+        match self {
+            HierOrientation::TopDown => "Arriba → abajo",
+            HierOrientation::LeftRight => "Izquierda → derecha",
+        }
+    }
+}
+
+/// Force-directed layout parameters (advanced).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForcePrefs {
+    #[serde(default = "f_dt")]
+    pub dt: f32,
+    #[serde(default = "f_epsilon")]
+    pub epsilon: f32,
+    #[serde(default = "f_damping")]
+    pub damping: f32,
+    #[serde(default = "f_max_step")]
+    pub max_step: f32,
+    #[serde(default = "f_k_scale")]
+    pub k_scale: f32,
+    #[serde(default = "f_c_attract")]
+    pub c_attract: f32,
+    #[serde(default = "f_c_repulse")]
+    pub c_repulse: f32,
+    /// Center gravity (attraction towards the viewport center).
+    #[serde(default = "f_gravity")]
+    pub gravity: f32,
+}
+
+impl Default for ForcePrefs {
+    fn default() -> Self {
+        Self {
+            dt: f_dt(),
+            epsilon: f_epsilon(),
+            damping: f_damping(),
+            max_step: f_max_step(),
+            k_scale: f_k_scale(),
+            c_attract: f_c_attract(),
+            c_repulse: f_c_repulse(),
+            gravity: f_gravity(),
+        }
+    }
+}
+
+fn f_dt() -> f32 {
+    0.05
+}
+fn f_epsilon() -> f32 {
+    1e-3
+}
+fn f_damping() -> f32 {
+    0.3
+}
+fn f_max_step() -> f32 {
+    10.0
+}
+fn f_k_scale() -> f32 {
+    0.6
+}
+fn f_c_attract() -> f32 {
+    1.0
+}
+fn f_c_repulse() -> f32 {
+    1.0
+}
+fn f_gravity() -> f32 {
+    0.8
+}
+
+/// Hierarchical layout parameters (advanced).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HierarchicalPrefs {
+    #[serde(default = "h_dist")]
+    pub row_dist: f32,
+    #[serde(default = "h_dist")]
+    pub col_dist: f32,
+    #[serde(default)]
+    pub center_parent: bool,
+    #[serde(default)]
+    pub orientation: HierOrientation,
+}
+
+impl Default for HierarchicalPrefs {
+    fn default() -> Self {
+        Self {
+            row_dist: h_dist(),
+            col_dist: h_dist(),
+            center_parent: false,
+            orientation: HierOrientation::default(),
+        }
+    }
+}
+
+fn h_dist() -> f32 {
+    50.0
+}
+
+/// Dependency graph preferences (persisted under `[graph]` in `gui.toml`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphSettings {
+    #[serde(default)]
+    pub layout: GraphLayout,
+    #[serde(default = "default_true")]
+    pub show_optional: bool,
+    #[serde(default = "default_true")]
+    pub show_conflicts: bool,
+    #[serde(default = "default_true")]
+    pub show_variants: bool,
+    #[serde(default = "default_true")]
+    pub labels_always: bool,
+    #[serde(default = "default_true")]
+    pub dragging: bool,
+    #[serde(default = "default_true")]
+    pub node_selection: bool,
+    #[serde(default = "default_zoom_speed")]
+    pub zoom_speed: f32,
+    #[serde(default = "default_fit_padding")]
+    pub fit_padding: f32,
+    #[serde(default = "default_true")]
+    pub auto_settle: bool,
+    #[serde(default)]
+    pub force: ForcePrefs,
+    #[serde(default)]
+    pub hierarchical: HierarchicalPrefs,
+}
+
+impl Default for GraphSettings {
+    fn default() -> Self {
+        Self {
+            layout: GraphLayout::default(),
+            show_optional: true,
+            show_conflicts: true,
+            show_variants: true,
+            labels_always: true,
+            dragging: true,
+            node_selection: true,
+            zoom_speed: default_zoom_speed(),
+            fit_padding: default_fit_padding(),
+            auto_settle: true,
+            force: ForcePrefs::default(),
+            hierarchical: HierarchicalPrefs::default(),
+        }
+    }
+}
+
+fn default_zoom_speed() -> f32 {
+    0.1
+}
+
+fn default_fit_padding() -> f32 {
+    0.1
+}
+
 /// GUI preferences stored in `~/.config/gta-mo/gui.toml`.
 ///
 /// Every field is `#[serde(default)]` so older files keep working.
@@ -44,6 +226,8 @@ pub struct GuiSettings {
     pub show_covers: bool,
     #[serde(default = "default_true")]
     pub confirm_deletes: bool,
+    #[serde(default)]
+    pub graph: GraphSettings,
 }
 
 impl Default for GuiSettings {
@@ -58,6 +242,7 @@ impl Default for GuiSettings {
             density: Density::default(),
             show_covers: true,
             confirm_deletes: true,
+            graph: GraphSettings::default(),
         }
     }
 }
@@ -164,5 +349,46 @@ mod tests {
         assert_eq!(s.ui_scale, 1.3);
         let s: GuiSettings = toml::from_str("accent = \"graphite\"\n").unwrap();
         assert_eq!(s.accent, Accent::Gray);
+    }
+
+    #[test]
+    fn graph_settings_defaults_and_roundtrip() {
+        // A file without a [graph] table gets the defaults.
+        let s: GuiSettings = toml::from_str("ui_scale = 1.0\n").unwrap();
+        assert_eq!(s.graph.layout, GraphLayout::Force);
+        assert!(s.graph.show_optional && s.graph.show_conflicts && s.graph.show_variants);
+        assert!(s.graph.auto_settle);
+        assert_eq!(s.graph.force.k_scale, 0.6);
+        assert_eq!(s.graph.hierarchical.orientation, HierOrientation::TopDown);
+
+        let s = GuiSettings {
+            graph: GraphSettings {
+                layout: GraphLayout::Hierarchical,
+                show_conflicts: false,
+                zoom_speed: 0.25,
+                force: ForcePrefs {
+                    gravity: 1.2,
+                    ..Default::default()
+                },
+                hierarchical: HierarchicalPrefs {
+                    center_parent: true,
+                    orientation: HierOrientation::LeftRight,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let text = toml::to_string(&s).unwrap();
+        assert!(text.contains("[graph]"));
+        let back: GuiSettings = toml::from_str(&text).unwrap();
+        assert_eq!(back.graph.layout, GraphLayout::Hierarchical);
+        assert!(!back.graph.show_conflicts);
+        assert_eq!(back.graph.zoom_speed, 0.25);
+        assert_eq!(back.graph.force.gravity, 1.2);
+        assert_eq!(
+            back.graph.hierarchical.orientation,
+            HierOrientation::LeftRight
+        );
     }
 }

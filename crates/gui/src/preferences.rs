@@ -1,6 +1,6 @@
 //! Preferences dialog (appearance, behavior and advanced info).
 
-use crate::settings::{Density, GuiSettings};
+use crate::settings::{Density, GraphLayout, GraphSettings, GuiSettings, HierOrientation};
 use crate::theme::{Accent, ThemePref};
 use eframe::egui;
 
@@ -19,6 +19,8 @@ pub fn show(ctx: &egui::Context, settings: &mut GuiSettings, open: &mut bool) ->
                 changed |= appearance(ui, settings);
                 ui.add_space(10.0);
                 changed |= behavior(ui, settings);
+                ui.add_space(10.0);
+                changed |= graph(ui, &mut settings.graph);
                 ui.add_space(10.0);
                 advanced(ui);
             });
@@ -137,6 +139,178 @@ fn behavior(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
     changed |= ui
         .checkbox(&mut s.confirm_deletes, "Pedir confirmación al eliminar")
         .changed();
+    changed
+}
+
+fn graph(ui: &mut egui::Ui, g: &mut GraphSettings) -> bool {
+    let mut changed = false;
+    section(ui, crate::icons::LINK, "Grafo");
+
+    egui::Grid::new("prefs_graph")
+        .num_columns(2)
+        .spacing([18.0, 10.0])
+        .show(ui, |ui| {
+            ui.label("Layout por defecto");
+            egui::ComboBox::from_id_salt("prefs_graph_layout")
+                .selected_text(g.layout.label())
+                .show_ui(ui, |ui| {
+                    for l in [GraphLayout::Force, GraphLayout::Hierarchical] {
+                        changed |= ui.selectable_value(&mut g.layout, l, l.label()).changed();
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Velocidad de zoom");
+            changed |= ui
+                .add(egui::Slider::new(&mut g.zoom_speed, 0.02..=0.5).fixed_decimals(2))
+                .on_hover_text("Velocidad del zoom con ctrl/rueda y pinch")
+                .changed();
+            ui.end_row();
+
+            ui.label("Margen al ajustar");
+            changed |= ui
+                .add(egui::Slider::new(&mut g.fit_padding, 0.0..=0.3).fixed_decimals(2))
+                .on_hover_text("Espacio libre alrededor del grafo al pulsar «Ajustar»")
+                .changed();
+            ui.end_row();
+        });
+
+    ui.add_space(4.0);
+    ui.label("Aristas:");
+    changed |= ui
+        .checkbox(&mut g.show_optional, "Mostrar dependencias opcionales")
+        .changed();
+    changed |= ui
+        .checkbox(&mut g.show_conflicts, "Mostrar conflictos")
+        .changed();
+    changed |= ui
+        .checkbox(&mut g.show_variants, "Mostrar familias de variantes")
+        .changed();
+
+    ui.add_space(4.0);
+    ui.label("Interacción:");
+    changed |= ui
+        .checkbox(&mut g.labels_always, "Mostrar etiquetas siempre")
+        .changed();
+    changed |= ui
+        .checkbox(&mut g.dragging, "Permitir arrastrar nodos")
+        .changed();
+    changed |= ui
+        .checkbox(&mut g.node_selection, "Permitir seleccionar nodos")
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut g.auto_settle,
+            "El layout de Fuerza se detiene al asentarse",
+        )
+        .changed();
+
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new("Fuerza (avanzado)")
+        .id_salt("prefs_graph_force")
+        .default_open(false)
+        .show(ui, |ui| {
+            egui::Grid::new("prefs_graph_force_grid")
+                .num_columns(2)
+                .spacing([18.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Gravedad central");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut g.force.gravity, 0.0..=2.0).fixed_decimals(2))
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Atracción");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut g.force.c_attract, 0.0..=2.0).fixed_decimals(2))
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Repulsión");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut g.force.c_repulse, 0.0..=2.0).fixed_decimals(2))
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Amortiguación");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut g.force.damping, 0.0..=1.0).fixed_decimals(2))
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Escala k");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut g.force.k_scale, 0.1..=2.0).fixed_decimals(2))
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Paso de tiempo (dt)");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut g.force.dt, 0.01..=0.2).fixed_decimals(3))
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Paso máximo");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut g.force.max_step, 1.0..=50.0).fixed_decimals(1))
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Épsilon");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut g.force.epsilon, 1e-4..=1e-2).fixed_decimals(4))
+                        .changed();
+                    ui.end_row();
+                });
+        });
+
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new("Jerárquico (avanzado)")
+        .id_salt("prefs_graph_hier")
+        .default_open(false)
+        .show(ui, |ui| {
+            egui::Grid::new("prefs_graph_hier_grid")
+                .num_columns(2)
+                .spacing([18.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Separación de filas");
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut g.hierarchical.row_dist, 10.0..=200.0)
+                                .fixed_decimals(0),
+                        )
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Separación de columnas");
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut g.hierarchical.col_dist, 10.0..=200.0)
+                                .fixed_decimals(0),
+                        )
+                        .changed();
+                    ui.end_row();
+
+                    ui.label("Orientación");
+                    egui::ComboBox::from_id_salt("prefs_graph_orientation")
+                        .selected_text(g.hierarchical.orientation.label())
+                        .show_ui(ui, |ui| {
+                            for o in [HierOrientation::TopDown, HierOrientation::LeftRight] {
+                                changed |= ui
+                                    .selectable_value(&mut g.hierarchical.orientation, o, o.label())
+                                    .changed();
+                            }
+                        });
+                    ui.end_row();
+                });
+            changed |= ui
+                .checkbox(
+                    &mut g.hierarchical.center_parent,
+                    "Centrar los padres sobre sus hijos",
+                )
+                .changed();
+        });
+
     changed
 }
 
