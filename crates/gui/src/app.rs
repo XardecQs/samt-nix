@@ -336,6 +336,19 @@ impl GtaMoApp {
         }
     }
 
+    /// Whether a full-screen overlay/dialog is on top of the tabs, so background
+    /// widgets (e.g. the graph) must ignore raw input that bypasses egui layers.
+    fn overlay_open(&self) -> bool {
+        self.lightbox.is_some()
+            || self.input.is_some()
+            || self.confirm.is_some()
+            || self.manifest_editor.is_some()
+            || self.notes_editor.is_some()
+            || self.show_preferences
+            || self.show_about
+            || self.show_shortcuts
+    }
+
     fn refresh(&mut self) {
         match self.backend.snapshot() {
             Ok(s) => {
@@ -3090,7 +3103,8 @@ impl GtaMoApp {
         let over = ui
             .input(|i| i.pointer.hover_pos())
             .map(|p| rect.contains(p))
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && !self.overlay_open();
         if over {
             ui.input(|i| {
                 if !(i.modifiers.ctrl || i.modifiers.command) && i.raw_scroll_delta.y != 0.0 {
