@@ -208,6 +208,9 @@ fn graph(ui: &mut egui::Ui, g: &mut GraphSettings) -> bool {
     changed |= ui
         .checkbox(&mut g.show_variants, "Mostrar familias de variantes")
         .changed();
+    changed |= ui
+        .checkbox(&mut g.only_enabled, "Mostrar solo los mods activados")
+        .changed();
 
     ui.add_space(4.0);
     ui.label("Interacción:");

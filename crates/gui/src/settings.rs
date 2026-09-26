@@ -184,6 +184,9 @@ pub struct GraphSettings {
     pub label_bg: bool,
     #[serde(default = "default_true")]
     pub highlight_selected: bool,
+    /// Show only enabled mods in the graph.
+    #[serde(default)]
+    pub only_enabled: bool,
     #[serde(default = "default_true")]
     pub auto_settle: bool,
     #[serde(default)]
@@ -211,6 +214,7 @@ impl Default for GraphSettings {
             label_font: default_label_font(),
             label_bg: true,
             highlight_selected: true,
+            only_enabled: false,
             auto_settle: true,
             force: ForcePrefs::default(),
             hierarchical: HierarchicalPrefs::default(),
@@ -406,6 +410,7 @@ mod tests {
         assert_eq!(s.graph.node_radius, 5.0);
         assert_eq!(s.graph.label_font, 12.0);
         assert!(s.graph.label_bg && s.graph.highlight_selected);
+        assert!(!s.graph.only_enabled);
 
         let s = GuiSettings {
             graph: GraphSettings {

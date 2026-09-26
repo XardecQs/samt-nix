@@ -608,9 +608,11 @@ edges: required dependencies, optional ones, conflicts, `requires_any`
 alternatives and `[variant]` families. Edges can be filtered with the
 *Opcionales*, *Conflictos* and *Variantes* toggles. It supports free zoom/pan
 (the mouse wheel zooms towards the cursor and drag pans, even outside the
-viewport) plus **＋/－/⤢ Ajustar** buttons, node dragging, node selection (which
-opens the mod's detail), a **Fuerza** layout (default; it settles and pauses on
-its own) with a **Jerárquico** alternative, and a **Reorganizar** button.
+viewport) plus **＋/－/⤢ Ajustar** buttons, node dragging, and a **Fuerza**
+layout (default; it settles and pauses on its own) with a **Jerárquico**
+alternative and a **Reorganizar** button. A single click selects a node (shown
+in an info line) and a double click opens its detail; labels have a background
+and stay at a constant screen size, and edges/arrows do not grow with the zoom.
 Positions are kept when only the enabled state changes. All of this (plus the
 advanced force/hierarchical parameters) is configurable in
 **Preferencias → Grafo** and persisted in `gui.toml`.
@@ -629,10 +631,12 @@ The GUI follows the system **light/dark** theme by default and can be forced in
   green, gray — plus a custom color picker), high-contrast mode,
   UI density, interface scale, "reduce motion" and whether to show covers.
 - A **Grafo** section configures the dependency graph: default layout (Fuerza/
-  Jerárquico), which edge kinds to show, labels/dragging/selection, zoom speed
-  and fit padding, "settle and pause" for the force layout, and advanced
-  **Fuerza**/**Jerárquico** parameters (center gravity, attraction, repulsion,
-  damping, spacing, orientation…).
+  Jerárquico), which edge kinds to show and "only enabled", edge width/arrow
+  size and arrows on/off (kept at a constant screen size across zoom), node
+  radius, label font/background, highlight the selected node, labels/dragging/
+  selection, zoom speed and fit padding, "settle and pause" for the force
+  layout, and advanced **Fuerza**/**Jerárquico** parameters (center gravity,
+  attraction, repulsion, damping, spacing, orientation…).
 - A semantic color palette (`crates/gui/src/theme.rs`) whose text/background
   pairs are verified to meet **WCAG AA** contrast in both themes by unit tests.
 

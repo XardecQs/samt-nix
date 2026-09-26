@@ -1242,7 +1242,9 @@ impl eframe::App for GtaMoApp {
             if changed {
                 self.settings.save();
                 self.apply_settings(ctx);
-                // Re-apply the graph layout parameters on the next draw.
+                // Re-apply the graph settings on the next draw (structure may
+                // change, e.g. the "only enabled" filter).
+                self.graph_stale = true;
                 self.graph_reset_layout = true;
                 self.toasts.push(
                     ctx,
@@ -2830,7 +2832,15 @@ impl GtaMoApp {
     fn compute_graph_signature(&self) -> u64 {
         use crate::model::GEdgeKind;
         let mut hasher = DefaultHasher::new();
-        let mut ids: Vec<i64> = self.snapshot.mods.iter().map(|m| m.id).collect();
+        let only_enabled = self.settings.graph.only_enabled;
+        only_enabled.hash(&mut hasher);
+        let mut ids: Vec<i64> = self
+            .snapshot
+            .mods
+            .iter()
+            .filter(|m| !only_enabled || m.enabled)
+            .map(|m| m.id)
+            .collect();
         ids.sort_unstable();
         ids.hash(&mut hasher);
         let mut edges: Vec<(i64, i64, GEdgeKind)> = self
@@ -2913,7 +2923,11 @@ impl GtaMoApp {
         let sg = petgraph::stable_graph::StableGraph::<i64, GEdgeKind>::default();
         let mut g = DepGraph::from(&sg);
         let mut idx: HashMap<i64, petgraph::stable_graph::NodeIndex> = HashMap::new();
+        let only_enabled = self.settings.graph.only_enabled;
         for (i, m) in self.snapshot.mods.iter().enumerate() {
+            if only_enabled && !m.enabled {
+                continue;
+            }
             let n = g.add_node_with_location(m.id, Self::initial_node_pos(i));
             if let Some(node) = g.node_mut(n) {
                 node.set_label(m.name.clone());
