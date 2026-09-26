@@ -266,9 +266,18 @@ pub fn show(
     let visible = visible_entries(&tree, state, entries, searching);
     let ordered: Vec<String> = visible.iter().map(|&i| entries[i].rel.clone()).collect();
 
+    // Ctrl+A selects every visible entry (only when no widget has focus, so a
+    // focused search field still selects its text).
+    if ui.memory(|m| m.focused().is_none())
+        && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
+    {
+        state.selected = ordered.iter().cloned().collect();
+        state.last_clicked = ordered.last().cloned();
+    }
+
     let narrow = ui.available_width() < 640.0;
 
-    header(ui, state, config, entries, &mut resp);
+    header(ui, state, config, entries, &ordered, &mut resp);
 
     // Folder tree (hidden on narrow layouts; a breadcrumb handles navigation).
     if !narrow {
@@ -379,6 +388,7 @@ fn header(
     state: &mut FileBrowserState,
     config: &BrowserConfig<'_>,
     entries: &[FileEntry],
+    ordered: &[String],
     resp: &mut BrowserResponse,
 ) {
     ui.horizontal_wrapped(|ui| {
@@ -480,7 +490,7 @@ fn header(
             }
         });
     });
-    action_bar(ui, state, config, resp);
+    action_bar(ui, state, config, ordered, resp);
     ui.separator();
 }
 
@@ -489,6 +499,7 @@ fn action_bar(
     ui: &mut egui::Ui,
     state: &mut FileBrowserState,
     config: &BrowserConfig<'_>,
+    ordered: &[String],
     resp: &mut BrowserResponse,
 ) {
     if state.selected.is_empty() {
@@ -542,6 +553,18 @@ fn action_bar(
         if ui.small_button("Limpiar").clicked() {
             state.selected.clear();
             state.last_clicked = None;
+        }
+        if ui
+            .small_button("Invertir")
+            .on_hover_text("Invertir la selección entre los visibles")
+            .clicked()
+        {
+            let sel = state.selected.clone();
+            state.selected = ordered
+                .iter()
+                .filter(|r| !sel.contains(*r))
+                .cloned()
+                .collect();
         }
     });
 }
