@@ -93,6 +93,8 @@ pub struct FileBrowserState {
     kind_filter: Option<String>,
     /// Quick "images only" filter.
     images_only: bool,
+    /// Show dotfiles/dot-directories.
+    show_hidden: bool,
     pub view: ViewMode,
     sort: SortField,
     desc: bool,
@@ -112,6 +114,7 @@ impl FileBrowserState {
             search: String::new(),
             kind_filter: None,
             images_only: false,
+            show_hidden: false,
             view,
             sort: SortField::Name,
             desc: false,
@@ -168,14 +171,22 @@ fn insert(node: &mut Node, parts: &[&str], idx: usize) {
     insert(&mut node.dirs[pos], &parts[1..], idx);
 }
 
-fn build_tree(entries: &[FileEntry]) -> Node {
+fn build_tree(entries: &[FileEntry], show_hidden: bool) -> Node {
     let mut root = Node::new(String::new(), String::new());
     for (i, e) in entries.iter().enumerate() {
+        if !show_hidden && is_hidden(&e.rel) {
+            continue;
+        }
         let parts: Vec<&str> = e.rel.split('/').collect();
         insert(&mut root, &parts, i);
     }
     finalize(&mut root);
     root
+}
+
+/// True when any path component is a dotfile/dot-directory.
+fn is_hidden(rel: &str) -> bool {
+    rel.split('/').any(|p| p.starts_with('.'))
 }
 
 fn finalize(node: &mut Node) -> usize {
@@ -244,7 +255,7 @@ pub fn show(
     thumbs: &mut ThumbCache,
 ) -> BrowserResponse {
     let mut resp = BrowserResponse::default();
-    let tree = build_tree(entries);
+    let tree = build_tree(entries, state.show_hidden);
 
     // Keep selection/expansion/current consistent with the current entries.
     let rels: HashSet<&str> = entries.iter().map(|e| e.rel.as_str()).collect();
@@ -411,7 +422,10 @@ fn visible_entries(
         entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| matches(e, &state.search, state.kind_filter.as_deref()))
+            .filter(|(_, e)| {
+                (state.show_hidden || !is_hidden(&e.rel))
+                    && matches(e, &state.search, state.kind_filter.as_deref())
+            })
             .map(|(i, _)| i)
             .collect()
     } else {
@@ -477,6 +491,13 @@ fn header(
             .clicked()
         {
             state.images_only = !state.images_only;
+        }
+        if ui
+            .selectable_label(state.show_hidden, "Ocultos")
+            .on_hover_text("Mostrar archivos ocultos")
+            .clicked()
+        {
+            state.show_hidden = !state.show_hidden;
         }
         // Kind filter dropdown, built from the entries actually present.
         let mut kinds: Vec<(String, String)> = Vec::new();
@@ -905,7 +926,7 @@ mod tests {
             entry("models/b.dff", "game", 2),
             entry("data/c.cfg", "game", 3),
         ];
-        let tree = build_tree(&entries);
+        let tree = build_tree(&entries, true);
         assert_eq!(tree.count, 3);
         assert_eq!(tree.dirs.len(), 2);
         let models = find(&tree, "models").unwrap();
