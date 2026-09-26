@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -235,6 +237,14 @@ pub struct GtaMoApp {
     graph: Option<DepGraph>,
     /// Mod currently selected in the graph (to react only to changes).
     graph_selected: Option<i64>,
+    /// Snapshot changed since the graph was last synced.
+    graph_stale: bool,
+    /// Structural signature (node ids + filtered edges) of the last graph.
+    graph_signature: u64,
+    /// Force the layout state to be reset on the next draw.
+    graph_reset_layout: bool,
+    /// Fit the view to the graph on the next draw (used on build/reorganize).
+    graph_fit_pending: bool,
 }
 
 impl GtaMoApp {
@@ -311,12 +321,16 @@ impl GtaMoApp {
             child_pid: Arc::new(Mutex::new(None)),
             stopping: false,
             deps_view: DepsView::List,
-            graph_layout: GraphLayout::Hierarchical,
+            graph_layout: GraphLayout::Force,
             graph_show_optional: true,
             graph_show_conflicts: true,
             graph_show_variants: true,
             graph: None,
             graph_selected: None,
+            graph_stale: false,
+            graph_signature: 0,
+            graph_reset_layout: false,
+            graph_fit_pending: true,
         };
         app.refresh();
         app
@@ -353,8 +367,9 @@ impl GtaMoApp {
                 }
                 self.snapshot = s;
                 self.status = None;
-                // The dependency graph is derived from the snapshot: rebuild.
-                self.graph = None;
+                // The dependency graph is derived from the snapshot; sync it lazily
+                // so an appearance-only change keeps the current node positions.
+                self.graph_stale = true;
                 let folders: Vec<String> = self
                     .snapshot
                     .mods
@@ -2637,34 +2652,41 @@ impl GtaMoApp {
                     )
                     .clicked()
                 {
-                    self.graph = None;
+                    self.graph_stale = true;
+                    self.graph_reset_layout = true;
+                    self.graph_fit_pending = true;
                 }
                 if ui
                     .selectable_value(&mut self.graph_layout, GraphLayout::Force, "Fuerza")
                     .clicked()
                 {
-                    self.graph = None;
+                    self.graph_stale = true;
+                    self.graph_reset_layout = true;
+                    self.graph_fit_pending = true;
                 }
                 if ui.button("Reorganizar").clicked() {
                     self.graph = None;
+                    self.graph_stale = true;
+                    self.graph_reset_layout = true;
+                    self.graph_fit_pending = true;
                 }
                 if ui
                     .checkbox(&mut self.graph_show_optional, "Opcionales")
                     .changed()
                 {
-                    self.graph = None;
+                    self.graph_stale = true;
                 }
                 if ui
                     .checkbox(&mut self.graph_show_conflicts, "Conflictos")
                     .changed()
                 {
-                    self.graph = None;
+                    self.graph_stale = true;
                 }
                 if ui
                     .checkbox(&mut self.graph_show_variants, "Variantes")
                     .changed()
                 {
-                    self.graph = None;
+                    self.graph_stale = true;
                 }
             }
         });
@@ -2769,38 +2791,122 @@ impl GtaMoApp {
         }
     }
 
+    /// Stable color for a graph node based on its state.
+    fn graph_node_color(enabled: bool, hidden: bool) -> egui::Color32 {
+        if hidden {
+            egui::Color32::from_rgb(0x61, 0x61, 0x61)
+        } else if enabled {
+            egui::Color32::from_rgb(0x4c, 0xaf, 0x50)
+        } else {
+            egui::Color32::from_rgb(0x9e, 0x9e, 0x9e)
+        }
+    }
+
+    /// Distinct initial position for the node at index `i` (golden-angle
+    /// spiral), so the force layout starts from separated nodes instead of all
+    /// of them coincident at the origin.
+    fn initial_node_pos(i: usize) -> egui::Pos2 {
+        const GOLDEN_ANGLE: f32 = 2.399_963_2;
+        let i = i as f32;
+        let angle = i * GOLDEN_ANGLE;
+        let radius = 30.0 * (i + 1.0).sqrt();
+        egui::Pos2::new(radius * angle.cos(), radius * angle.sin())
+    }
+
+    /// Structural signature of the graph (node ids + filtered edges). Two
+    /// graphs with the same signature can be updated in place.
+    fn compute_graph_signature(&self) -> u64 {
+        use crate::model::GEdgeKind;
+        let mut hasher = DefaultHasher::new();
+        let mut ids: Vec<i64> = self.snapshot.mods.iter().map(|m| m.id).collect();
+        ids.sort_unstable();
+        ids.hash(&mut hasher);
+        let mut edges: Vec<(i64, i64, GEdgeKind)> = self
+            .snapshot
+            .edges
+            .iter()
+            .filter(|e| {
+                Self::edge_visible(
+                    e.kind,
+                    self.graph_show_optional,
+                    self.graph_show_conflicts,
+                    self.graph_show_variants,
+                )
+            })
+            .map(|e| (e.from, e.to, e.kind))
+            .collect();
+        edges.sort_unstable();
+        edges.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Whether an edge kind is shown with the current toggles.
+    fn edge_visible(
+        kind: crate::model::GEdgeKind,
+        show_optional: bool,
+        show_conflicts: bool,
+        show_variants: bool,
+    ) -> bool {
+        use crate::model::GEdgeKind;
+        match kind {
+            GEdgeKind::Optional => show_optional,
+            GEdgeKind::Conflict => show_conflicts,
+            GEdgeKind::Variant => show_variants,
+            GEdgeKind::Required | GEdgeKind::RequiresAny => true,
+        }
+    }
+
+    /// Refreshes labels/colors of an existing graph without moving the nodes.
+    fn update_graph_appearance(&mut self) {
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        let info: HashMap<i64, (String, egui::Color32)> = self
+            .snapshot
+            .mods
+            .iter()
+            .map(|m| {
+                (
+                    m.id,
+                    (m.name.clone(), Self::graph_node_color(m.enabled, m.hidden)),
+                )
+            })
+            .collect();
+        let indices: Vec<petgraph::stable_graph::NodeIndex> = graph.g().node_indices().collect();
+        for ix in indices {
+            let Some(id) = graph.node(ix).map(|n| *n.payload()) else {
+                continue;
+            };
+            if let Some((name, color)) = info.get(&id) {
+                if let Some(node) = graph.node_mut(ix) {
+                    node.set_label(name.clone());
+                    node.set_color(*color);
+                }
+            }
+        }
+    }
+
     /// Builds the dependency graph from the snapshot, honoring the edge filters.
     fn build_dep_graph(&self) -> DepGraph {
         use crate::model::GEdgeKind;
         let sg = petgraph::stable_graph::StableGraph::<i64, GEdgeKind>::default();
         let mut g = DepGraph::from(&sg);
-        let mut idx: std::collections::HashMap<i64, petgraph::stable_graph::NodeIndex> =
-            std::collections::HashMap::new();
-        let enabled_color = egui::Color32::from_rgb(0x4c, 0xaf, 0x50);
-        let disabled_color = egui::Color32::from_rgb(0x9e, 0x9e, 0x9e);
-        for m in &self.snapshot.mods {
-            let n = g.add_node(m.id);
-            let color = if m.hidden {
-                egui::Color32::from_rgb(0x61, 0x61, 0x61)
-            } else if m.enabled {
-                enabled_color
-            } else {
-                disabled_color
-            };
+        let mut idx: HashMap<i64, petgraph::stable_graph::NodeIndex> = HashMap::new();
+        for (i, m) in self.snapshot.mods.iter().enumerate() {
+            let n = g.add_node_with_location(m.id, Self::initial_node_pos(i));
             if let Some(node) = g.node_mut(n) {
                 node.set_label(m.name.clone());
-                node.set_color(color);
+                node.set_color(Self::graph_node_color(m.enabled, m.hidden));
             }
             idx.insert(m.id, n);
         }
         for e in &self.snapshot.edges {
-            let show = match e.kind {
-                GEdgeKind::Optional => self.graph_show_optional,
-                GEdgeKind::Conflict => self.graph_show_conflicts,
-                GEdgeKind::Variant => self.graph_show_variants,
-                GEdgeKind::Required | GEdgeKind::RequiresAny => true,
-            };
-            if !show {
+            if !Self::edge_visible(
+                e.kind,
+                self.graph_show_optional,
+                self.graph_show_conflicts,
+                self.graph_show_variants,
+            ) {
                 continue;
             }
             if let (Some(&a), Some(&b)) = (idx.get(&e.from), idx.get(&e.to)) {
@@ -2810,36 +2916,139 @@ impl GtaMoApp {
         g
     }
 
+    /// Resets the active layout so a rebuilt graph is positioned again (the
+    /// hierarchical layout only runs once; the force one restarts).
+    fn reset_graph_layout(&self, ui: &mut egui::Ui) {
+        match self.graph_layout {
+            GraphLayout::Hierarchical => {
+                HierGraphView::reset_layout(ui);
+            }
+            GraphLayout::Force => {
+                ForceGraphView::reset_layout(ui);
+                let mut state = ForceGraphView::get_layout_state(ui);
+                state.base.is_running = true;
+                state.base.step_count = 0;
+                state.base.k_scale = 0.6;
+                state.extras.0.params.c = 0.8;
+                ForceGraphView::set_layout_state(ui, state);
+            }
+        }
+    }
+
+    /// Zooms the graph by `factor`, keeping the canvas point under `anchor` (a
+    /// screen position) fixed.
+    fn apply_graph_zoom(ui: &mut egui::Ui, anchor: egui::Pos2, factor: f32) {
+        let mut meta = egui_graphs::Metadata::load(ui);
+        let old_zoom = meta.zoom;
+        let new_zoom = (old_zoom * factor).clamp(0.02, 50.0);
+        let anchor = anchor.to_vec2();
+        let canvas = (anchor - meta.pan) / old_zoom;
+        meta.pan = anchor - canvas * new_zoom;
+        meta.zoom = new_zoom;
+        meta.first_frame = false;
+        meta.save(ui);
+    }
+
     fn ui_dep_graph(&mut self, ui: &mut egui::Ui) {
+        // Sync the graph with the snapshot. Rebuild only on structural changes so
+        // an appearance-only refresh keeps the current node positions.
+        let mut just_built = false;
         if self.graph.is_none() {
             self.graph = Some(self.build_dep_graph());
+            self.graph_signature = self.compute_graph_signature();
+            self.graph_stale = false;
+            self.graph_fit_pending = true;
+            just_built = true;
+        } else if self.graph_stale {
+            let signature = self.compute_graph_signature();
+            if signature != self.graph_signature {
+                self.graph = Some(self.build_dep_graph());
+                self.graph_signature = signature;
+                just_built = true;
+            } else {
+                self.update_graph_appearance();
+            }
+            self.graph_stale = false;
         }
+        if just_built || self.graph_reset_layout {
+            self.reset_graph_layout(ui);
+        }
+        self.graph_reset_layout = false;
+
+        // Fit once on build/reorganize/reset (free zoom/pan otherwise).
+        if self.graph_fit_pending {
+            match self.graph_layout {
+                GraphLayout::Hierarchical => HierGraphView::reset_metadata(ui),
+                GraphLayout::Force => ForceGraphView::reset_metadata(ui),
+            }
+            self.graph_fit_pending = false;
+        }
+
+        // Manual zoom controls (the wheel/drag navigation is enabled too).
+        let mut zoom_dir = 0.0f32;
+        let mut fit = false;
+        ui.horizontal(|ui| {
+            if ui
+                .button(crate::icons::ZOOM_IN)
+                .on_hover_text("Acercar")
+                .clicked()
+            {
+                zoom_dir = 1.0;
+            }
+            if ui
+                .button(crate::icons::ZOOM_OUT)
+                .on_hover_text("Alejar")
+                .clicked()
+            {
+                zoom_dir = -1.0;
+            }
+            if ui
+                .button(crate::icons::MAXIMIZE)
+                .on_hover_text("Encajar el grafo en la vista")
+                .clicked()
+            {
+                fit = true;
+            }
+        });
+
         let interactions = egui_graphs::SettingsInteraction::new()
             .with_node_selection_enabled(true)
             .with_dragging_enabled(true);
-        let navigation = egui_graphs::SettingsNavigation::default();
+        let navigation = egui_graphs::SettingsNavigation::default()
+            .with_zoom_and_pan_enabled(true)
+            .with_fit_to_screen_enabled(false);
         let style = egui_graphs::SettingsStyle::default().with_labels_always(true);
 
         let mut graph = match self.graph.take() {
             Some(g) => g,
             None => return,
         };
-        {
-            match self.graph_layout {
-                GraphLayout::Hierarchical => {
-                    let mut view = HierGraphView::new(&mut graph)
-                        .with_interactions(&interactions)
-                        .with_navigations(&navigation)
-                        .with_styles(&style);
-                    ui.add(&mut view);
-                }
-                GraphLayout::Force => {
-                    let mut view = ForceGraphView::new(&mut graph)
-                        .with_interactions(&interactions)
-                        .with_navigations(&navigation)
-                        .with_styles(&style);
-                    ui.add(&mut view);
-                }
+        let rect = match self.graph_layout {
+            GraphLayout::Hierarchical => {
+                let mut view = HierGraphView::new(&mut graph)
+                    .with_interactions(&interactions)
+                    .with_navigations(&navigation)
+                    .with_styles(&style);
+                ui.add(&mut view).rect
+            }
+            GraphLayout::Force => {
+                let mut view = ForceGraphView::new(&mut graph)
+                    .with_interactions(&interactions)
+                    .with_navigations(&navigation)
+                    .with_styles(&style);
+                ui.add(&mut view).rect
+            }
+        };
+
+        // Auto-pause the force simulation once it has settled.
+        if self.graph_layout == GraphLayout::Force {
+            let mut state = ForceGraphView::get_layout_state(ui);
+            if state.base.is_running
+                && state.base.step_count > 400
+                && state.base.last_avg_displacement.is_some_and(|d| d < 0.5)
+            {
+                state.base.is_running = false;
+                ForceGraphView::set_layout_state(ui, state);
             }
         }
 
@@ -2849,6 +3058,32 @@ impl GtaMoApp {
             .copied()
             .and_then(|ix| graph.node(ix).map(|n| *n.payload()));
         self.graph = Some(graph);
+
+        // Apply zoom after the widget so it is not overwritten this frame.
+        // Plain wheel zooms towards the pointer; ctrl/cmd+wheel and pinch are
+        // handled by the widget itself.
+        let mut wheel = 0.0f32;
+        let mut wheel_pos: Option<egui::Pos2> = None;
+        let over = ui
+            .input(|i| i.pointer.hover_pos())
+            .map(|p| rect.contains(p))
+            .unwrap_or(false);
+        if over {
+            ui.input(|i| {
+                if !(i.modifiers.ctrl || i.modifiers.command) && i.raw_scroll_delta.y != 0.0 {
+                    wheel = i.raw_scroll_delta.y;
+                    wheel_pos = i.pointer.hover_pos();
+                }
+            });
+        }
+        if fit {
+            self.graph_fit_pending = true;
+        } else if zoom_dir != 0.0 {
+            Self::apply_graph_zoom(ui, rect.center(), if zoom_dir > 0.0 { 1.25 } else { 0.8 });
+        } else if wheel != 0.0 {
+            let factor = (wheel * 0.002).exp().clamp(0.5, 2.0);
+            Self::apply_graph_zoom(ui, wheel_pos.unwrap_or_else(|| rect.center()), factor);
+        }
 
         if let Some(id) = selected {
             if self.graph_selected != Some(id) {
@@ -4424,5 +4659,53 @@ mod tests {
             assert!(r.width() <= bounds.width() + 0.01);
             assert!(r.height() <= bounds.height() + 0.01);
         }
+    }
+
+    #[test]
+    fn initial_node_positions_are_distinct() {
+        let mut seen: Vec<(i32, i32)> = Vec::new();
+        for i in 0..200 {
+            let p = super::GtaMoApp::initial_node_pos(i);
+            let key = ((p.x * 100.0) as i32, (p.y * 100.0) as i32);
+            assert!(!seen.contains(&key), "posición repetida en i={i}: {p:?}");
+            seen.push(key);
+        }
+    }
+
+    #[test]
+    fn edge_visibility_respects_toggles() {
+        use crate::model::GEdgeKind;
+        // Required/RequiresAny are always shown.
+        assert!(super::GtaMoApp::edge_visible(
+            GEdgeKind::Required,
+            false,
+            false,
+            false
+        ));
+        // The rest follow their toggle.
+        assert!(super::GtaMoApp::edge_visible(
+            GEdgeKind::Optional,
+            true,
+            false,
+            false
+        ));
+        assert!(!super::GtaMoApp::edge_visible(
+            GEdgeKind::Optional,
+            false,
+            false,
+            false
+        ));
+        assert!(!super::GtaMoApp::edge_visible(
+            GEdgeKind::Conflict,
+            true,
+            false,
+            true
+        ));
+        assert!(super::GtaMoApp::edge_visible(
+            GEdgeKind::Variant,
+            false,
+            false,
+            true
+        ));
     }
 }

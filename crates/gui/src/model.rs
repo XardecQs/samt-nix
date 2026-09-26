@@ -88,7 +88,7 @@ pub struct Snapshot {
 }
 
 /// Kind of relation drawn by the dependency graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum GEdgeKind {
     Required,
     Optional,

@@ -606,10 +606,12 @@ with [`egui_graphs`](https://crates.io/crates/egui_graphs)) renders the mods as
 nodes (green = enabled, gray = disabled, dark = hidden) and the relations as
 edges: required dependencies, optional ones, conflicts, `requires_any`
 alternatives and `[variant]` families. Edges can be filtered with the
-*Opcionales*, *Conflictos* and *Variantes* toggles. It supports zoom/pan, node
-dragging, node selection (which opens the mod's detail), a **Jerárquico** layout
-(default, best for DAGs) with a **Fuerza** alternative, and a **Reorganizar**
-button.
+*Opcionales*, *Conflictos* and *Variantes* toggles. It supports free zoom/pan
+(the mouse wheel zooms towards the cursor and drag pans, even outside the
+viewport) plus **＋/－/⤢ Ajustar** buttons, node dragging, node selection (which
+opens the mod's detail), a **Fuerza** layout (default; it settles and pauses on
+its own) with a **Jerárquico** alternative, and a **Reorganizar** button.
+Positions are kept when only the enabled state changes.
 
 **Datos** and **Overwrite** share one explorer widget: a folder-tree sidebar, a
 list or thumbnail-grid content area, search and kind filter, multi-selection
