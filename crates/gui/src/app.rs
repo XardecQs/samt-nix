@@ -3291,6 +3291,7 @@ impl GtaMoApp {
                 rel: e.rel.clone(),
                 name: e.name.clone(),
                 size: e.size,
+                modified: e.modified,
                 kind: e.category.key().to_string(),
                 kind_label: e.category.label().to_string(),
                 secondary: String::new(),
@@ -3534,6 +3535,7 @@ impl GtaMoApp {
                 rel: r.rel.clone(),
                 name: r.name.clone(),
                 size: r.size,
+                modified: r.modified,
                 kind: r.kind.clone(),
                 kind_label: r.kind_label.clone(),
                 secondary: if r.orphan {

@@ -23,6 +23,7 @@ pub enum ViewMode {
 enum SortField {
     Name,
     Size,
+    Date,
     Path,
 }
 
@@ -31,6 +32,7 @@ impl SortField {
         match self {
             SortField::Name => "Nombre",
             SortField::Size => "Tamaño",
+            SortField::Date => "Fecha",
             SortField::Path => "Ruta",
         }
     }
@@ -43,6 +45,8 @@ pub struct FileEntry {
     pub rel: String,
     pub name: String,
     pub size: u64,
+    /// Last modification time, when known (used by the date sort).
+    pub modified: Option<std::time::SystemTime>,
     /// Filter key (e.g. `image`, `save`, `game`, `userdata`).
     pub kind: String,
     /// Human-readable kind for the badge.
@@ -352,6 +356,7 @@ fn visible_entries(
         let ord = match state.sort {
             SortField::Name => ea.name.to_lowercase().cmp(&eb.name.to_lowercase()),
             SortField::Size => ea.size.cmp(&eb.size),
+            SortField::Date => ea.modified.cmp(&eb.modified),
             SortField::Path => ea.rel.cmp(&eb.rel),
         };
         if state.desc {
@@ -425,7 +430,12 @@ fn header(
         egui::ComboBox::from_id_salt((config.id, "sort"))
             .selected_text(state.sort.label())
             .show_ui(ui, |ui| {
-                for f in [SortField::Name, SortField::Size, SortField::Path] {
+                for f in [
+                    SortField::Name,
+                    SortField::Size,
+                    SortField::Date,
+                    SortField::Path,
+                ] {
                     ui.selectable_value(&mut state.sort, f, f.label());
                 }
             });
@@ -741,6 +751,7 @@ mod tests {
             rel: rel.to_string(),
             name,
             size,
+            modified: None,
             kind: kind.to_string(),
             kind_label: kind.to_string(),
             secondary: String::new(),

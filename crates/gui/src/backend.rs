@@ -32,6 +32,7 @@ pub struct UpperView {
     pub rel: String,
     pub name: String,
     pub size: u64,
+    pub modified: Option<std::time::SystemTime>,
     /// `userdata` / `modloader-ini` / `game`.
     pub kind: String,
     pub kind_label: String,
@@ -478,6 +479,7 @@ impl Backend {
                         rel: e.rel,
                         name: e.name,
                         size: e.size,
+                        modified: e.modified,
                         kind: e.kind.key().to_string(),
                         kind_label: e.kind.label().to_string(),
                         orphan: p.is_empty(),
