@@ -36,6 +36,10 @@ pub struct ModView {
     pub hidden_global: bool,
     /// Notes for this mod in the active profile.
     pub notes: Option<String>,
+    /// Selectable option groups (manifest + `options/<group>/<value>/`).
+    pub option_groups: Vec<gta_mo_core::meta::ModOption>,
+    /// Selected option values in the active profile (`{group: value}`).
+    pub selected_options: HashMap<String, String>,
 }
 
 impl ModView {
@@ -77,6 +81,28 @@ pub struct Snapshot {
     pub dep_cycles: Vec<Vec<String>>,
     /// Variant family (`group`) -> members `(folder, name)`, for the selector.
     pub variant_members: HashMap<String, Vec<(String, String)>>,
+    /// Option selections keyed by mod folder (`folder -> {group: value}`).
+    pub options_by_folder: HashMap<String, HashMap<String, String>>,
+    /// Dependency/relation edges for the graph view (`from` depends on `to`).
+    pub edges: Vec<GEdge>,
+}
+
+/// Kind of relation drawn by the dependency graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GEdgeKind {
+    Required,
+    Optional,
+    Conflict,
+    RequiresAny,
+    Variant,
+}
+
+/// One edge of the dependency graph (`from` -> `to`).
+#[derive(Debug, Clone)]
+pub struct GEdge {
+    pub from: i64,
+    pub to: i64,
+    pub kind: GEdgeKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +252,8 @@ mod tests {
             hidden: false,
             hidden_global: false,
             notes: None,
+            option_groups: vec![],
+            selected_options: HashMap::new(),
         }
     }
 

@@ -330,6 +330,29 @@ pub enum CtlCommand {
         #[command(subcommand)]
         action: GroupAction,
     },
+    #[command(about = "Select a mod's options in the active profile")]
+    Option {
+        #[command(subcommand)]
+        action: OptionAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OptionAction {
+    #[command(about = "List a mod's option groups and the selected value")]
+    List {
+        ident: String,
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Select an option value for a mod in the profile")]
+    Set {
+        ident: String,
+        group: String,
+        value: String,
+    },
+    #[command(about = "Clear a selected option group for a mod in the profile")]
+    Unset { ident: String, group: String },
 }
 
 #[derive(Subcommand)]

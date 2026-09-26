@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Metadata manifest (`mod.toml`) read from inside each mod folder.
@@ -48,6 +49,63 @@ pub struct ModMeta {
     /// Mod Loader (`modloader.ini`) integration.
     #[serde(default)]
     pub modloader: Option<ModLoaderMeta>,
+    /// Selectable option groups (one value per group per profile). When absent,
+    /// groups are auto-discovered from `options/<group>/<value>/`.
+    #[serde(default)]
+    pub options: Option<Vec<ModOption>>,
+}
+
+/// One selectable option group of a mod. The value chosen per profile mounts
+/// the matching `options/<group>/<value>/` folder on top of the base `mount`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ModOption {
+    /// Stable group id (lowercase `[a-z0-9_-]`).
+    pub group: String,
+    /// Human-readable label (optional).
+    pub name: Option<String>,
+    /// Pre-selected value when the profile has not chosen one (optional).
+    pub default: Option<String>,
+    #[serde(default, deserialize_with = "de_option_choices")]
+    pub choices: Vec<OptionChoice>,
+}
+
+/// One value of a [`ModOption`] group.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct OptionChoice {
+    /// Stable value id (lowercase `[a-z0-9_-]`).
+    pub key: String,
+    /// Human-readable label (optional).
+    pub name: Option<String>,
+    /// Relative folder treated as the game root for this value. Defaults to
+    /// `options/<group>/<key>`.
+    pub path: Option<String>,
+    /// Mods incompatible with this mod when this value is selected.
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    /// At least one of these must be enabled when this value is selected.
+    #[serde(default)]
+    pub requires_any: Vec<String>,
+}
+
+/// Accepts `choices = ["4k", "lite"]` or `choices = [{ key = "4k", ... }]`.
+fn de_option_choices<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<OptionChoice>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ChoiceSpec {
+        Key(String),
+        Full(OptionChoice),
+    }
+    let raw = Vec::<ChoiceSpec>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|c| match c {
+            ChoiceSpec::Key(key) => OptionChoice {
+                key,
+                ..Default::default()
+            },
+            ChoiceSpec::Full(full) => full,
+        })
+        .collect())
 }
 
 /// One variant of a mutually exclusive family.
@@ -297,6 +355,137 @@ pub fn mod_layers(mods_dir: &Path, folder: &str) -> Vec<PathBuf> {
         }
     }
     vec![base]
+}
+
+/// An option group/value id has the same shape as a tag.
+pub fn valid_option_key(key: &str) -> bool {
+    valid_tag(key)
+}
+
+/// Names of the immediate subdirectories of `dir` (empty when it does not
+/// exist or cannot be read).
+fn read_subdirs(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .collect()
+}
+
+/// Relative path of a choice's game-root folder (its `path`, or the default
+/// `options/<group>/<key>`).
+pub fn option_choice_path(group: &ModOption, choice: &OptionChoice) -> String {
+    choice
+        .path
+        .clone()
+        .unwrap_or_else(|| format!("options/{}/{}", group.group, choice.key))
+}
+
+/// Resolves a mod's option groups: the `[[options]]` declarations merged with
+/// the folders auto-discovered under `options/<group>/<value>/`.
+///
+/// Declared groups keep their order/labels; discovered groups/values not
+/// declared are appended (alphabetically). Invalid keys are skipped.
+pub fn mod_option_groups(mods_dir: &Path, folder: &str) -> Vec<ModOption> {
+    let base = mods_dir.join(folder);
+    let mut groups: Vec<ModOption> = Vec::new();
+
+    if let Ok(Some(meta)) = read_mod_meta(mods_dir, folder) {
+        if let Some(opts) = meta.options {
+            for o in opts {
+                if !valid_option_key(&o.group) {
+                    continue;
+                }
+                let mut group = o;
+                group.choices.retain(|c| valid_option_key(&c.key));
+                groups.push(group);
+            }
+        }
+    }
+
+    let opts_root = base.join("options");
+    if opts_root.is_dir() {
+        let mut group_dirs = read_subdirs(&opts_root);
+        group_dirs.sort();
+        for g in group_dirs {
+            if !valid_option_key(&g) {
+                continue;
+            }
+            let mut values: Vec<String> = read_subdirs(&opts_root.join(&g))
+                .into_iter()
+                .filter(|v| valid_option_key(v))
+                .collect();
+            values.sort();
+            if let Some(existing) = groups.iter_mut().find(|x| x.group == g) {
+                for v in values {
+                    if !existing.choices.iter().any(|c| c.key == v) {
+                        existing.choices.push(OptionChoice {
+                            key: v,
+                            ..Default::default()
+                        });
+                    }
+                }
+            } else {
+                let choices = values
+                    .into_iter()
+                    .map(|key| OptionChoice {
+                        key,
+                        ..Default::default()
+                    })
+                    .collect();
+                groups.push(ModOption {
+                    group: g,
+                    name: None,
+                    default: None,
+                    choices,
+                });
+            }
+        }
+    }
+
+    groups
+}
+
+/// Resolves the overlay layer(s) contributed by a mod's **selected** options.
+/// One layer per selected group (in group order), above the base mount.
+pub fn mod_option_layers(
+    mods_dir: &Path,
+    folder: &str,
+    selected: &HashMap<String, String>,
+) -> Vec<PathBuf> {
+    if selected.is_empty() {
+        return Vec::new();
+    }
+    let base = mods_dir.join(folder);
+    let mut out = Vec::new();
+    for group in mod_option_groups(mods_dir, folder) {
+        let Some(value) = selected.get(&group.group) else {
+            continue;
+        };
+        let Some(choice) = group.choices.iter().find(|c| &c.key == value) else {
+            continue;
+        };
+        let rel = option_choice_path(&group, choice);
+        if valid_mount_entry(&rel) {
+            out.push(base.join(&rel));
+        }
+    }
+    out
+}
+
+/// Like [`mod_layers`], but prepends the layers of the mod's selected options
+/// so they override the base `mount`.
+pub fn mod_layers_with_options(
+    mods_dir: &Path,
+    folder: &str,
+    selected: &HashMap<String, String>,
+) -> Vec<PathBuf> {
+    let mut layers = mod_option_layers(mods_dir, folder, selected);
+    layers.extend(mod_layers(mods_dir, folder));
+    layers
 }
 
 /// Atomically writes `content` to `path` (temp file + rename) so a crash or
@@ -727,6 +916,88 @@ optional = ["xardec:extra"]
         let meta = read_mod_meta(&dir, "M").unwrap().unwrap();
         assert_eq!(meta.name.as_deref(), Some("New"));
         assert_eq!(meta.version.as_deref(), Some("2.0"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn option_groups_merge_manifest_and_folders() {
+        let dir = tmp_mods_dir("opts");
+        fs::create_dir_all(dir.join("M/options/variant/4k")).unwrap();
+        fs::create_dir_all(dir.join("M/options/variant/lite")).unwrap();
+        fs::create_dir_all(dir.join("M/options/preset/high")).unwrap();
+        fs::write(
+            dir.join("M/mod.toml"),
+            r#"
+mount = ["content"]
+
+[[options]]
+group = "variant"
+name = "Variante"
+default = "4k"
+
+  [[options.choices]]
+  key = "4k"
+
+  [[options.choices]]
+  key = "lite"
+  name = "LITE"
+  conflicts = ["x:other"]
+"#,
+        )
+        .unwrap();
+
+        let groups = mod_option_groups(&dir, "M");
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].group, "variant");
+        assert_eq!(groups[0].name.as_deref(), Some("Variante"));
+        assert_eq!(groups[0].default.as_deref(), Some("4k"));
+        // Declared order kept (4k, lite); discovered "preset" appended.
+        let keys: Vec<&str> = groups[0].choices.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, vec!["4k", "lite"]);
+        assert_eq!(
+            groups[0]
+                .choices
+                .iter()
+                .find(|c| c.key == "lite")
+                .unwrap()
+                .conflicts,
+            vec!["x:other"]
+        );
+        assert_eq!(groups[1].group, "preset");
+        assert_eq!(groups[1].choices.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn option_layers_go_above_the_base_mount() {
+        let dir = tmp_mods_dir("optlayers");
+        fs::create_dir_all(dir.join("M/content")).unwrap();
+        fs::create_dir_all(dir.join("M/options/variant/4k")).unwrap();
+        fs::write(
+            dir.join("M/mod.toml"),
+            "mount = [\"content\"]\n[[options]]\ngroup = \"variant\"\nchoices = [\"4k\"]\n",
+        )
+        .unwrap();
+
+        let selected: HashMap<String, String> = [("variant".to_string(), "4k".to_string())].into();
+        let layers = mod_layers_with_options(&dir, "M", &selected);
+        assert_eq!(
+            layers,
+            vec![dir.join("M/options/variant/4k"), dir.join("M/content")]
+        );
+
+        // No selection -> only the base mount.
+        assert_eq!(
+            mod_layers_with_options(&dir, "M", &HashMap::new()),
+            vec![dir.join("M/content")]
+        );
+
+        // Unknown value -> only the base mount.
+        let unknown: HashMap<String, String> = [("variant".to_string(), "nope".to_string())].into();
+        assert_eq!(
+            mod_layers_with_options(&dir, "M", &unknown),
+            vec![dir.join("M/content")]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

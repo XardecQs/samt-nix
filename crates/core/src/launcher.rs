@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,8 @@ struct Prepared {
     resolved: Vec<String>,
     modloader_entries: Vec<(String, i64)>,
     violations: Vec<crate::constraints::Violation>,
+    /// Per-folder option selections for the enabled mods (folder -> {group: value}).
+    options_by_folder: HashMap<String, HashMap<String, String>>,
 }
 
 /// Result of [`LaunchEngine::mount`].
@@ -135,10 +138,19 @@ impl LaunchEngine {
         Ok(file)
     }
 
-    pub fn build_lowerdir(mods_dir: &Path, resolved: &[String], base_game: &Path) -> String {
+    pub fn build_lowerdir(
+        mods_dir: &Path,
+        resolved: &[String],
+        base_game: &Path,
+        options_by_folder: &HashMap<String, HashMap<String, String>>,
+    ) -> String {
+        let empty = HashMap::new();
         let mut layers: Vec<String> = resolved
             .iter()
-            .flat_map(|f| crate::meta::mod_layers(mods_dir, f))
+            .flat_map(|f| {
+                let selected = options_by_folder.get(f).unwrap_or(&empty);
+                crate::meta::mod_layers_with_options(mods_dir, f, selected)
+            })
             .map(|p| p.display().to_string())
             .collect();
         layers.push(base_game.display().to_string());
@@ -413,6 +425,7 @@ impl LaunchEngine {
             &boot.paths.mods_dir,
             &prepared.resolved,
             &boot.paths.base_game,
+            &prepared.options_by_folder,
         );
 
         let mut ov = overlay::OverlayMount::mount(
@@ -513,6 +526,7 @@ impl LaunchEngine {
         let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
         let deps = db::load_dependencies(conn)?;
         let enabled_ids = db::load_enabled_mod_ids_for_profile(conn, profile_id)?;
+        let mod_options = db::all_profile_options(conn, profile_id)?;
 
         let mut graph = resolver::DepGraph::new(mods_map, deps, enabled_ids);
         if opts.deps_enable {
@@ -541,6 +555,17 @@ impl LaunchEngine {
 
         let resolved = graph.resolve();
 
+        // Option selections per folder (for the enabled/known mods), used both
+        // by the constraint check and to build the overlay layers.
+        let mut options_by_folder: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for m in graph.mods.values() {
+            if let Some(sel) = mod_options.get(&m.id) {
+                if !sel.is_empty() {
+                    options_by_folder.insert(m.folder_name.clone(), sel.clone());
+                }
+            }
+        }
+
         // Cross-mod constraints (mutually exclusive variants, declared
         // incompatibilities). Abort a real mount; the dry-run report lists them.
         let mut all_folders: Vec<String> =
@@ -553,7 +578,12 @@ impl LaunchEngine {
             .map(|m| m.folder_name.clone())
             .collect();
         enabled_folders.sort();
-        let violations = crate::constraints::check(&paths.mods_dir, &all_folders, &enabled_folders);
+        let violations = crate::constraints::check(
+            &paths.mods_dir,
+            &all_folders,
+            &enabled_folders,
+            &options_by_folder,
+        );
         if !violations.is_empty() && !opts.dry_run {
             let mut msg = String::from("Conflictos entre mods activos:\n");
             for v in &violations {
@@ -563,7 +593,8 @@ impl LaunchEngine {
         }
 
         // Mod Loader priorities for the enabled mods (applied before mounting).
-        let modloader_entries = crate::modloader::entries_for(&paths.mods_dir, &enabled_folders);
+        let modloader_entries =
+            crate::modloader::entries_for(&paths.mods_dir, &enabled_folders, &options_by_folder);
         if !opts.dry_run && !modloader_entries.is_empty() {
             let ini = crate::modloader::ini_path(&ppaths.upper);
             if let Err(e) = crate::modloader::apply(&ini, &modloader_entries) {
@@ -584,8 +615,10 @@ impl LaunchEngine {
             );
         }
 
+        let empty = HashMap::new();
         for folder in &resolved {
-            let layers = crate::meta::mod_layers(&paths.mods_dir, folder);
+            let selected = options_by_folder.get(folder).unwrap_or(&empty);
+            let layers = crate::meta::mod_layers_with_options(&paths.mods_dir, folder, selected);
             for layer in &layers {
                 if !layer.exists() {
                     anyhow::bail!(
@@ -611,6 +644,7 @@ impl LaunchEngine {
             resolved,
             modloader_entries,
             violations,
+            options_by_folder,
         })
     }
 
@@ -666,6 +700,7 @@ impl LaunchEngine {
             &boot.paths.mods_dir,
             &prepared.resolved,
             &boot.paths.base_game,
+            &prepared.options_by_folder,
         );
         let mut ov = overlay::OverlayMount::mount(
             &lowerdir,
@@ -877,8 +912,11 @@ impl LaunchEngine {
             ));
         } else {
             let mut n = 0;
+            let empty = HashMap::new();
             for folder in resolved {
-                let layers = crate::meta::mod_layers(&paths.mods_dir, folder);
+                let selected = prepared.options_by_folder.get(folder).unwrap_or(&empty);
+                let layers =
+                    crate::meta::mod_layers_with_options(&paths.mods_dir, folder, selected);
                 if layers.len() == 1 && layers[0] == paths.mods_dir.join(folder) {
                     n += 1;
                     out.push_str(&format!("  {}. {}\n", n, layers[0].display()));
@@ -1069,6 +1107,7 @@ mod tests {
             &dir,
             &["M1".to_string(), "M2".to_string()],
             &dir.join("base"),
+            &HashMap::new(),
         );
         let layers: Vec<&str> = lower.split(':').collect();
         assert_eq!(layers[0], dir.join("M1/models").display().to_string());

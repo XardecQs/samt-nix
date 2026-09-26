@@ -22,6 +22,54 @@ enum Tab {
     Log,
 }
 
+/// Dependency tab view mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DepsView {
+    List,
+    Graph,
+}
+
+/// Graph layout.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraphLayout {
+    Hierarchical,
+    Force,
+}
+
+/// Dependency graph (node payload = mod id, edge payload = relation kind).
+type DepGraph = egui_graphs::Graph<
+    i64,
+    crate::model::GEdgeKind,
+    petgraph::Directed,
+    petgraph::graph::DefaultIx,
+    egui_graphs::DefaultNodeShape,
+    egui_graphs::DefaultEdgeShape,
+>;
+
+type HierGraphView<'a> = egui_graphs::GraphView<
+    'a,
+    i64,
+    crate::model::GEdgeKind,
+    petgraph::Directed,
+    petgraph::graph::DefaultIx,
+    egui_graphs::DefaultNodeShape,
+    egui_graphs::DefaultEdgeShape,
+    egui_graphs::LayoutStateHierarchical,
+    egui_graphs::LayoutHierarchical,
+>;
+
+type ForceGraphView<'a> = egui_graphs::GraphView<
+    'a,
+    i64,
+    crate::model::GEdgeKind,
+    petgraph::Directed,
+    petgraph::graph::DefaultIx,
+    egui_graphs::DefaultNodeShape,
+    egui_graphs::DefaultEdgeShape,
+    egui_graphs::FruchtermanReingoldWithCenterGravityState,
+    egui_graphs::LayoutForceDirected<egui_graphs::FruchtermanReingoldWithCenterGravity>,
+>;
+
 /// Below this logical width the layout switches to the single-column
 /// (phone-like) mode: bottom navigation + detail as an overlay page.
 pub(crate) const NARROW_BREAKPOINT: f32 = 760.0;
@@ -176,6 +224,17 @@ pub struct GtaMoApp {
     /// True while the user asked to stop the game (so a non-zero exit is not an
     /// error).
     stopping: bool,
+    /// Dependencies tab: list or graph.
+    deps_view: DepsView,
+    /// Graph layout and edge filters.
+    graph_layout: GraphLayout,
+    graph_show_optional: bool,
+    graph_show_conflicts: bool,
+    graph_show_variants: bool,
+    /// Built dependency graph (invalidated on refresh / reorganize).
+    graph: Option<DepGraph>,
+    /// Mod currently selected in the graph (to react only to changes).
+    graph_selected: Option<i64>,
 }
 
 impl GtaMoApp {
@@ -251,6 +310,13 @@ impl GtaMoApp {
             last_screen_size: egui::Vec2::ZERO,
             child_pid: Arc::new(Mutex::new(None)),
             stopping: false,
+            deps_view: DepsView::List,
+            graph_layout: GraphLayout::Hierarchical,
+            graph_show_optional: true,
+            graph_show_conflicts: true,
+            graph_show_variants: true,
+            graph: None,
+            graph_selected: None,
         };
         app.refresh();
         app
@@ -287,6 +353,8 @@ impl GtaMoApp {
                 }
                 self.snapshot = s;
                 self.status = None;
+                // The dependency graph is derived from the snapshot: rebuild.
+                self.graph = None;
                 let folders: Vec<String> = self
                     .snapshot
                     .mods
@@ -349,10 +417,13 @@ impl GtaMoApp {
         match self.backend.mods_dir_path() {
             Some(mdir) => {
                 let resolved = self.snapshot.resolved.clone();
+                let options = self.snapshot.options_by_folder.clone();
                 let gen = self.scan_gen;
                 let tx = self.tx.clone();
                 let spec = self.backend.game_spec();
-                crate::backend::Backend::scan_conflicts_async(gen, mdir, resolved, spec, tx);
+                crate::backend::Backend::scan_conflicts_async(
+                    gen, mdir, resolved, spec, options, tx,
+                );
             }
             None => self.conflicts_pending = false,
         }
@@ -391,6 +462,7 @@ impl GtaMoApp {
         };
         let spec = self.backend.game_spec();
         let resolved = self.snapshot.resolved.clone();
+        let options = self.snapshot.options_by_folder.clone();
         let gen = self.upper_gen;
         let tx = self.tx.clone();
         self.upper_dir = Some(upper_dir.clone());
@@ -401,6 +473,7 @@ impl GtaMoApp {
             mods_dir,
             resolved,
             spec,
+            options,
             tx,
         );
     }
@@ -1822,6 +1895,59 @@ impl GtaMoApp {
                             }
                             ui.end_row();
                         }
+                        for g in &m.option_groups {
+                            let label = g.name.clone().unwrap_or_else(|| g.group.clone());
+                            ui.label(format!("{label}:"));
+                            let current = m
+                                .selected_options
+                                .get(&g.group)
+                                .and_then(|v| g.choices.iter().find(|c| &c.key == v))
+                                .map(|c| c.name.clone().unwrap_or_else(|| c.key.clone()))
+                                .unwrap_or_else(|| "Ninguna".to_string());
+                            // Some(None) = clear the group, Some(Some(v)) = set v.
+                            let mut pick: Option<Option<String>> = None;
+                            egui::ComboBox::from_id_salt(format!(
+                                "detail_opt_{}_{}",
+                                m.id, g.group
+                            ))
+                            .selected_text(current)
+                            .show_ui(ui, |ui| {
+                                let none_selected = !m.selected_options.contains_key(&g.group);
+                                if ui.selectable_label(none_selected, "Ninguna").clicked()
+                                    && !none_selected
+                                {
+                                    pick = Some(None);
+                                }
+                                for c in &g.choices {
+                                    let cname = c.name.clone().unwrap_or_else(|| c.key.clone());
+                                    let selected = m.selected_options.get(&g.group) == Some(&c.key);
+                                    if ui.selectable_label(selected, cname).clicked() && !selected {
+                                        pick = Some(Some(c.key.clone()));
+                                    }
+                                }
+                            });
+                            if let Some(value) = pick {
+                                let slug = self.snapshot.active_slug.clone();
+                                let mut args = vec!["ctl".to_string(), "option".to_string()];
+                                match value {
+                                    Some(v) => {
+                                        args.push("set".into());
+                                        args.push(m.folder.clone());
+                                        args.push(g.group.clone());
+                                        args.push(v);
+                                    }
+                                    None => {
+                                        args.push("unset".into());
+                                        args.push(m.folder.clone());
+                                        args.push(g.group.clone());
+                                    }
+                                }
+                                args.push("--profile".into());
+                                args.push(slug);
+                                self.exec(args, false);
+                            }
+                            ui.end_row();
+                        }
                         if !m.conflicts.is_empty() {
                             ui.label("Conflictos:");
                             ui.label(
@@ -2498,6 +2624,60 @@ impl GtaMoApp {
 
     fn ui_dependencies(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut self.deps_view, DepsView::List, "Lista");
+            ui.selectable_value(&mut self.deps_view, DepsView::Graph, "Grafo");
+            if self.deps_view == DepsView::Graph {
+                ui.separator();
+                if ui
+                    .selectable_value(
+                        &mut self.graph_layout,
+                        GraphLayout::Hierarchical,
+                        "Jerárquico",
+                    )
+                    .clicked()
+                {
+                    self.graph = None;
+                }
+                if ui
+                    .selectable_value(&mut self.graph_layout, GraphLayout::Force, "Fuerza")
+                    .clicked()
+                {
+                    self.graph = None;
+                }
+                if ui.button("Reorganizar").clicked() {
+                    self.graph = None;
+                }
+                if ui
+                    .checkbox(&mut self.graph_show_optional, "Opcionales")
+                    .changed()
+                {
+                    self.graph = None;
+                }
+                if ui
+                    .checkbox(&mut self.graph_show_conflicts, "Conflictos")
+                    .changed()
+                {
+                    self.graph = None;
+                }
+                if ui
+                    .checkbox(&mut self.graph_show_variants, "Variantes")
+                    .changed()
+                {
+                    self.graph = None;
+                }
+            }
+        });
+        ui.separator();
+        if self.deps_view == DepsView::Graph {
+            self.ui_dep_graph(ui);
+        } else {
+            self.ui_dependency_list(ui);
+        }
+    }
+
+    fn ui_dependency_list(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
         let mut go_to: Option<String> = None;
 
         let has_issues = !self.snapshot.dep_cycles.is_empty()
@@ -2586,6 +2766,109 @@ impl GtaMoApp {
                 self.selected_mod = Some(tm.id);
                 self.reload_relations();
             }
+        }
+    }
+
+    /// Builds the dependency graph from the snapshot, honoring the edge filters.
+    fn build_dep_graph(&self) -> DepGraph {
+        use crate::model::GEdgeKind;
+        let sg = petgraph::stable_graph::StableGraph::<i64, GEdgeKind>::default();
+        let mut g = DepGraph::from(&sg);
+        let mut idx: std::collections::HashMap<i64, petgraph::stable_graph::NodeIndex> =
+            std::collections::HashMap::new();
+        let enabled_color = egui::Color32::from_rgb(0x4c, 0xaf, 0x50);
+        let disabled_color = egui::Color32::from_rgb(0x9e, 0x9e, 0x9e);
+        for m in &self.snapshot.mods {
+            let n = g.add_node(m.id);
+            let color = if m.hidden {
+                egui::Color32::from_rgb(0x61, 0x61, 0x61)
+            } else if m.enabled {
+                enabled_color
+            } else {
+                disabled_color
+            };
+            if let Some(node) = g.node_mut(n) {
+                node.set_label(m.name.clone());
+                node.set_color(color);
+            }
+            idx.insert(m.id, n);
+        }
+        for e in &self.snapshot.edges {
+            let show = match e.kind {
+                GEdgeKind::Optional => self.graph_show_optional,
+                GEdgeKind::Conflict => self.graph_show_conflicts,
+                GEdgeKind::Variant => self.graph_show_variants,
+                GEdgeKind::Required | GEdgeKind::RequiresAny => true,
+            };
+            if !show {
+                continue;
+            }
+            if let (Some(&a), Some(&b)) = (idx.get(&e.from), idx.get(&e.to)) {
+                g.add_edge(a, b, e.kind);
+            }
+        }
+        g
+    }
+
+    fn ui_dep_graph(&mut self, ui: &mut egui::Ui) {
+        if self.graph.is_none() {
+            self.graph = Some(self.build_dep_graph());
+        }
+        let interactions = egui_graphs::SettingsInteraction::new()
+            .with_node_selection_enabled(true)
+            .with_dragging_enabled(true);
+        let navigation = egui_graphs::SettingsNavigation::default();
+        let style = egui_graphs::SettingsStyle::default().with_labels_always(true);
+
+        let mut graph = match self.graph.take() {
+            Some(g) => g,
+            None => return,
+        };
+        {
+            match self.graph_layout {
+                GraphLayout::Hierarchical => {
+                    let mut view = HierGraphView::new(&mut graph)
+                        .with_interactions(&interactions)
+                        .with_navigations(&navigation)
+                        .with_styles(&style);
+                    ui.add(&mut view);
+                }
+                GraphLayout::Force => {
+                    let mut view = ForceGraphView::new(&mut graph)
+                        .with_interactions(&interactions)
+                        .with_navigations(&navigation)
+                        .with_styles(&style);
+                    ui.add(&mut view);
+                }
+            }
+        }
+
+        let selected = graph
+            .selected_nodes()
+            .first()
+            .copied()
+            .and_then(|ix| graph.node(ix).map(|n| *n.payload()));
+        self.graph = Some(graph);
+
+        if let Some(id) = selected {
+            if self.graph_selected != Some(id) {
+                self.graph_selected = Some(id);
+                self.selected_mod = Some(id);
+                self.reload_relations();
+            }
+            if let Some(m) = self.snapshot.mods.iter().find(|m| m.id == id) {
+                let name = m.name.clone();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(format!("Seleccionado: {name}"));
+                    if ui.button("Ver detalle").clicked() {
+                        self.tab = Tab::Mods;
+                        self.detail_opened = Some(std::time::Instant::now());
+                    }
+                });
+            }
+        } else {
+            self.graph_selected = None;
         }
     }
 

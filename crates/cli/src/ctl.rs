@@ -5,6 +5,7 @@ use gta_mo_core::log;
 use owo_colors::OwoColorize;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Strip ANSI codes from stdout output when it is not a color-capable terminal
 /// (pipe/redirect/`NO_COLOR`), so `gta-mo ctl ... | grep` stays clean.
@@ -271,6 +272,7 @@ pub fn run(
         super::CtlCommand::OpenPath { path } => cmd_open_path(path),
         super::CtlCommand::Profile { action } => cmd_profile(conn, action),
         super::CtlCommand::Group { action } => cmd_group(conn, action, profile_ident),
+        super::CtlCommand::Option { action } => cmd_option(conn, action, profile_ident),
     }
 }
 
@@ -396,7 +398,7 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # guides = ["guides/instalacion.md"]
 
 # Galería de imágenes extra: una carpeta (se expande) o una lista de rutas.
-# screenshots = ["capturas"]
+# screenshots = ["screenshots"]
 
 # Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
 # Sin esta clave se monta la carpeta entera (comportamiento por defecto).
@@ -1654,6 +1656,26 @@ fn cmd_info(
             modloader_priority: Option<i64>,
             hidden: bool,
             notes: Option<String>,
+            options: Vec<InfoOptionJson>,
+        }
+
+        #[derive(Serialize)]
+        struct InfoOptionJson {
+            group: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            default: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            selected: Option<String>,
+            choices: Vec<InfoChoiceJson>,
+        }
+
+        #[derive(Serialize)]
+        struct InfoChoiceJson {
+            key: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
         }
 
         #[derive(Serialize)]
@@ -1716,6 +1738,28 @@ fn cmd_info(
             .collect();
 
         let variant = VariantJson::from_cache(&meta);
+        let option_selected = db::profile_mod_options(conn, profile.id, id)?;
+        let option_groups = match mods_dir.as_deref() {
+            Some(dir) => gta_mo_core::meta::mod_option_groups(dir, &m.folder_name),
+            None => Vec::new(),
+        };
+        let options_json: Vec<InfoOptionJson> = option_groups
+            .iter()
+            .map(|g| InfoOptionJson {
+                group: g.group.clone(),
+                name: g.name.clone(),
+                default: g.default.clone(),
+                selected: option_selected.get(&g.group).cloned(),
+                choices: g
+                    .choices
+                    .iter()
+                    .map(|c| InfoChoiceJson {
+                        key: c.key.clone(),
+                        name: c.name.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
         let out = InfoJson {
             id: m.id,
             folder: m.folder_name,
@@ -1750,6 +1794,7 @@ fn cmd_info(
             modloader_priority: meta.modloader_priority,
             hidden,
             notes,
+            options: options_json,
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -2423,7 +2468,11 @@ fn cmd_modloader_show(
         .filter(|m| m.enabled)
         .map(|m| m.folder_name)
         .collect();
-    let entries = gta_mo_core::modloader::entries_for(&paths.mods_dir, &enabled);
+    let entries = gta_mo_core::modloader::entries_for(
+        &paths.mods_dir,
+        &enabled,
+        &options_by_folder(conn, profile.id)?,
+    );
     let ini = gta_mo_core::modloader::ini_path(&paths.profile_paths(&profile.slug).upper);
 
     if json {
@@ -2659,8 +2708,13 @@ fn cmd_upper(
         } => {
             let scan = gta_mo_core::upper::scan(&upper(), spec.user_data_dir);
             let resolved = resolve_enabled_order(conn, &profile)?;
-            let providers = gta_mo_core::conflicts::providers_map(&paths.mods_dir, &resolved, spec)
-                .unwrap_or_default();
+            let providers = gta_mo_core::conflicts::providers_map(
+                &paths.mods_dir,
+                &resolved,
+                spec,
+                &options_by_folder(conn, profile.id)?,
+            )
+            .unwrap_or_default();
 
             let rows: Vec<(gta_mo_core::upper::Entry, Vec<String>)> = scan
                 .files
@@ -2949,6 +3003,8 @@ struct ExportProfileMod {
     folder: String,
     enabled: bool,
     load_order: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    options: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -3005,11 +3061,17 @@ fn cmd_export(conn: &Connection, path: Option<&str>) -> anyhow::Result<()> {
     let mut profile_mods_export = Vec::new();
     for p in &profiles {
         for e in db::load_all_mods_for_profile(conn, p.id)? {
+            let opts = db::profile_mod_options(conn, p.id, e.id)?;
             profile_mods_export.push(ExportProfileMod {
                 profile: p.slug.clone(),
                 folder: e.folder_name,
                 enabled: e.enabled,
                 load_order: e.load_order,
+                options: if opts.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(&opts)?)
+                },
             });
         }
     }
@@ -3136,9 +3198,9 @@ fn do_import(conn: &Connection, data: &ExportFile) -> anyhow::Result<()> {
             continue;
         };
         conn.execute(
-            "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![pid, mid, pm.enabled as i64, pm.load_order],
+            "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order, options)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![pid, mid, pm.enabled as i64, pm.load_order, pm.options],
         )?;
     }
 
@@ -3177,14 +3239,34 @@ fn resolve_enabled_order(conn: &Connection, profile: &db::Profile) -> anyhow::Re
     gta_mo_core::resolver::enabled_order_for_profile(conn, profile.id)
 }
 
+/// Option selections of a profile keyed by mod folder (for conflict/constraint
+/// scans and `which`).
+fn options_by_folder(
+    conn: &Connection,
+    profile_id: i64,
+) -> anyhow::Result<HashMap<String, HashMap<String, String>>> {
+    let by_id = db::all_profile_options(conn, profile_id)?;
+    let mut out = HashMap::new();
+    for m in db::load_all_mods_for_profile(conn, profile_id)? {
+        if let Some(sel) = by_id.get(&m.id) {
+            out.insert(m.folder_name, sel.clone());
+        }
+    }
+    Ok(out)
+}
+
 fn cmd_conflicts(conn: &Connection, profile_ident: Option<&str>, json: bool) -> anyhow::Result<()> {
     let profile = resolve_active_profile(conn, profile_ident)?;
     let cfg =
         gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
     let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
     let resolved = resolve_enabled_order(conn, &profile)?;
-    let conflicts =
-        gta_mo_core::conflicts::scan_conflicts(&paths.mods_dir, &resolved, cfg.game_spec())?;
+    let conflicts = gta_mo_core::conflicts::scan_conflicts(
+        &paths.mods_dir,
+        &resolved,
+        cfg.game_spec(),
+        &options_by_folder(conn, profile.id)?,
+    )?;
 
     if json {
         #[derive(Serialize)]
@@ -3261,6 +3343,7 @@ fn cmd_which(conn: &Connection, profile_ident: Option<&str>, path: &str) -> anyh
         &resolved,
         path,
         cfg.game_spec(),
+        &options_by_folder(conn, profile.id)?,
     )? {
         None => println!(
             "'{}' no lo provee ningún mod del perfil '{}' (viene de la base).",
@@ -3286,6 +3369,137 @@ fn cmd_which(conn: &Connection, profile_ident: Option<&str>, path: &str) -> anyh
             } else {
                 println!("  pisados: {}", overridden.join(", "));
             }
+        }
+    }
+    Ok(())
+}
+
+/// `ctl option`: list/select the option values of a mod in a profile.
+fn cmd_option(
+    conn: &Connection,
+    action: &super::OptionAction,
+    profile_ident: Option<&str>,
+) -> anyhow::Result<()> {
+    let profile = resolve_active_profile(conn, profile_ident)?;
+    let mods_dir = mods_dir_from_config();
+    match action {
+        super::OptionAction::List { ident, json } => {
+            let id = db::resolve_mod_ident(conn, ident)?;
+            let m = db::get_mod_by_id(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Mod no encontrado."))?;
+            let groups = match &mods_dir {
+                Some(dir) => gta_mo_core::meta::mod_option_groups(dir, &m.folder_name),
+                None => Vec::new(),
+            };
+            let selected = db::profile_mod_options(conn, profile.id, id)?;
+
+            if *json {
+                #[derive(Serialize)]
+                struct ChoiceJson {
+                    key: String,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    name: Option<String>,
+                    selected: bool,
+                }
+                #[derive(Serialize)]
+                struct GroupJson {
+                    group: String,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    name: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    default: Option<String>,
+                    selected: Option<String>,
+                    choices: Vec<ChoiceJson>,
+                }
+                let out: Vec<GroupJson> = groups
+                    .iter()
+                    .map(|g| GroupJson {
+                        group: g.group.clone(),
+                        name: g.name.clone(),
+                        default: g.default.clone(),
+                        selected: selected.get(&g.group).cloned(),
+                        choices: g
+                            .choices
+                            .iter()
+                            .map(|c| ChoiceJson {
+                                key: c.key.clone(),
+                                name: c.name.clone(),
+                                selected: selected
+                                    .get(&g.group)
+                                    .map(|v| v == &c.key)
+                                    .unwrap_or(false),
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
+
+            if groups.is_empty() {
+                println!(
+                    "'{}' no tiene opciones (ni [[options]] ni options/<grupo>/<valor>/).",
+                    m.folder_name
+                );
+                return Ok(());
+            }
+            for g in &groups {
+                let chosen = selected
+                    .get(&g.group)
+                    .cloned()
+                    .unwrap_or_else(|| "(ninguna)".to_string());
+                let label = g.name.clone().unwrap_or_else(|| g.group.clone());
+                println!("{label} [{chosen}]");
+                for c in &g.choices {
+                    let mark = if selected.get(&g.group).map(|v| v == &c.key).unwrap_or(false) {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    let cname = c.name.clone().unwrap_or_else(|| c.key.clone());
+                    println!("  {mark} {} = {cname}", c.key);
+                }
+            }
+        }
+        super::OptionAction::Set {
+            ident,
+            group,
+            value,
+        } => {
+            let id = db::resolve_mod_ident(conn, ident)?;
+            let m = db::get_mod_by_id(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Mod no encontrado."))?;
+            if let Some(dir) = &mods_dir {
+                let groups = gta_mo_core::meta::mod_option_groups(dir, &m.folder_name);
+                if !groups.is_empty() {
+                    match groups.iter().find(|g| &g.group == group) {
+                        None => anyhow::bail!(
+                            "El mod '{}' no tiene la opción '{group}'.",
+                            m.folder_name
+                        ),
+                        Some(g) if !g.choices.iter().any(|c| &c.key == value) => anyhow::bail!(
+                            "'{value}' no es un valor válido de '{group}' en '{}'.",
+                            m.folder_name
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            db::set_profile_mod_option(conn, profile.id, id, group, value)?;
+            log::info(format!(
+                "'{}' -> {group}={value} en el perfil '{}'.",
+                m.folder_name, profile.name
+            ));
+        }
+        super::OptionAction::Unset { ident, group } => {
+            let id = db::resolve_mod_ident(conn, ident)?;
+            let m = db::get_mod_by_id(conn, id)?
+                .ok_or_else(|| anyhow::anyhow!("Mod no encontrado."))?;
+            db::unset_profile_mod_option(conn, profile.id, id, group)?;
+            log::info(format!(
+                "Opción '{group}' borrada de '{}' en el perfil '{}'.",
+                m.folder_name, profile.name
+            ));
         }
     }
     Ok(())
@@ -3361,10 +3575,19 @@ fn cmd_health(
         .filter(|m| m.enabled)
         .map(|m| m.folder_name)
         .collect();
-    for v in gta_mo_core::constraints::check(&paths.mods_dir, &all_folders, &enabled_folders) {
+    for v in gta_mo_core::constraints::check(
+        &paths.mods_dir,
+        &all_folders,
+        &enabled_folders,
+        &options_by_folder(conn, profile.id)?,
+    ) {
         errors.push(v.message);
     }
-    let ml_entries = gta_mo_core::modloader::entries_for(&paths.mods_dir, &enabled_folders);
+    let ml_entries = gta_mo_core::modloader::entries_for(
+        &paths.mods_dir,
+        &enabled_folders,
+        &options_by_folder(conn, profile.id)?,
+    );
 
     let mut lines: Vec<String> = Vec::new();
     for e in &errors {

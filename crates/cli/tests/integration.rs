@@ -240,7 +240,7 @@ fn fresh_database_bootstraps_to_latest_schema() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
     let profile: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM profiles WHERE slug = 'default'",
@@ -1081,4 +1081,45 @@ fn mount_dry_run_and_status_need_no_overlay() {
     assert!(out.contains("No hay ningún overlay"), "salida: {out}");
     let v = json(&t.run_ok(&["status", "--json"]));
     assert!(v.is_null(), "status JSON sin montaje debe ser null: {v}");
+}
+
+#[test]
+fn option_set_and_list_persist_per_profile() {
+    let t = TempDb::new("options");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(game_root.join("mods/m1/options/variant/4k")).unwrap();
+    std::fs::create_dir_all(game_root.join("mods/m1/options/variant/lite")).unwrap();
+    std::fs::create_dir_all(game_root.join("mods/m1/content")).unwrap();
+    std::fs::write(
+        game_root.join("mods/m1/mod.toml"),
+        "mount = [\"content\"]\n[[options]]\ngroup = \"variant\"\nname = \"Variante\"\n",
+    )
+    .unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "discover"]);
+
+    // Discovered choices, nothing selected yet.
+    let v = json(&t.run_ok(&["ctl", "option", "list", "m1", "--json"]));
+    let groups = v.as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["group"], "variant");
+    assert_eq!(groups[0]["choices"].as_array().unwrap().len(), 2);
+    assert!(groups[0]["selected"].is_null());
+
+    t.run_ok(&["ctl", "option", "set", "m1", "variant", "4k"]);
+    let v = json(&t.run_ok(&["ctl", "option", "list", "m1", "--json"]));
+    assert_eq!(v[0]["selected"], "4k");
+
+    // `info --json` surfaces the option groups and the selection.
+    let info = json(&t.run_ok(&["ctl", "info", "m1", "--json"]));
+    assert_eq!(info["options"][0]["selected"], "4k");
+
+    // An invalid value is rejected.
+    let out = t.run(&["ctl", "option", "set", "m1", "variant", "nope"]);
+    assert!(!out.status.success());
+
+    t.run_ok(&["ctl", "option", "unset", "m1", "variant"]);
+    let v = json(&t.run_ok(&["ctl", "option", "list", "m1", "--json"]));
+    assert!(v[0]["selected"].is_null());
 }

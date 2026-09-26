@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS profile_mods (
     load_order INTEGER DEFAULT 0,
     hidden INTEGER,
     notes TEXT,
+    options TEXT,
     PRIMARY KEY (profile_id, mod_id),
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
     FOREIGN KEY (mod_id) REFERENCES mods(id) ON DELETE CASCADE

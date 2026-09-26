@@ -6,6 +6,7 @@
 //! merges priorities into a profile's `modloader.ini`, preserving the rest of
 //! the file (it is an INI with `;` comments, not TOML).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Mod Loader's default profile name.
@@ -16,10 +17,15 @@ pub fn ini_path(upper: &Path) -> PathBuf {
     upper.join("modloader").join("modloader.ini")
 }
 
-/// Detects the `<layer>/modloader/<Name>` folders a mod contributes.
-pub fn detect_folders(mods_dir: &Path, folder: &str) -> Vec<String> {
+/// Detects the `<layer>/modloader/<Name>` folders a mod contributes, taking the
+/// selected options into account (their contents are layered too).
+pub fn detect_folders(
+    mods_dir: &Path,
+    folder: &str,
+    selected: &HashMap<String, String>,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for layer in crate::meta::mod_layers(mods_dir, folder) {
+    for layer in crate::meta::mod_layers_with_options(mods_dir, folder, selected) {
         let Ok(entries) = std::fs::read_dir(layer.join("modloader")) else {
             continue;
         };
@@ -38,8 +44,13 @@ pub fn detect_folders(mods_dir: &Path, folder: &str) -> Vec<String> {
 
 /// Priority entries for the enabled mods that declare `[modloader] priority`.
 /// Folder names are taken from `[modloader] folders` or auto-detected.
-pub fn entries_for(mods_dir: &Path, enabled: &[String]) -> Vec<(String, i64)> {
+pub fn entries_for(
+    mods_dir: &Path,
+    enabled: &[String],
+    options_by_folder: &HashMap<String, HashMap<String, String>>,
+) -> Vec<(String, i64)> {
     let mut entries: Vec<(String, i64)> = Vec::new();
+    let empty = HashMap::new();
     for folder in enabled {
         let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, folder) else {
             continue;
@@ -48,9 +59,10 @@ pub fn entries_for(mods_dir: &Path, enabled: &[String]) -> Vec<(String, i64)> {
         let Some(priority) = ml.priority else {
             continue;
         };
+        let selected = options_by_folder.get(folder).unwrap_or(&empty);
         let folders = match ml.folders {
             Some(f) if !f.is_empty() => f,
-            _ => detect_folders(mods_dir, folder),
+            _ => detect_folders(mods_dir, folder, selected),
         };
         for name in folders {
             if crate::meta::valid_modloader_folder(&name) {
@@ -198,7 +210,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("M/modloader/Proper Fixes")).unwrap();
         std::fs::create_dir_all(dir.join("M/modloader/.data")).unwrap();
-        assert_eq!(detect_folders(&dir, "M"), vec!["Proper Fixes".to_string()]);
+        assert_eq!(
+            detect_folders(&dir, "M", &HashMap::new()),
+            vec!["Proper Fixes".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

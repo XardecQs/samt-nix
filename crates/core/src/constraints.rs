@@ -15,6 +15,8 @@ pub enum Kind {
     Conflict,
     /// A mod's `requires_any` alternatives are all missing/disabled.
     Requires,
+    /// A selected option group/value does not exist in the mod.
+    Option,
 }
 
 /// One violated constraint.
@@ -43,8 +45,15 @@ fn resolve_ref(
 /// Checks the enabled mods for variant/conflict/requires-any violations.
 ///
 /// `all_folders` is used to resolve references by `author:slug` id; `enabled`
-/// is the set of folders enabled in the profile.
-pub fn check(mods_dir: &Path, all_folders: &[String], enabled: &[String]) -> Vec<Violation> {
+/// is the set of folders enabled in the profile. `options` holds each mod's
+/// selected option values (folder -> {group: value}); the constraints declared
+/// by the *selected* choices are evaluated too.
+pub fn check(
+    mods_dir: &Path,
+    all_folders: &[String],
+    enabled: &[String],
+    options: &HashMap<String, HashMap<String, String>>,
+) -> Vec<Violation> {
     let enabled_set: HashSet<&str> = enabled.iter().map(|s| s.as_str()).collect();
 
     // id -> folder, so references can use the stable id.
@@ -72,42 +81,66 @@ pub fn check(mods_dir: &Path, all_folders: &[String], enabled: &[String]) -> Vec
                 .push(folder.clone());
         }
 
-        // Conflicts: report a pair once (one-way declaration is enough).
-        for reference in &meta.conflicts {
-            let Some(target) = resolve_ref(reference, &by_id, all_folders) else {
-                continue;
-            };
-            if &target == folder || !enabled_set.contains(target.as_str()) {
-                continue;
-            }
-            let mut pair = [folder.clone(), target];
-            pair.sort();
-            if seen.insert((pair[0].clone(), pair[1].clone())) {
-                violations.push(Violation {
-                    kind: Kind::Conflict,
-                    message: format!(
-                        "'{}' es incompatible con '{}' (ambos activados).",
-                        pair[0], pair[1]
-                    ),
-                });
-            }
-        }
+        // Mod-level constraints.
+        push_conflicts(
+            &mut violations,
+            &mut seen,
+            folder,
+            &meta.conflicts,
+            &by_id,
+            all_folders,
+            &enabled_set,
+        );
+        push_requires_any(
+            &mut violations,
+            folder,
+            "requiere al menos uno de:",
+            &meta.requires_any,
+            &by_id,
+            all_folders,
+            &enabled_set,
+        );
 
-        // requires_any: at least one alternative must be enabled.
-        if !meta.requires_any.is_empty() {
-            let any = meta.requires_any.iter().any(|reference| {
-                resolve_ref(reference, &by_id, all_folders)
-                    .map(|f| enabled_set.contains(f.as_str()))
-                    .unwrap_or(false)
-            });
-            if !any {
-                violations.push(Violation {
-                    kind: Kind::Requires,
-                    message: format!(
-                        "'{folder}' requiere al menos uno de: {} (ninguno activado).",
-                        meta.requires_any.join(", ")
-                    ),
-                });
+        // Constraints declared by the *selected* options.
+        if let Some(selected) = options.get(folder) {
+            if !selected.is_empty() {
+                let option_groups = crate::meta::mod_option_groups(mods_dir, folder);
+                for (group, value) in selected {
+                    let Some(g) = option_groups.iter().find(|g| &g.group == group) else {
+                        violations.push(Violation {
+                            kind: Kind::Option,
+                            message: format!(
+                                "'{folder}': la opción '{group}={value}' no existe (grupo desconocido)."
+                            ),
+                        });
+                        continue;
+                    };
+                    let Some(choice) = g.choices.iter().find(|c| &c.key == value) else {
+                        violations.push(Violation {
+                            kind: Kind::Option,
+                            message: format!("'{folder}': la opción '{group}={value}' no existe."),
+                        });
+                        continue;
+                    };
+                    push_conflicts(
+                        &mut violations,
+                        &mut seen,
+                        folder,
+                        &choice.conflicts,
+                        &by_id,
+                        all_folders,
+                        &enabled_set,
+                    );
+                    push_requires_any(
+                        &mut violations,
+                        folder,
+                        &format!("con la opción '{group}={value}' requiere al menos uno de:"),
+                        &choice.requires_any,
+                        &by_id,
+                        all_folders,
+                        &enabled_set,
+                    );
+                }
             }
         }
     }
@@ -127,6 +160,61 @@ pub fn check(mods_dir: &Path, all_folders: &[String], enabled: &[String]) -> Vec
     }
 
     violations
+}
+
+fn push_conflicts(
+    violations: &mut Vec<Violation>,
+    seen: &mut HashSet<(String, String)>,
+    owner: &str,
+    refs: &[String],
+    by_id: &HashMap<String, String>,
+    all_folders: &[String],
+    enabled_set: &HashSet<&str>,
+) {
+    for reference in refs {
+        let Some(target) = resolve_ref(reference, by_id, all_folders) else {
+            continue;
+        };
+        if target == owner || !enabled_set.contains(target.as_str()) {
+            continue;
+        }
+        let mut pair = [owner.to_string(), target];
+        pair.sort();
+        if seen.insert((pair[0].clone(), pair[1].clone())) {
+            violations.push(Violation {
+                kind: Kind::Conflict,
+                message: format!(
+                    "'{}' es incompatible con '{}' (ambos activados).",
+                    pair[0], pair[1]
+                ),
+            });
+        }
+    }
+}
+
+fn push_requires_any(
+    violations: &mut Vec<Violation>,
+    owner: &str,
+    label: &str,
+    refs: &[String],
+    by_id: &HashMap<String, String>,
+    all_folders: &[String],
+    enabled_set: &HashSet<&str>,
+) {
+    if refs.is_empty() {
+        return;
+    }
+    let any = refs.iter().any(|reference| {
+        resolve_ref(reference, by_id, all_folders)
+            .map(|f| enabled_set.contains(f.as_str()))
+            .unwrap_or(false)
+    });
+    if !any {
+        violations.push(Violation {
+            kind: Kind::Requires,
+            message: format!("'{owner}' {label} {} (ninguno activado).", refs.join(", ")),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -163,16 +251,81 @@ mod tests {
         .unwrap();
 
         let all = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let v = check(&dir, &all, &["A".to_string(), "B".to_string()]);
+        let v = check(
+            &dir,
+            &all,
+            &["A".to_string(), "B".to_string()],
+            &HashMap::new(),
+        );
         assert_eq!(v.iter().filter(|x| x.kind == Kind::Variant).count(), 1);
 
-        let v = check(&dir, &all, &["A".to_string(), "C".to_string()]);
+        let v = check(
+            &dir,
+            &all,
+            &["A".to_string(), "C".to_string()],
+            &HashMap::new(),
+        );
         assert_eq!(v.iter().filter(|x| x.kind == Kind::Conflict).count(), 1);
         // one-way declaration still detected
         assert!(v[0].message.contains("A") && v[0].message.contains("C"));
 
         // Not co-enabled -> no violation.
-        assert!(check(&dir, &all, &["A".to_string()]).is_empty());
+        assert!(check(&dir, &all, &["A".to_string()], &HashMap::new()).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn option_choice_constraints_are_evaluated() {
+        let dir = tmp_dir("optconstr");
+        for folder in ["M", "Other", "Dep"] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+        }
+        std::fs::write(
+            dir.join("M/mod.toml"),
+            r#"
+id = "x:m"
+
+[[options]]
+group = "edition"
+  [[options.choices]]
+  key = "a"
+  conflicts = ["x:other"]
+  [[options.choices]]
+  key = "b"
+  requires_any = ["x:dep"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("Other/mod.toml"), "id = \"x:other\"\n").unwrap();
+        std::fs::write(dir.join("Dep/mod.toml"), "id = \"x:dep\"\n").unwrap();
+
+        let all: Vec<String> = ["M", "Other", "Dep"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let enabled: Vec<String> = ["M", "Other"].iter().map(|s| s.to_string()).collect();
+
+        // Edition "a" conflicts with the enabled "Other".
+        let mut sel = HashMap::new();
+        sel.insert("edition".to_string(), "a".to_string());
+        let opts: HashMap<String, HashMap<String, String>> = [("M".to_string(), sel)].into();
+        let v = check(&dir, &all, &enabled, &opts);
+        assert_eq!(v.iter().filter(|x| x.kind == Kind::Conflict).count(), 1);
+
+        // Edition "b" needs "Dep" (disabled) -> Requires violation.
+        let mut sel = HashMap::new();
+        sel.insert("edition".to_string(), "b".to_string());
+        let opts: HashMap<String, HashMap<String, String>> = [("M".to_string(), sel)].into();
+        let v = check(&dir, &all, &enabled, &opts);
+        assert_eq!(v.iter().filter(|x| x.kind == Kind::Requires).count(), 1);
+        assert_eq!(v.iter().filter(|x| x.kind == Kind::Conflict).count(), 0);
+
+        // Unknown value -> Option violation.
+        let mut sel = HashMap::new();
+        sel.insert("edition".to_string(), "nope".to_string());
+        let opts: HashMap<String, HashMap<String, String>> = [("M".to_string(), sel)].into();
+        let v = check(&dir, &all, &enabled, &opts);
+        assert_eq!(v.iter().filter(|x| x.kind == Kind::Option).count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -192,12 +345,24 @@ mod tests {
 
         let all = vec!["Needs".to_string(), "Alt1".to_string(), "Alt2".to_string()];
         // Nothing enabled -> violation.
-        let v = check(&dir, &all, &["Needs".to_string()]);
+        let v = check(&dir, &all, &["Needs".to_string()], &HashMap::new());
         assert_eq!(v.iter().filter(|x| x.kind == Kind::Requires).count(), 1);
 
         // Any one alternative satisfies it.
-        assert!(check(&dir, &all, &["Needs".to_string(), "Alt1".to_string()]).is_empty());
-        assert!(check(&dir, &all, &["Needs".to_string(), "Alt2".to_string()]).is_empty());
+        assert!(check(
+            &dir,
+            &all,
+            &["Needs".to_string(), "Alt1".to_string()],
+            &HashMap::new()
+        )
+        .is_empty());
+        assert!(check(
+            &dir,
+            &all,
+            &["Needs".to_string(), "Alt2".to_string()],
+            &HashMap::new()
+        )
+        .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

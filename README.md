@@ -174,7 +174,7 @@ tags = ["essential", "bugfix"]    # opcional, para organizar/filtrar
 
 cover = "cover.png"                # ruta relativa dentro del mod
 guides = ["guides/instalacion.md"] # lista de archivos de guía
-screenshots = ["capturas"]         # carpeta (se expande) o lista de imágenes
+screenshots = ["screenshots"]      # carpeta (se expande) o lista de imágenes
 
 # Subdirectorios cuyo CONTENIDO se monta sobre la raíz del juego.
 # Sin esta clave se monta la carpeta entera (comportamiento por defecto).
@@ -197,6 +197,23 @@ conflicts = ["mixmods:proper-fixes-vanilla"]
 # Al menos UNO de estos debe estar activo (alternativas, p. ej. variantes o
 # "Proper Shaders" o "SkyGfx"). No auto-activa ni afecta al orden: se valida.
 requires_any = ["mixmods:rosa-evolved-4k", "mixmods:rosa-evolved-lite"]
+
+# Opciones seleccionables por perfil (una entrada con variantes/configs). El
+# valor elegido monta options/<grupo>/<valor>/ ENCIMA de mount. Sin [[options]],
+# los grupos se auto-descubren de options/<grupo>/<valor>/.
+[[options]]
+group = "variant"                 # slug [a-z0-9_-]
+name = "Variante"                 # etiqueta visible (opcional)
+default = "4k"                    # opcional; sin default = solo mount base
+
+  [[options.choices]]
+  key = "4k"
+  name = "4K"
+
+  [[options.choices]]
+  key = "lite"
+  conflicts = ["mixmods:proper-fixes-vanilla"]   # restricción de la opción activa
+  requires_any = ["link2012:open-limit-adjuster"]
 
 # Prioridad en Mod Loader para las carpetas que este mod aporta a modloader/.
 # El launcher la escribe en el modloader.ini del perfil al lanzar.
@@ -263,6 +280,29 @@ requirements/conflicts are declared in each folder's own `[dependencies]` and
   preserving the rest of the file. Folder names are auto-detected from the
   mod's `modloader/<Name>` tree. Inspect them with `ctl modloader show`.
   Example: `Proper Fixes=60` must outrank `RoSA Project Evolved=50`.
+
+### Options per profile
+
+A mod can expose selectable **options**, so what used to be several "variant"
+mods becomes **one entry with options**. Each choice is a folder
+`options/<group>/<value>/` whose CONTENTS are overlaid on the game, on top of the
+mod's `mount` (so it overrides the base). The selection is stored **per profile**
+(schema v11), so the same mod can be a different variant in each profile.
+
+```bash
+gta-mo ctl option list <mod> [--json]        # groups and selected value
+gta-mo ctl option set <mod> <group> <value>  # select a value
+gta-mo ctl option unset <mod> <group>        # clear (base mount only)
+```
+
+- Without `[[options]]`, groups/values are **auto-discovered** from the
+  `options/<group>/<value>/` folders. The optional `[[options]]` block adds
+  labels, a `default` and per-choice constraints.
+- Each choice may declare its own `conflicts`/`requires_any`, evaluated **only
+  when that choice is selected**. This is what lets a single `proper-fixes` mod
+  cover the RoSA and vanilla families.
+- The launcher, `ctl conflicts`, `ctl which` and `ctl health` all account for the
+  selected options, and the GUI's mod detail shows them as selectors.
 
 **Recommended pack layout** (keeps the game dir clean):
 
@@ -393,6 +433,9 @@ gta-mo ctl group add <mod> <group> [--global]
 gta-mo ctl group remove <mod> <group> [--global]
 gta-mo ctl group enable <group> [--profile <name>]
 gta-mo ctl group disable <group> [--profile <name>]
+gta-mo ctl option list <id|folder> [--json] [--profile <name>]
+gta-mo ctl option set <id|folder> <group> <value> [--profile <name>]
+gta-mo ctl option unset <id|folder> <group> [--profile <name>]
 gta-mo ctl health [--conflicts]
 gta-mo ctl conflicts [--json]
 gta-mo ctl which <game-relative-path>
@@ -555,6 +598,18 @@ that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run) that
 becomes a **Detener** button while the game runs, Discover/Clean actions, a
 streaming Log tab, and a status bar.
+
+### Dependency graph
+
+The **Dependencies** tab has a **Lista / Grafo** toggle. The graph view (built
+with [`egui_graphs`](https://crates.io/crates/egui_graphs)) renders the mods as
+nodes (green = enabled, gray = disabled, dark = hidden) and the relations as
+edges: required dependencies, optional ones, conflicts, `requires_any`
+alternatives and `[variant]` families. Edges can be filtered with the
+*Opcionales*, *Conflictos* and *Variantes* toggles. It supports zoom/pan, node
+dragging, node selection (which opens the mod's detail), a **Jerárquico** layout
+(default, best for DAGs) with a **Fuerza** alternative, and a **Reorganizar**
+button.
 
 **Datos** and **Overwrite** share one explorer widget: a folder-tree sidebar, a
 list or thumbnail-grid content area, search and kind filter, multi-selection

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::model::{ModView, ProfileView, Snapshot};
+use crate::model::{GEdge, GEdgeKind, ModView, ProfileView, Snapshot};
 
 #[derive(Debug)]
 pub enum GuiEvent {
@@ -205,6 +205,8 @@ impl Backend {
         let cfg = config::load_config().map_err(|e| format!("Error de config: {e}"))?;
         let paths = config::RuntimePaths::from_config(&cfg);
         let profile = db::active_profile(conn).map_err(|e| e.to_string())?;
+        let mod_options_by_id =
+            db::all_profile_options(conn, profile.id).map_err(|e| e.to_string())?;
 
         let profiles = db::list_profiles(conn)
             .map_err(|e| e.to_string())?
@@ -250,6 +252,8 @@ impl Backend {
                     .collect();
                 let screenshots = gta_mo_core::meta::mod_screenshots(&paths.mods_dir, &folder);
                 let has_manifest = paths.mods_dir.join(&folder).join("mod.toml").is_file();
+                let option_groups = gta_mo_core::meta::mod_option_groups(&paths.mods_dir, &folder);
+                let selected_options = mod_options_by_id.get(&m.id).cloned().unwrap_or_default();
                 Ok(ModView {
                     id: m.id,
                     folder,
@@ -267,6 +271,8 @@ impl Backend {
                     hidden: m.hidden(),
                     hidden_global: m.hidden_global,
                     notes: m.notes.clone(),
+                    option_groups,
+                    selected_options,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -314,6 +320,86 @@ impl Backend {
         let dep_cycles =
             resolver::dependency_cycles(conn, profile.id).map_err(|e| e.to_string())?;
 
+        let mut options_by_folder: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for m in &mods {
+            if !m.selected_options.is_empty() {
+                options_by_folder.insert(m.folder.clone(), m.selected_options.clone());
+            }
+        }
+
+        // Dependency graph edges: required/optional deps (DB) + conflicts and
+        // variant families (manifests).
+        let mut edges: Vec<GEdge> = Vec::new();
+        let deps = db::load_dependencies(conn).map_err(|e| e.to_string())?;
+        for (mid, refs) in &deps {
+            for r in refs {
+                edges.push(GEdge {
+                    from: *mid,
+                    to: r.id,
+                    kind: if r.required {
+                        GEdgeKind::Required
+                    } else {
+                        GEdgeKind::Optional
+                    },
+                });
+            }
+        }
+        let by_mod_id: HashMap<String, i64> = mods
+            .iter()
+            .filter_map(|m| m.meta.mod_id.as_ref().map(|id| (id.to_lowercase(), m.id)))
+            .collect();
+        let resolve_ref = |reference: &str| -> Option<i64> {
+            let norm = reference.trim().to_lowercase();
+            if let Some(id) = by_mod_id.get(&norm) {
+                return Some(*id);
+            }
+            mods.iter()
+                .find(|m| m.folder == reference.trim())
+                .map(|m| m.id)
+        };
+        for m in &mods {
+            for c in &m.conflicts {
+                if let Some(to) = resolve_ref(c) {
+                    if to != m.id {
+                        edges.push(GEdge {
+                            from: m.id,
+                            to,
+                            kind: GEdgeKind::Conflict,
+                        });
+                    }
+                }
+            }
+            // `requires_any` is not cached: read it from the live manifest.
+            if let Ok(Some(live)) = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder) {
+                for r in &live.requires_any {
+                    if let Some(to) = resolve_ref(r) {
+                        if to != m.id {
+                            edges.push(GEdge {
+                                from: m.id,
+                                to,
+                                kind: GEdgeKind::RequiresAny,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let mut variant_groups: HashMap<String, Vec<i64>> = HashMap::new();
+        for m in &mods {
+            if let Some(g) = &m.variant_group {
+                variant_groups.entry(g.clone()).or_default().push(m.id);
+            }
+        }
+        for members in variant_groups.values() {
+            for w in members.windows(2) {
+                edges.push(GEdge {
+                    from: w[0],
+                    to: w[1],
+                    kind: GEdgeKind::Variant,
+                });
+            }
+        }
+
         Ok(Snapshot {
             profiles,
             mods,
@@ -325,6 +411,8 @@ impl Backend {
             dep_status,
             dep_cycles,
             variant_members,
+            options_by_folder,
+            edges,
         })
     }
 
@@ -336,10 +424,11 @@ impl Backend {
         mods_dir: PathBuf,
         resolved: Vec<String>,
         spec: &'static gta_mo_core::games::GameSpec,
+        options: HashMap<String, HashMap<String, String>>,
         tx: Sender<GuiEvent>,
     ) {
         thread::spawn(move || {
-            let list = match conflicts::scan_conflicts(&mods_dir, &resolved, spec) {
+            let list = match conflicts::scan_conflicts(&mods_dir, &resolved, spec, &options) {
                 Ok(cs) => cs
                     .into_iter()
                     .map(|c| ConflictView {
@@ -362,6 +451,7 @@ impl Backend {
 
     /// Scans a profile's upper and annotates each file with its providing mods,
     /// on a background thread. Results arrive as [`GuiEvent::UpperScan`].
+    #[allow(clippy::too_many_arguments)]
     pub fn scan_upper_async(
         gen: u64,
         upper_dir: PathBuf,
@@ -369,12 +459,13 @@ impl Backend {
         mods_dir: PathBuf,
         resolved: Vec<String>,
         spec: &'static gta_mo_core::games::GameSpec,
+        options: HashMap<String, HashMap<String, String>>,
         tx: Sender<GuiEvent>,
     ) {
         thread::spawn(move || {
             let scan = upper::scan(&upper_dir, user_data_dir);
             let providers =
-                conflicts::providers_map(&mods_dir, &resolved, spec).unwrap_or_default();
+                conflicts::providers_map(&mods_dir, &resolved, spec, &options).unwrap_or_default();
             let rows: Vec<UpperView> = scan
                 .files
                 .into_iter()

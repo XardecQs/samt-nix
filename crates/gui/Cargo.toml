@@ -12,9 +12,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 eframe = "0.32"
+egui_graphs = "0.28"
 gta-mo-core = { path = "../core" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 libc = "0.2"
+petgraph = "0.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

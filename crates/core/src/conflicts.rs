@@ -30,10 +30,13 @@ pub fn scan_conflicts(
     mods_dir: &Path,
     resolved: &[String],
     spec: &crate::games::GameSpec,
+    options: &HashMap<String, HashMap<String, String>>,
 ) -> anyhow::Result<Vec<Conflict>> {
     let mut files: HashMap<String, Vec<(String, PathBuf, u64)>> = HashMap::new();
+    let empty = HashMap::new();
     for folder in resolved {
-        for layer in crate::meta::mod_layers(mods_dir, folder) {
+        let selected = options.get(folder).unwrap_or(&empty);
+        for layer in crate::meta::mod_layers_with_options(mods_dir, folder, selected) {
             walk(&layer, &layer, folder, &mut files, 0)?;
         }
     }
@@ -63,10 +66,13 @@ pub fn providers_map(
     mods_dir: &Path,
     resolved: &[String],
     spec: &crate::games::GameSpec,
+    options: &HashMap<String, HashMap<String, String>>,
 ) -> anyhow::Result<HashMap<String, PathProviders>> {
     let mut files: HashMap<String, Vec<(String, PathBuf, u64)>> = HashMap::new();
+    let empty = HashMap::new();
     for folder in resolved {
-        for layer in crate::meta::mod_layers(mods_dir, folder) {
+        let selected = options.get(folder).unwrap_or(&empty);
+        for layer in crate::meta::mod_layers_with_options(mods_dir, folder, selected) {
             walk(&layer, &layer, folder, &mut files, 0)?;
         }
     }
@@ -103,11 +109,14 @@ pub fn providers_for_path(
     resolved: &[String],
     rel: &str,
     spec: &crate::games::GameSpec,
+    options: &HashMap<String, HashMap<String, String>>,
 ) -> anyhow::Result<Option<PathProviders>> {
     let rel = rel.trim_start_matches("./").replace('\\', "/");
     let mut found: Vec<(String, PathBuf, u64)> = Vec::new();
+    let empty = HashMap::new();
     for folder in resolved {
-        for layer in crate::meta::mod_layers(mods_dir, folder) {
+        let selected = options.get(folder).unwrap_or(&empty);
+        for layer in crate::meta::mod_layers_with_options(mods_dir, folder, selected) {
             walk_path(&layer, &layer, folder, &rel, &mut found, 0)?;
         }
     }

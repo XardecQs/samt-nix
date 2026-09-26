@@ -390,8 +390,9 @@ pub fn copy_profile(conn: &Connection, src_id: i64, new_name: &str) -> anyhow::R
     )?;
     let new_id = conn.last_insert_rowid();
     conn.execute(
-        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order)
-         SELECT ?1, mod_id, enabled, load_order FROM profile_mods WHERE profile_id = ?2",
+        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order, hidden, notes, options)
+         SELECT ?1, mod_id, enabled, load_order, hidden, notes, options
+         FROM profile_mods WHERE profile_id = ?2",
         params![new_id, src.id],
     )?;
     Ok(new_id)
@@ -740,7 +741,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// Applies any pending schema migration. The whole chain runs inside a single
 /// transaction: a failure rolls everything back and `user_version` is only
@@ -783,6 +784,9 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         }
         if version < 10 {
             migrate_to_v10(conn)?;
+        }
+        if version < 11 {
+            migrate_to_v11(conn)?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
@@ -857,6 +861,28 @@ fn migrate_to_v10(conn: &Connection) -> anyhow::Result<()> {
     if !cols.iter().any(|c| c.as_str() == "license") {
         log::info("Migrando schema: ALTER TABLE mods ADD COLUMN license TEXT");
         conn.execute("ALTER TABLE mods ADD COLUMN license TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// Adds the per-profile option selections (`profile_mods.options`, JSON object
+/// `{group: value}`). Introspection based and idempotent.
+fn migrate_to_v11(conn: &Connection) -> anyhow::Result<()> {
+    let have_pm: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'profile_mods'",
+        [],
+        |row| row.get(0),
+    )?;
+    if have_pm == 0 {
+        return Ok(());
+    }
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('profile_mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if !cols.iter().any(|c| c.as_str() == "options") {
+        log::info("Migrando schema: ALTER TABLE profile_mods ADD COLUMN options TEXT");
+        conn.execute("ALTER TABLE profile_mods ADD COLUMN options TEXT", [])?;
     }
     Ok(())
 }
@@ -1281,6 +1307,91 @@ pub fn set_profile_mod_notes(
          VALUES (?1, ?2, 0, 0, ?3)
          ON CONFLICT(profile_id, mod_id) DO UPDATE SET notes = excluded.notes",
         params![profile_id, mod_id, notes],
+    )?;
+    Ok(())
+}
+
+/// Per-profile option selections of a mod: `{group: value}` (empty when none).
+pub fn profile_mod_options(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+) -> anyhow::Result<HashMap<String, String>> {
+    let mut stmt =
+        conn.prepare("SELECT options FROM profile_mods WHERE profile_id = ?1 AND mod_id = ?2")?;
+    let mut rows = stmt.query_map(params![profile_id, mod_id], |row| {
+        row.get::<_, Option<String>>(0)
+    })?;
+    let raw = rows.next().transpose()?.flatten();
+    Ok(raw
+        .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
+        .unwrap_or_default())
+}
+
+/// Option selections of every mod in a profile, keyed by mod id (only mods that
+/// have at least one selection are included).
+pub fn all_profile_options(
+    conn: &Connection,
+    profile_id: i64,
+) -> anyhow::Result<HashMap<i64, HashMap<String, String>>> {
+    let mut stmt = conn.prepare(
+        "SELECT mod_id, options FROM profile_mods
+         WHERE profile_id = ?1 AND options IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![profile_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (id, raw) = row?;
+        if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&raw) {
+            if !map.is_empty() {
+                out.insert(id, map);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Sets the selected value of an option group for a mod in a profile.
+pub fn set_profile_mod_option(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+    group: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let mut map = profile_mod_options(conn, profile_id, mod_id)?;
+    map.insert(group.to_string(), value.to_string());
+    let json = serde_json::to_string(&map)?;
+    conn.execute(
+        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order, options)
+         VALUES (?1, ?2, 0, 0, ?3)
+         ON CONFLICT(profile_id, mod_id) DO UPDATE SET options = excluded.options",
+        params![profile_id, mod_id, json],
+    )?;
+    Ok(())
+}
+
+/// Clears the selected value of an option group for a mod in a profile.
+pub fn unset_profile_mod_option(
+    conn: &Connection,
+    profile_id: i64,
+    mod_id: i64,
+    group: &str,
+) -> anyhow::Result<()> {
+    let mut map = profile_mod_options(conn, profile_id, mod_id)?;
+    map.remove(group);
+    let json = if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&map)?)
+    };
+    conn.execute(
+        "INSERT INTO profile_mods (profile_id, mod_id, enabled, load_order, options)
+         VALUES (?1, ?2, 0, 0, ?3)
+         ON CONFLICT(profile_id, mod_id) DO UPDATE SET options = excluded.options",
+        params![profile_id, mod_id, json],
     )?;
     Ok(())
 }
@@ -2623,5 +2734,46 @@ mod v6_tests {
             .is_err(),
             "el índice único parcial rechaza duplicados globales"
         );
+    }
+
+    #[test]
+    fn profile_mod_options_roundtrip() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        run_migrations(&conn).unwrap();
+        let profile = active_profile(&conn).unwrap();
+        let mod_id = insert_mod(&conn, "m1", "M1").unwrap();
+
+        assert!(profile_mod_options(&conn, profile.id, mod_id)
+            .unwrap()
+            .is_empty());
+
+        set_profile_mod_option(&conn, profile.id, mod_id, "variant", "4k").unwrap();
+        set_profile_mod_option(&conn, profile.id, mod_id, "preset", "high").unwrap();
+        let opts = profile_mod_options(&conn, profile.id, mod_id).unwrap();
+        assert_eq!(opts.get("variant").map(String::as_str), Some("4k"));
+        assert_eq!(opts.get("preset").map(String::as_str), Some("high"));
+
+        // One value per group: replacing keeps a single entry.
+        set_profile_mod_option(&conn, profile.id, mod_id, "variant", "lite").unwrap();
+        let opts = profile_mod_options(&conn, profile.id, mod_id).unwrap();
+        assert_eq!(opts.get("variant").map(String::as_str), Some("lite"));
+        assert_eq!(opts.len(), 2);
+
+        let all = all_profile_options(&conn, profile.id).unwrap();
+        assert_eq!(all.get(&mod_id).unwrap().len(), 2);
+
+        unset_profile_mod_option(&conn, profile.id, mod_id, "preset").unwrap();
+        assert_eq!(
+            profile_mod_options(&conn, profile.id, mod_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        unset_profile_mod_option(&conn, profile.id, mod_id, "variant").unwrap();
+        assert!(profile_mod_options(&conn, profile.id, mod_id)
+            .unwrap()
+            .is_empty());
+        assert!(all_profile_options(&conn, profile.id).unwrap().is_empty());
     }
 }
