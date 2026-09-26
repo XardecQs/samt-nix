@@ -247,6 +247,11 @@ impl GtaMoApp {
         theme::apply(&cc.egui_ctx, settings.theme_config());
         apply_style(&cc.egui_ctx, &settings);
 
+        let mut overwrite_browser = FileBrowserState::new(crate::file_browser::ViewMode::List);
+        overwrite_browser.apply_prefs(&settings.browser_prefs("overwrite_browser"));
+        let mut data_browser = FileBrowserState::new(crate::file_browser::ViewMode::Grid);
+        data_browser.apply_prefs(&settings.browser_prefs("data_browser"));
+
         let backend = Backend::new();
         let (tx, rx) = channel();
         let mut app = Self {
@@ -279,8 +284,8 @@ impl GtaMoApp {
             upper_include_userfiles: false,
             upper_gen: 0,
             mount: None,
-            overwrite_browser: FileBrowserState::new(crate::file_browser::ViewMode::List),
-            data_browser: FileBrowserState::new(crate::file_browser::ViewMode::Grid),
+            overwrite_browser,
+            data_browser,
             relations: None,
             relations_for: None,
             conflicts: Vec::new(),
@@ -348,6 +353,19 @@ impl GtaMoApp {
             || self.show_preferences
             || self.show_about
             || self.show_shortcuts
+    }
+
+    /// Persists a browser's UI state (view/sort/thumbnail size) when it changed.
+    fn persist_browser_prefs(&mut self, id: &str) {
+        let prefs = match id {
+            "data_browser" => self.data_browser.to_prefs(),
+            "overwrite_browser" => self.overwrite_browser.to_prefs(),
+            _ => return,
+        };
+        if self.settings.browsers.get(id) != Some(&prefs) {
+            self.settings.set_browser_prefs(id, prefs);
+            self.settings.save();
+        }
     }
 
     fn refresh(&mut self) {
@@ -3323,6 +3341,7 @@ impl GtaMoApp {
             &entries,
             &mut self.thumbs,
         );
+        self.persist_browser_prefs("data_browser");
 
         if resp.open_folder {
             self.open_detached(vec![
@@ -3571,6 +3590,7 @@ impl GtaMoApp {
             &entries,
             &mut self.thumbs,
         );
+        self.persist_browser_prefs("overwrite_browser");
 
         if resp.open_folder {
             if let Some(dir) = self.upper_dir.clone() {

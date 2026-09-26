@@ -1,6 +1,8 @@
+use crate::file_browser::BrowserPrefs;
 use crate::theme::{Accent, ThemePref};
 use gta_mo_core::config::config_dir_path;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// UI density. Affects spacing and control sizes (GNOME HIG: compact vs. cozy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -272,6 +274,9 @@ pub struct GuiSettings {
     pub confirm_deletes: bool,
     #[serde(default)]
     pub graph: GraphSettings,
+    /// Per-browser UI preferences (`[browsers.<id>]`).
+    #[serde(default)]
+    pub browsers: HashMap<String, BrowserPrefs>,
 }
 
 impl Default for GuiSettings {
@@ -287,6 +292,7 @@ impl Default for GuiSettings {
             show_covers: true,
             confirm_deletes: true,
             graph: GraphSettings::default(),
+            browsers: HashMap::new(),
         }
     }
 }
@@ -314,6 +320,15 @@ impl GuiSettings {
                 .and_then(crate::theme::parse_hex),
             high_contrast: self.high_contrast,
         }
+    }
+
+    /// Persisted UI prefs of a browser instance (defaults when absent).
+    pub fn browser_prefs(&self, id: &str) -> BrowserPrefs {
+        self.browsers.get(id).cloned().unwrap_or_default()
+    }
+
+    pub fn set_browser_prefs(&mut self, id: &str, prefs: BrowserPrefs) {
+        self.browsers.insert(id.to_string(), prefs);
     }
 
     /// Loads the settings, creating `gui.toml` with defaults on first run.
@@ -441,5 +456,28 @@ mod tests {
             back.graph.hierarchical.orientation,
             HierOrientation::LeftRight
         );
+    }
+
+    #[test]
+    fn browser_prefs_roundtrip() {
+        let mut s = GuiSettings::default();
+        s.set_browser_prefs(
+            "data_browser",
+            BrowserPrefs {
+                view: "grid".into(),
+                sort: "date".into(),
+                desc: true,
+                thumb_px: 180.0,
+            },
+        );
+        let text = toml::to_string(&s).unwrap();
+        let back: GuiSettings = toml::from_str(&text).unwrap();
+        let p = back.browser_prefs("data_browser");
+        assert_eq!(p.view, "grid");
+        assert_eq!(p.sort, "date");
+        assert!(p.desc);
+        assert_eq!(p.thumb_px, 180.0);
+        // Unknown id falls back to defaults.
+        assert_eq!(back.browser_prefs("nope"), BrowserPrefs::default());
     }
 }

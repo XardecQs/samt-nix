@@ -617,10 +617,17 @@ Positions are kept when only the enabled state changes. All of this (plus the
 advanced force/hierarchical parameters) is configurable in
 **Preferencias → Grafo** and persisted in `gui.toml`.
 
-**Datos** and **Overwrite** share one explorer widget: a folder-tree sidebar, a
-list or thumbnail-grid content area, search and kind filter, multi-selection
-(Ctrl/Shift toggles and ranges) with bulk move/delete, and thumbnails that open
-in the full-screen image viewer.
+**Datos** and **Overwrite** share one explorer widget: a folder-tree sidebar and
+a clickable breadcrumb, a list or thumbnail-grid content area (with an
+adjustable thumbnail size), search, kind filter, an **images only** quick filter
+and a hidden-files toggle, sorting by name/size/date/path, multi-selection
+(Ctrl/Shift toggles and ranges, `Ctrl+A`, invert) with bulk move/delete,
+keyboard navigation (arrows, Enter, Supr, `Ctrl+F`), folder and selection size
+totals, and thumbnails that open in the full-screen image viewer. Images are
+decoded on a background pool, downscaled and cached (in memory and on disk under
+`$XDG_CACHE_HOME/gta-mo/thumbs`, invalidated by mtime), so opening a folder with
+many images never blocks the UI. The view/sort/thumbnail size are remembered per
+browser.
 
 ### Appearance
 

@@ -6,6 +6,7 @@
 //! or move the selected paths (and owns any confirmation dialog).
 
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -34,6 +35,42 @@ impl SortField {
             SortField::Size => "Tamaño",
             SortField::Date => "Fecha",
             SortField::Path => "Ruta",
+        }
+    }
+}
+
+/// Persisted per-browser UI preferences (`[browsers.<id>]` in `gui.toml`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrowserPrefs {
+    #[serde(default = "default_view")]
+    pub view: String,
+    #[serde(default = "default_sort")]
+    pub sort: String,
+    #[serde(default)]
+    pub desc: bool,
+    #[serde(default = "default_thumb_px")]
+    pub thumb_px: f32,
+}
+
+fn default_view() -> String {
+    "list".to_string()
+}
+
+fn default_sort() -> String {
+    "name".to_string()
+}
+
+fn default_thumb_px() -> f32 {
+    116.0
+}
+
+impl Default for BrowserPrefs {
+    fn default() -> Self {
+        Self {
+            view: default_view(),
+            sort: default_sort(),
+            desc: false,
+            thumb_px: default_thumb_px(),
         }
     }
 }
@@ -125,6 +162,42 @@ impl FileBrowserState {
             move_target: None,
             thumb_px: 116.0,
         }
+    }
+
+    /// Current UI preferences, for persistence.
+    pub fn to_prefs(&self) -> BrowserPrefs {
+        BrowserPrefs {
+            view: match self.view {
+                ViewMode::List => "list".to_string(),
+                ViewMode::Grid => "grid".to_string(),
+            },
+            sort: match self.sort {
+                SortField::Name => "name",
+                SortField::Size => "size",
+                SortField::Date => "date",
+                SortField::Path => "path",
+            }
+            .to_string(),
+            desc: self.desc,
+            thumb_px: self.thumb_px,
+        }
+    }
+
+    /// Applies persisted UI preferences.
+    pub fn apply_prefs(&mut self, prefs: &BrowserPrefs) {
+        self.view = if prefs.view == "grid" {
+            ViewMode::Grid
+        } else {
+            ViewMode::List
+        };
+        self.sort = match prefs.sort.as_str() {
+            "size" => SortField::Size,
+            "date" => SortField::Date,
+            "path" => SortField::Path,
+            _ => SortField::Name,
+        };
+        self.desc = prefs.desc;
+        self.thumb_px = prefs.thumb_px.clamp(80.0, 220.0);
     }
 }
 
