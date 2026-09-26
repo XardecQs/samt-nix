@@ -837,6 +837,11 @@ fn list_row(
             resp.actions.push(BrowserAction::Open(vec![e.rel.clone()]));
         }
         ui.label(egui::RichText::new(&e.kind_label).small().weak());
+        if e.is_image {
+            if let Some((w, h)) = thumbs.dimensions(&config.root.join(&e.rel), ThumbSize::Small) {
+                ui.label(egui::RichText::new(format!("{w}×{h}")).small().weak());
+            }
+        }
         if !e.secondary.is_empty() {
             ui.label(egui::RichText::new(&e.secondary).small().weak());
         }
@@ -894,8 +899,12 @@ fn grid_card(
                     state.last_clicked = Some(e.rel.clone());
                     resp.actions.push(BrowserAction::Open(vec![e.rel.clone()]));
                 }
+                let hover = match thumbs.dimensions(&config.root.join(&e.rel), ThumbSize::Small) {
+                    Some((w, h)) => format!("{}\n{w}×{h}", e.rel),
+                    None => e.rel.clone(),
+                };
                 ui.add(egui::Label::new(egui::RichText::new(&e.name).small()).truncate())
-                    .on_hover_text(&e.rel);
+                    .on_hover_text(hover);
             });
         },
     );

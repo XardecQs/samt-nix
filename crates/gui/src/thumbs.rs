@@ -381,7 +381,6 @@ impl ThumbCache {
     }
 
     /// Original dimensions of an image, once decoded.
-    #[allow(dead_code)] // used by the browser's "image dimensions" feature
     pub fn dimensions(&self, path: &Path, size: ThumbSize) -> Option<(u32, u32)> {
         self.dims.get(&(path.to_path_buf(), size)).copied()
     }
