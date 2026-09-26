@@ -176,7 +176,29 @@ fn graph(ui: &mut egui::Ui, g: &mut GraphSettings) -> bool {
         });
 
     ui.add_space(4.0);
-    ui.label("Aristas:");
+    ui.label("Estilo de aristas:");
+    egui::Grid::new("prefs_graph_edge_style")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Ancho de arista");
+            changed |= ui
+                .add(egui::Slider::new(&mut g.edge_width, 0.5..=6.0).fixed_decimals(1))
+                .on_hover_text("Grosor en píxeles, constante con el zoom")
+                .changed();
+            ui.end_row();
+
+            ui.label("Tamaño de flecha");
+            changed |= ui
+                .add(egui::Slider::new(&mut g.arrow_size, 4.0..=40.0).fixed_decimals(0))
+                .on_hover_text("Tamaño de la punta en píxeles, constante con el zoom")
+                .changed();
+            ui.end_row();
+        });
+    changed |= ui.checkbox(&mut g.show_arrows, "Mostrar flechas").changed();
+
+    ui.add_space(4.0);
+    ui.label("Tipos de arista:");
     changed |= ui
         .checkbox(&mut g.show_optional, "Mostrar dependencias opcionales")
         .changed();

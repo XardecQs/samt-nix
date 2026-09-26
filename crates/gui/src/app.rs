@@ -2982,6 +2982,24 @@ impl GtaMoApp {
         meta.save(ui);
     }
 
+    /// Keeps edges and arrow tips at a constant screen size regardless of zoom,
+    /// so zooming in enlarges nodes/spacing but not the lines.
+    fn apply_graph_edge_style(&self, graph: &mut DepGraph, ui: &egui::Ui) {
+        let zoom = egui_graphs::Metadata::load(ui).zoom.max(0.05);
+        let cfg = &self.settings.graph;
+        let width = (cfg.edge_width / zoom).max(0.02);
+        let tip = if cfg.show_arrows {
+            (cfg.arrow_size / zoom).max(0.5)
+        } else {
+            0.001
+        };
+        for edge in graph.g_mut().edge_weights_mut() {
+            let display = edge.display_mut();
+            display.width = width;
+            display.tip_size = tip;
+        }
+    }
+
     fn ui_dep_graph(&mut self, ui: &mut egui::Ui) {
         // Sync the graph with the snapshot. Rebuild only on structural changes so
         // an appearance-only refresh keeps the current node positions.
@@ -3061,6 +3079,7 @@ impl GtaMoApp {
             Some(g) => g,
             None => return,
         };
+        self.apply_graph_edge_style(&mut graph, ui);
         let resp = match self.settings.graph.layout {
             GraphLayout::Hierarchical => {
                 let mut view = HierGraphView::new(&mut graph)

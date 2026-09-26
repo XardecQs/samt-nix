@@ -167,6 +167,14 @@ pub struct GraphSettings {
     pub zoom_speed: f32,
     #[serde(default = "default_fit_padding")]
     pub fit_padding: f32,
+    /// Edge stroke width in screen pixels (kept constant across zoom levels).
+    #[serde(default = "default_edge_width")]
+    pub edge_width: f32,
+    /// Arrow tip size in screen pixels (kept constant across zoom levels).
+    #[serde(default = "default_arrow_size")]
+    pub arrow_size: f32,
+    #[serde(default = "default_true")]
+    pub show_arrows: bool,
     #[serde(default = "default_true")]
     pub auto_settle: bool,
     #[serde(default)]
@@ -187,11 +195,22 @@ impl Default for GraphSettings {
             node_selection: true,
             zoom_speed: default_zoom_speed(),
             fit_padding: default_fit_padding(),
+            edge_width: default_edge_width(),
+            arrow_size: default_arrow_size(),
+            show_arrows: true,
             auto_settle: true,
             force: ForcePrefs::default(),
             hierarchical: HierarchicalPrefs::default(),
         }
     }
+}
+
+fn default_edge_width() -> f32 {
+    2.0
+}
+
+fn default_arrow_size() -> f32 {
+    15.0
 }
 
 fn default_zoom_speed() -> f32 {
@@ -360,6 +379,9 @@ mod tests {
         assert!(s.graph.auto_settle);
         assert_eq!(s.graph.force.k_scale, 0.6);
         assert_eq!(s.graph.hierarchical.orientation, HierOrientation::TopDown);
+        assert_eq!(s.graph.edge_width, 2.0);
+        assert_eq!(s.graph.arrow_size, 15.0);
+        assert!(s.graph.show_arrows);
 
         let s = GuiSettings {
             graph: GraphSettings {
