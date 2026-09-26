@@ -109,6 +109,13 @@ pub struct BrowserResponse {
     pub actions: Vec<BrowserAction>,
 }
 
+/// Result of rendering one thumbnail (for the placeholder).
+enum ThumbOutcome {
+    Ready,
+    Loading,
+    Failed,
+}
+
 /// Static configuration for one browser instance.
 pub struct BrowserConfig<'a> {
     /// Stable id (for egui state); use one per tab.
@@ -850,18 +857,15 @@ fn click_select(ui: &egui::Ui, state: &mut FileBrowserState, rel: &str, ordered:
     }
 }
 
-/// Draws the thumbnail inside `rect`; returns false when the entry has no
-/// decodable image (caller draws a text placeholder).
+/// Draws the thumbnail inside `rect`; returns whether the image is still
+/// loading or failed (the caller draws a placeholder).
 fn thumb_in(
     ui: &mut egui::Ui,
     config: &BrowserConfig<'_>,
     e: &FileEntry,
     rect: egui::Rect,
     thumbs: &mut ThumbCache,
-) -> bool {
-    if !e.is_image {
-        return false;
-    }
+) -> ThumbOutcome {
     let key = format!("{}/{}", config.key_prefix, e.rel);
     match thumbs.get(ui.ctx(), &key, &config.root.join(&e.rel), ThumbSize::Small) {
         ThumbState::Ready(tex) => {
@@ -871,9 +875,10 @@ fn thumb_in(
                     .fit_to_exact_size(rect.size())
                     .corner_radius(4),
             );
-            true
+            ThumbOutcome::Ready
         }
-        _ => false,
+        ThumbState::Loading => ThumbOutcome::Loading,
+        ThumbState::Failed => ThumbOutcome::Failed,
     }
 }
 
@@ -898,7 +903,9 @@ fn list_row(
             }
         }
         let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
-        thumb_in(ui, config, e, rect, thumbs);
+        if e.is_image && matches!(thumb_in(ui, config, e, rect, thumbs), ThumbOutcome::Loading) {
+            ui.put(rect, egui::Spinner::new().size(12.0));
+        }
         let label = ui.selectable_label(selected, egui::RichText::new(&e.name));
         if label.clicked() {
             click_select(ui, state, &e.rel, ordered);
@@ -954,7 +961,23 @@ fn grid_card(
                 .inner_margin(egui::Margin::same(4));
             frame.show(ui, |ui| {
                 let (rect, click) = ui.allocate_exact_size(thumb_size, egui::Sense::click());
-                if !thumb_in(ui, config, e, rect, thumbs) {
+                if e.is_image {
+                    match thumb_in(ui, config, e, rect, thumbs) {
+                        ThumbOutcome::Ready => {}
+                        ThumbOutcome::Loading => {
+                            ui.put(rect, egui::Spinner::new());
+                        }
+                        ThumbOutcome::Failed => {
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "Sin previsualización",
+                                egui::FontId::proportional(11.0),
+                                ui.visuals().weak_text_color(),
+                            );
+                        }
+                    }
+                } else {
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,

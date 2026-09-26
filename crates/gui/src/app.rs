@@ -209,6 +209,9 @@ pub struct GtaMoApp {
     focus_search: bool,
     toasts: crate::toasts::Toasts,
     lightbox: Option<crate::lightbox::Lightbox>,
+    /// Key of the image currently loading in the lightbox + when it started, to
+    /// show "Cargando…" and fall back to an error after a timeout.
+    lightbox_loading: Option<(String, std::time::Instant)>,
     list_epoch: u64,
     last_folders: Vec<String>,
     detail_opened: Option<std::time::Instant>,
@@ -306,6 +309,7 @@ impl GtaMoApp {
             focus_search: false,
             toasts: crate::toasts::Toasts::new(),
             lightbox: None,
+            lightbox_loading: None,
             list_epoch: 0,
             last_folders: Vec::new(),
             detail_opened: None,
@@ -753,10 +757,21 @@ impl GtaMoApp {
         path: &std::path::Path,
         size: ThumbSize,
     ) -> Option<egui::TextureHandle> {
-        match self.thumbs.get(ctx, &key, path, size) {
+        match self.image_state(ctx, &key, path, size) {
             ThumbState::Ready(tex) => Some(tex),
             _ => None,
         }
+    }
+
+    /// Async state of one image (ready / loading / failed).
+    fn image_state(
+        &mut self,
+        ctx: &egui::Context,
+        key: &str,
+        path: &std::path::Path,
+        size: ThumbSize,
+    ) -> ThumbState {
+        self.thumbs.get(ctx, key, path, size)
     }
 
     /// Draws one row of the mods list: optional cover thumbnail, enable
@@ -3804,7 +3819,26 @@ impl GtaMoApp {
             let it = &lb.items[index];
             (it.key.clone(), it.path.clone(), it.label.clone())
         };
-        let tex = self.load_image(ctx, key, &path, ThumbSize::Full);
+        let state = self.image_state(ctx, &key, &path, ThumbSize::Full);
+        let tex = match &state {
+            ThumbState::Ready(tex) => Some(tex.clone()),
+            _ => None,
+        };
+        // Track how long the current image has been loading (for the timeout).
+        let loading = matches!(state, ThumbState::Loading);
+        let timed_out = match (&state, &self.lightbox_loading) {
+            (ThumbState::Loading, Some((k, since))) => {
+                k == &key && since.elapsed().as_secs_f32() > 15.0
+            }
+            _ => false,
+        };
+        if loading {
+            if self.lightbox_loading.as_ref().map(|(k, _)| k.as_str()) != Some(key.as_str()) {
+                self.lightbox_loading = Some((key.clone(), std::time::Instant::now()));
+            }
+        } else {
+            self.lightbox_loading = None;
+        }
         let palette = theme::active(ctx);
         let screen = ctx.screen_rect();
         let source = lb.source;
@@ -3873,13 +3907,27 @@ impl GtaMoApp {
                         let _ = ui.interact(rect, egui::Id::new("lb_image"), egui::Sense::click());
                     }
                     None => {
-                        ui.painter().text(
-                            area.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "No se pudo cargar la imagen",
-                            egui::FontId::proportional(15.0),
-                            palette.danger,
-                        );
+                        if loading && !timed_out {
+                            ui.put(
+                                egui::Rect::from_center_size(area.center(), egui::vec2(30.0, 30.0)),
+                                egui::Spinner::new(),
+                            );
+                            ui.painter().text(
+                                area.center() + egui::vec2(0.0, 28.0),
+                                egui::Align2::CENTER_CENTER,
+                                "Cargando…",
+                                egui::FontId::proportional(14.0),
+                                egui::Color32::from_white_alpha(200),
+                            );
+                        } else {
+                            ui.painter().text(
+                                area.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "No se pudo cargar la imagen",
+                                egui::FontId::proportional(15.0),
+                                palette.danger,
+                            );
+                        }
                     }
                 }
 
