@@ -629,23 +629,48 @@ fn content(
     thumbs: &mut ThumbCache,
     resp: &mut BrowserResponse,
 ) {
-    // Breadcrumb / "up" navigation on narrow layouts.
-    if narrow {
-        ui.horizontal_wrapped(|ui| {
+    // Breadcrumb / "up" navigation (always visible, clickable segments).
+    ui.horizontal_wrapped(|ui| {
+        if !state.current.is_empty() {
+            let up = if narrow {
+                crate::icons::ARROW_LEFT.to_string()
+            } else {
+                format!("{} Subir", crate::icons::ARROW_LEFT)
+            };
             if ui
-                .small_button(format!("{} Subir", crate::icons::ARROW_LEFT))
+                .small_button(up)
+                .on_hover_text("Subir un nivel")
                 .clicked()
             {
                 state.current = parent_of(&state.current);
             }
-            let here = if state.current.is_empty() {
-                "Raíz".to_string()
+        }
+        let root_label = format!("{} Raíz", crate::icons::FOLDER_OPEN);
+        if ui
+            .selectable_label(state.current.is_empty(), root_label)
+            .clicked()
+        {
+            state.current.clear();
+        }
+        let segments: Vec<String> = state
+            .current
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        let mut acc = String::new();
+        for seg in segments {
+            ui.label("/");
+            if acc.is_empty() {
+                acc = seg.clone();
             } else {
-                state.current.clone()
-            };
-            ui.label(egui::RichText::new(here).small().weak());
-        });
-    }
+                acc = format!("{acc}/{seg}");
+            }
+            if ui.selectable_label(acc == state.current, seg).clicked() {
+                state.current = acc.clone();
+            }
+        }
+    });
 
     if visible.is_empty() {
         let msg = if searching {
