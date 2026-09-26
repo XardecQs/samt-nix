@@ -90,6 +90,39 @@ nix build
 ./result/bin/gta-mo --help
 ```
 
+## Game window icon on GNOME
+
+GNOME does not implement the `xdg_toplevel_icon_v1` Wayland protocol, so a
+Proton/umu game window shows a generic icon unless a desktop entry with a
+matching `StartupWMClass` exists (the same trick used for Minecraft). Both
+modules offer a `gameDesktopEntry` option that installs such an entry; you
+provide the icon (the game's own icon is not redistributed).
+
+Find the real window class while the game is running:
+
+```bash
+xprop WM_CLASS      # click the game window (XWayland)
+wmctrl -lx          # or list all windows with their class
+```
+
+It is usually `gta_sa.exe` (defaults to your configured `game_exe`). Example:
+
+```nix
+# Home Manager
+programs.gta-mo.gameDesktopEntry = {
+  enable = true;
+  icon = "/home/user/icons/gtasa.png";  # path or theme icon name
+  # wmClass = "gta_sa.exe";             # override if xprop shows another class
+};
+
+# NixOS
+programs.gta-mo.gameDesktopEntry.enable = true;
+programs.gta-mo.gameDesktopEntry.icon = "/home/user/icons/gtasa.png";
+```
+
+The entry (`NoDisplay=true` by default) uses `Exec = gta-mo launch`, so clicking
+it also starts the game.
+
 ## Directory layout
 
 The tool expects this structure under `game_root` (defined in `config.toml`):
