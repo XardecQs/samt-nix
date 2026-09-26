@@ -323,7 +323,17 @@ pub fn show(
 
     let narrow = ui.available_width() < 640.0;
 
-    header(ui, state, config, entries, &ordered, &mut resp);
+    let visible_total: u64 = visible.iter().map(|&i| entries[i].size).sum();
+    header(
+        ui,
+        state,
+        config,
+        entries,
+        &ordered,
+        visible.len(),
+        visible_total,
+        &mut resp,
+    );
 
     // Folder tree (hidden on narrow layouts; a breadcrumb handles navigation).
     if !narrow {
@@ -429,12 +439,15 @@ fn visible_entries(
     visible
 }
 
+#[allow(clippy::too_many_arguments)]
 fn header(
     ui: &mut egui::Ui,
     state: &mut FileBrowserState,
     config: &BrowserConfig<'_>,
     entries: &[FileEntry],
     ordered: &[String],
+    visible_count: usize,
+    visible_total: u64,
     resp: &mut BrowserResponse,
 ) {
     ui.horizontal_wrapped(|ui| {
@@ -537,7 +550,20 @@ fn header(
             }
         });
     });
-    action_bar(ui, state, config, ordered, resp);
+    ui.label(
+        egui::RichText::new(format!(
+            "{visible_count} archivo(s) · {}",
+            gta_mo_core::userdata::human_size(visible_total)
+        ))
+        .small()
+        .weak(),
+    );
+    let sel_total: u64 = entries
+        .iter()
+        .filter(|e| state.selected.contains(&e.rel))
+        .map(|e| e.size)
+        .sum();
+    action_bar(ui, state, config, ordered, sel_total, resp);
     ui.separator();
 }
 
@@ -547,6 +573,7 @@ fn action_bar(
     state: &mut FileBrowserState,
     config: &BrowserConfig<'_>,
     ordered: &[String],
+    sel_total: u64,
     resp: &mut BrowserResponse,
 ) {
     if state.selected.is_empty() {
@@ -555,9 +582,13 @@ fn action_bar(
     let selected: Vec<String> = state.selected.iter().cloned().collect();
     ui.horizontal_wrapped(|ui| {
         ui.label(
-            egui::RichText::new(format!("{} seleccionado(s)", selected.len()))
-                .small()
-                .strong(),
+            egui::RichText::new(format!(
+                "{} seleccionado(s) · {}",
+                selected.len(),
+                gta_mo_core::userdata::human_size(sel_total)
+            ))
+            .small()
+            .strong(),
         );
         if ui
             .button(format!("{} Abrir", crate::icons::FOLDER_OPEN))
