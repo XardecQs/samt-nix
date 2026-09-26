@@ -91,6 +91,8 @@ pub struct FileBrowserState {
     initialized: bool,
     search: String,
     kind_filter: Option<String>,
+    /// Quick "images only" filter.
+    images_only: bool,
     pub view: ViewMode,
     sort: SortField,
     desc: bool,
@@ -109,6 +111,7 @@ impl FileBrowserState {
             initialized: false,
             search: String::new(),
             kind_filter: None,
+            images_only: false,
             view,
             sort: SortField::Name,
             desc: false,
@@ -259,7 +262,7 @@ pub fn show(
         }
     }
 
-    let searching = !state.search.is_empty() || state.kind_filter.is_some();
+    let searching = !state.search.is_empty() || state.kind_filter.is_some() || state.images_only;
     let visible = visible_entries(&tree, state, entries, searching);
     let ordered: Vec<String> = visible.iter().map(|&i| entries[i].rel.clone()).collect();
 
@@ -351,6 +354,9 @@ fn visible_entries(
             .map(|n| n.files.clone())
             .unwrap_or_default()
     };
+    if state.images_only {
+        visible.retain(|&i| entries[i].is_image);
+    }
     visible.sort_by(|&a, &b| {
         let (ea, eb) = (&entries[a], &entries[b]);
         let ord = match state.sort {
@@ -395,6 +401,13 @@ fn header(
                 .hint_text("Buscar…")
                 .desired_width(160.0),
         );
+        if ui
+            .selectable_label(state.images_only, crate::icons::IMAGE)
+            .on_hover_text("Solo imágenes")
+            .clicked()
+        {
+            state.images_only = !state.images_only;
+        }
         // Kind filter dropdown, built from the entries actually present.
         let mut kinds: Vec<(String, String)> = Vec::new();
         for e in entries {
