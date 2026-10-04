@@ -139,7 +139,7 @@ game_root/
         ├── <slug>/    # Per-profile state (saves, configs, logs)
         │   ├── upper/ # Overlay upperdir (game writes land here)
         │   ├── work/  # Overlay workdir
-        │   └── logs/  # DXVK/Proton logs (when --debug)
+        │   └── logs/  # per-launch launch-<ts>.log + DXVK/Proton logs
         └── tmp-*/     # Throwaway upper of a `gta-mo mount --temp`
 ```
 
@@ -199,6 +199,13 @@ auto_discover = true
 > `ctl runtime reinstall` (force umu to re-download on the next launch) to repair
 > a broken install. Set `umu_runtime_update = true` to re-enable automatic
 > updates.
+
+> **Logs**: every launch writes a timestamped `launch-<ts>.log` under
+> `run/profiles/<slug>/logs/` (high-level launcher messages plus the `umu`/Proton
+> output, teed from the game process). `PROTON_LOG_DIR` and `DXVK_LOG_PATH` point
+> there too, and `UMU_LOG` keeps umu's output (`debug` with `--debug`). The
+> newest 20 launch logs per profile are kept. The GUI's Log tab and ⋮ menu have
+> an **Abrir carpeta de logs** action.
 
 ## Mod packaging (`mod.toml`)
 

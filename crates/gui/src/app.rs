@@ -554,6 +554,22 @@ impl GtaMoApp {
         self.backend.spawn_cli_detached(args, self.tx.clone());
     }
 
+    /// Opens the active profile's launch-logs folder (`logs/`).
+    fn open_logs_dir(&self) {
+        let Ok(cfg) = gta_mo_core::config::load_config() else {
+            return;
+        };
+        let dir = gta_mo_core::config::RuntimePaths::from_config(&cfg)
+            .profile_paths(&self.snapshot.active_slug)
+            .log_dir;
+        let _ = std::fs::create_dir_all(&dir);
+        self.open_detached(vec![
+            "ctl".into(),
+            "open-path".into(),
+            dir.display().to_string(),
+        ]);
+    }
+
     /// Queues a command whose stdin is the given text (e.g. `ctl manifest set`).
     fn exec_stdin(&mut self, args: Vec<String>, stdin: String) {
         self.pending.push_back(Job {
@@ -3792,6 +3808,16 @@ impl GtaMoApp {
             {
                 ui.ctx().copy_text(self.log.join("\n"));
             }
+            if ui
+                .button(format!(
+                    "{} Abrir carpeta de logs",
+                    crate::icons::FOLDER_OPEN
+                ))
+                .on_hover_text("Cada lanzamiento guarda un launch-<ts>.log (más DXVK/Proton) aquí")
+                .clicked()
+            {
+                self.open_logs_dir();
+            }
         });
         ui.separator();
         egui::ScrollArea::vertical()
@@ -4847,6 +4873,17 @@ fn app_menu_items(
         .clicked()
     {
         app.show_runtime = true;
+        ui.close();
+    }
+    if ui
+        .button(format!(
+            "{} Abrir carpeta de logs",
+            crate::icons::FOLDER_OPEN
+        ))
+        .on_hover_text("Registros de lanzamiento, DXVK y Proton del perfil activo")
+        .clicked()
+    {
+        app.open_logs_dir();
         ui.close();
     }
     ui.separator();

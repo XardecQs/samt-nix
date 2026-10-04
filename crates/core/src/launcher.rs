@@ -1,11 +1,108 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::io::{BufRead, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use crate::{config, db, mount_state, overlay, resolver, upper};
 
 pub struct LaunchEngine;
+
+/// Per-launch log file. It holds the high-level launcher messages and, through
+/// the tee in [`LaunchEngine::run_umu`], the raw `umu`/Proton output. One file
+/// per launch lives in the profile's `logs/` dir; the newest 20 are kept.
+pub struct LaunchLog {
+    path: PathBuf,
+}
+
+impl LaunchLog {
+    /// Creates `launch-<unix-seconds>.log` under `dir` and prunes old ones.
+    pub fn create(dir: &Path) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = dir.join(format!("launch-{secs}.log"));
+        {
+            let mut f = std::fs::File::create(&path)?;
+            writeln!(f, "=== gta-mo — registro de lanzamiento ===")?;
+            writeln!(f, "inicio (unix): {secs}")?;
+        }
+        prune_launch_logs(dir, 20);
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Appends one line to the log file (best-effort; never fails a launch).
+    pub fn write(&self, msg: &str) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
+/// Keeps only the newest `keep` `launch-*.log` files in `dir`.
+fn prune_launch_logs(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut logs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("launch-") && n.ends_with(".log"))
+                .unwrap_or(false)
+        })
+        .collect();
+    if logs.len() <= keep {
+        return;
+    }
+    logs.sort();
+    for old in &logs[..logs.len() - keep] {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+/// Forwards every line of `reader` to stdout (or stderr) and appends it to
+/// `log_path` when given.
+fn tee_output<R: std::io::Read + Send + 'static>(
+    reader: R,
+    log_path: &Path,
+    to_stderr: bool,
+) -> std::thread::JoinHandle<()> {
+    let path = log_path.to_path_buf();
+    std::thread::spawn(move || {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok();
+        for line in std::io::BufReader::new(reader)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if to_stderr {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+            if let Some(f) = file.as_mut() {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+    })
+}
 
 /// Config, runtime paths, the open database and the launcher lock, held for the
 /// duration of a launch or a manual mount.
@@ -200,17 +297,27 @@ impl LaunchEngine {
             std::env::set_var("PROTON_USE_OPTISCALER", "0");
         }
 
+        // Always keep umu/Proton/DXVK logs inside the profile's logs/ dir so
+        // every launch is inspectable; the most verbose DXVK/Wine output is only
+        // enabled with --debug.
+        std::fs::create_dir_all(log_dir).ok();
+        std::env::set_var("PROTON_LOG", "1");
+        std::env::set_var("PROTON_LOG_DIR", log_dir);
+        std::env::set_var("DXVK_LOG_PATH", log_dir);
+        std::env::set_var("UMU_LOG", if debug { "debug" } else { "1" });
         if debug {
-            std::fs::create_dir_all(log_dir).ok();
-            std::env::set_var("PROTON_LOG", "1");
             std::env::set_var("DXVK_LOG_LEVEL", "debug");
-            std::env::set_var("DXVK_LOG_PATH", log_dir);
             std::env::set_var("DXVK_HUD", cfg.dxvk_hud());
             std::env::set_var("WINEDEBUG", "+loaddll");
         }
     }
 
-    pub fn launch_game(exe_path: &Path, working_dir: &Path) -> anyhow::Result<()> {
+    pub fn launch_game(
+        exe_path: &Path,
+        working_dir: &Path,
+        launch_log: Option<&LaunchLog>,
+    ) -> anyhow::Result<()> {
+        let log_path = launch_log.map(|l| l.path().to_path_buf());
         let drop_uid = std::env::var("GTA_MO_DROP_UID")
             .ok()
             .and_then(|v| v.parse::<u32>().ok());
@@ -227,14 +334,46 @@ impl LaunchEngine {
                 ));
             }
             return match drop_uid {
-                Some(uid) => Self::launch_game_dropped(exe_path, working_dir, uid, drop_gid),
+                Some(uid) => {
+                    Self::launch_game_dropped(exe_path, working_dir, uid, drop_gid, log_path.as_deref())
+                }
                 None => anyhow::bail!(
                     "gta-mo se ejecuta como root. Define GTA_MO_DROP_UID (y opcionalmente GTA_MO_DROP_GID) para lanzar el juego como usuario."
                 ),
             };
         }
 
-        Self::launch_game_direct(exe_path, working_dir)
+        Self::launch_game_direct(exe_path, working_dir, log_path.as_deref())
+    }
+
+    /// Runs `umu-run` for `exe`, teeing its stdout/stderr to our own streams and
+    /// (when `log_path` is set) to the launch log file.
+    fn run_umu(
+        exe_path: &Path,
+        working_dir: &Path,
+        log_path: Option<&Path>,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        let mut cmd = std::process::Command::new("umu-run");
+        cmd.arg(exe_path).current_dir(working_dir);
+
+        let Some(path) = log_path else {
+            return cmd.status();
+        };
+
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let mut handles = Vec::new();
+        if let Some(out) = child.stdout.take() {
+            handles.push(tee_output(out, path, false));
+        }
+        if let Some(err) = child.stderr.take() {
+            handles.push(tee_output(err, path, true));
+        }
+        let status = child.wait()?;
+        for h in handles {
+            let _ = h.join();
+        }
+        Ok(status)
     }
 
     /// True when this process runs with euid 0 in the *initial* (host) user
@@ -278,11 +417,12 @@ impl LaunchEngine {
         }
     }
 
-    fn launch_game_direct(exe_path: &Path, working_dir: &Path) -> anyhow::Result<()> {
-        let status = std::process::Command::new("umu-run")
-            .arg(exe_path)
-            .current_dir(working_dir)
-            .status()
+    fn launch_game_direct(
+        exe_path: &Path,
+        working_dir: &Path,
+        log_path: Option<&Path>,
+    ) -> anyhow::Result<()> {
+        let status = Self::run_umu(exe_path, working_dir, log_path)
             .map_err(|e| anyhow::anyhow!("Error al ejecutar umu-run: {e}"))?;
 
         if !status.success() {
@@ -301,6 +441,7 @@ impl LaunchEngine {
         working_dir: &Path,
         uid: u32,
         gid: Option<u32>,
+        log_path: Option<&Path>,
     ) -> anyhow::Result<()> {
         // uid/GID del usuario real. El gid por defecto NO es el uid: usa el
         // grupo primario del usuario cuando se puede resolver.
@@ -312,7 +453,7 @@ impl LaunchEngine {
             anyhow::bail!("fork falló: {}", std::io::Error::last_os_error());
         }
         if pid == 0 {
-            let code = Self::drop_and_run_game(exe_path, working_dir, uid, gid);
+            let code = Self::drop_and_run_game(exe_path, working_dir, uid, gid, log_path);
             std::process::exit(code);
         }
 
@@ -342,7 +483,13 @@ impl LaunchEngine {
         Ok(())
     }
 
-    fn drop_and_run_game(exe_path: &Path, working_dir: &Path, uid: u32, gid: u32) -> i32 {
+    fn drop_and_run_game(
+        exe_path: &Path,
+        working_dir: &Path,
+        uid: u32,
+        gid: u32,
+        log_path: Option<&Path>,
+    ) -> i32 {
         if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
             eprintln!(
                 "gta-mo: unshare(CLONE_NEWUSER) falló: {}",
@@ -369,11 +516,7 @@ impl LaunchEngine {
             eprintln!("gta-mo: setuid falló: {}", std::io::Error::last_os_error());
             return 1;
         }
-        match std::process::Command::new("umu-run")
-            .arg(exe_path)
-            .current_dir(working_dir)
-            .status()
-        {
+        match Self::run_umu(exe_path, working_dir, log_path) {
             Ok(s) if s.success() => 0,
             Ok(s) => s.code().unwrap_or(1),
             Err(e) => {
@@ -396,8 +539,32 @@ impl LaunchEngine {
 
         let prepared = Self::plan(&boot, opts, false)?;
 
+        // One log file per real launch (not for dry-run), in the profile's dir.
+        let launch_log = if opts.dry_run {
+            None
+        } else {
+            match LaunchLog::create(&prepared.ppaths.log_dir) {
+                Ok(l) => {
+                    l.write(&format!(
+                        "perfil: {} (slug: {})",
+                        prepared.profile.name, prepared.profile.slug
+                    ));
+                    l.write(&format!("game_root: {}", boot.cfg.game_root));
+                    l.write(&format!("proton_path: {}", boot.cfg.proton_path));
+                    Some(l)
+                }
+                Err(e) => {
+                    crate::log::warn(format!("No se pudo crear el log de lanzamiento: {e}"));
+                    None
+                }
+            }
+        };
+
         if prepared.resolved.is_empty() {
             log("Sin mods activos — lanzando juego limpio.");
+            if let Some(l) = &launch_log {
+                l.write("Sin mods activos — lanzando juego limpio.");
+            }
 
             if opts.dry_run {
                 return Ok(LaunchResult {
@@ -412,7 +579,7 @@ impl LaunchEngine {
                 opts.debug,
             );
             let exe = boot.paths.base_game.join(boot.cfg.game_exe());
-            Self::launch_game(&exe, &boot.paths.base_game)?;
+            Self::launch_game(&exe, &boot.paths.base_game, launch_log.as_ref())?;
             return Ok(LaunchResult {
                 log: "Juego lanzado (limpio).".into(),
             });
@@ -457,7 +624,11 @@ impl LaunchEngine {
         );
         log(log_output.trim_end());
         log("Lanzando juego...");
-        Self::launch_game(&game_exe, &boot.paths.merged)?;
+        if let Some(l) = &launch_log {
+            l.write(log_output.trim_end());
+            l.write("Lanzando juego...");
+        }
+        Self::launch_game(&game_exe, &boot.paths.merged, launch_log.as_ref())?;
 
         drop(ov);
         Ok(LaunchResult { log: String::new() })
@@ -974,15 +1145,27 @@ impl LaunchEngine {
             "AUTO_DISCOVER:             {}\n",
             cfg.auto_discover()
         ));
+        out.push_str(&format!(
+            "PROTON_LOG_DIR:            {}\n",
+            ppaths.log_dir.display()
+        ));
+        out.push_str(&format!(
+            "DXVK_LOG_PATH:             {}\n",
+            ppaths.log_dir.display()
+        ));
+        out.push_str(&format!(
+            "UMU_LOG:                   {}\n",
+            if debug { "debug" } else { "1" }
+        ));
+        out.push_str(&format!(
+            "Log de lanzamiento:        {}/launch-<ts>.log\n",
+            ppaths.log_dir.display()
+        ));
 
         if debug {
             out.push_str("\n[DEBUG] Modo debug activado:\n");
             out.push_str("  PROTON_LOG:              1\n");
             out.push_str("  DXVK_LOG_LEVEL:          debug\n");
-            out.push_str(&format!(
-                "  DXVK_LOG_PATH:           {}\n",
-                ppaths.log_dir.display()
-            ));
             out.push_str(&format!("  DXVK_HUD:                {}\n", cfg.dxvk_hud()));
             out.push_str("  WINEDEBUG:               +loaddll\n");
         }
@@ -1125,6 +1308,55 @@ mod tests {
         LaunchEngine::setup_env(&cfg, Path::new("/tmp/pfx"), Path::new("/tmp/logs"), false);
         assert_eq!(std::env::var("UMU_RUNTIME_UPDATE").unwrap(), "1");
         std::env::remove_var("UMU_RUNTIME_UPDATE");
+    }
+
+    #[test]
+    fn setup_env_points_logs_at_the_profile_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let cfg = base_config();
+        let logs = Path::new("/tmp/gta-mo-logs-test");
+        LaunchEngine::setup_env(&cfg, Path::new("/tmp/pfx"), logs, false);
+        assert_eq!(
+            std::env::var("PROTON_LOG_DIR").unwrap(),
+            "/tmp/gta-mo-logs-test"
+        );
+        assert_eq!(
+            std::env::var("DXVK_LOG_PATH").unwrap(),
+            "/tmp/gta-mo-logs-test"
+        );
+        assert_eq!(std::env::var("UMU_LOG").unwrap(), "1");
+        // `--debug` switches umu to its verbose logger.
+        LaunchEngine::setup_env(&cfg, Path::new("/tmp/pfx"), logs, true);
+        assert_eq!(std::env::var("UMU_LOG").unwrap(), "debug");
+        for v in ["PROTON_LOG_DIR", "DXVK_LOG_PATH", "UMU_LOG"] {
+            std::env::remove_var(v);
+        }
+    }
+
+    #[test]
+    fn launch_log_writes_and_prunes() {
+        let dir = std::env::temp_dir().join(format!("gta-mo-launchlog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..25 {
+            std::fs::write(dir.join(format!("launch-{i:010}.log")), "viejo").unwrap();
+        }
+
+        let log = LaunchLog::create(&dir).unwrap();
+        log.write("hola mundo");
+        let content = std::fs::read_to_string(log.path()).unwrap();
+        assert!(content.contains("hola mundo"));
+
+        let count = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("launch-"))
+            .count();
+        assert!(
+            count <= 21,
+            "se conservan los 20 más nuevos + el actual: {count}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
