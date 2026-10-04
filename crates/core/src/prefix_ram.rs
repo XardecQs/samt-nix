@@ -1,0 +1,322 @@
+//! Run the Wine prefix from a tmpfs copy so a long game session cannot evict it
+//! from RAM.
+//!
+//! The prefix on disk (`<game_root>/pfx`) stays the source of truth. When RAM
+//! mode is enabled we `rsync` it to `/dev/shm/gta-mo/pfx` and point `WINEPREFIX`
+//! there; after the game exits we `rsync` it back and drop the copy. A small
+//! marker records the disk prefix's *signature* so an early `gta-mo preload`
+//! (see the GUI prewarm) can be reused by the next launch instead of copying
+//! again.
+//!
+//! This is deliberately user-space only: `/dev/shm` is an ordinary writable
+//! tmpfs, no `mlock`/`RLIMIT_MEMLOCK` and no system configuration required.
+
+use std::ffi::CString;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use crate::log;
+
+/// Environment override for the tmpfs root (mainly for tests).
+pub const RAM_DIR_ENV: &str = "GTA_MO_RAM_DIR";
+
+/// Default tmpfs root.
+const DEFAULT_RAM_DIR: &str = "/dev/shm/gta-mo";
+
+/// Kept free margin on the tmpfs (in addition to the prefix size).
+const SPACE_MARGIN: u64 = 32 * 1024 * 1024;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PrepareReport {
+    /// True when the prefix was actually copied to tmpfs this time.
+    pub copied: bool,
+    /// True when an already-prepared tmpfs copy was reused.
+    pub reused: bool,
+    pub elapsed: Duration,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SyncReport {
+    pub synced: bool,
+    pub elapsed: Duration,
+}
+
+/// A prefix ready to be handed to `umu`/Proton. Dropping it does nothing;
+/// call [`PreparedPrefix::finalize`] to sync back and clean the tmpfs.
+pub struct PreparedPrefix {
+    path: PathBuf,
+    disk: PathBuf,
+    tmpfs: Option<PathBuf>,
+    report: PrepareReport,
+}
+
+impl PreparedPrefix {
+    /// Path to pass as `WINEPREFIX`.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// True when the game runs against the tmpfs copy.
+    pub fn using_tmpfs(&self) -> bool {
+        self.tmpfs.is_some()
+    }
+
+    pub fn report(&self) -> PrepareReport {
+        self.report
+    }
+
+    /// Prepares the prefix: copies it to tmpfs (or reuses an already-prepared
+    /// copy). Falls back to the disk prefix when RAM mode is off/unavailable.
+    pub fn prepare(disk: &Path, enabled: bool) -> Self {
+        let disk_only = |report: PrepareReport| Self {
+            path: disk.to_path_buf(),
+            disk: disk.to_path_buf(),
+            tmpfs: None,
+            report,
+        };
+
+        if !enabled || !disk.is_dir() {
+            return disk_only(PrepareReport::default());
+        }
+        let Some(root) = ram_root() else {
+            log::warn("prefix_ram: no hay tmpfs disponible; usando el prefijo del disco.");
+            return disk_only(PrepareReport::default());
+        };
+        let tmpfs = root.join("pfx");
+        let marker = root.join(".prepared");
+
+        let signature = prefix_signature(disk);
+        if tmpfs.is_dir()
+            && std::fs::read_to_string(&marker)
+                .map(|m| m.trim() == signature)
+                .unwrap_or(false)
+        {
+            return Self {
+                path: tmpfs.clone(),
+                disk: disk.to_path_buf(),
+                tmpfs: Some(tmpfs),
+                report: PrepareReport {
+                    copied: false,
+                    reused: true,
+                    elapsed: Duration::ZERO,
+                },
+            };
+        }
+
+        let needed = signature_bytes(disk) + SPACE_MARGIN;
+        if free_bytes(&root).map(|f| f < needed).unwrap_or(false) {
+            log::warn(format!(
+                "prefix_ram: poco espacio en {}; usando el prefijo del disco.",
+                root.display()
+            ));
+            return disk_only(PrepareReport::default());
+        }
+
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            log::warn(format!(
+                "prefix_ram: no se pudo crear {}: {e}",
+                root.display()
+            ));
+            return disk_only(PrepareReport::default());
+        }
+
+        let started = Instant::now();
+        if let Err(e) = rsync(disk, &tmpfs, true) {
+            log::warn(format!(
+                "prefix_ram: copia a tmpfs falló ({e}); usando disco."
+            ));
+            let _ = std::fs::remove_dir_all(&tmpfs);
+            return disk_only(PrepareReport::default());
+        }
+        let _ = std::fs::write(&marker, &signature);
+
+        Self {
+            path: tmpfs.clone(),
+            disk: disk.to_path_buf(),
+            tmpfs: Some(tmpfs),
+            report: PrepareReport {
+                copied: true,
+                reused: false,
+                elapsed: started.elapsed(),
+            },
+        }
+    }
+
+    /// Syncs the tmpfs copy back to disk and removes it.
+    pub fn finalize(self) -> SyncReport {
+        let Some(tmpfs) = self.tmpfs else {
+            return SyncReport::default();
+        };
+        let started = Instant::now();
+        let mut synced = false;
+        if tmpfs.is_dir() {
+            match rsync(&tmpfs, &self.disk, false) {
+                Ok(()) => synced = true,
+                Err(e) => log::warn(format!("prefix_ram: sincronización a disco falló: {e}")),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&tmpfs);
+        if let Some(parent) = tmpfs.parent() {
+            let _ = std::fs::remove_file(parent.join(".prepared"));
+        }
+        SyncReport {
+            synced,
+            elapsed: started.elapsed(),
+        }
+    }
+}
+
+fn ram_root() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(RAM_DIR_ENV) {
+        let p = PathBuf::from(dir);
+        if p.is_dir() || p.parent().map(|d| d.is_dir()).unwrap_or(false) {
+            return Some(p);
+        }
+    }
+    let shm = PathBuf::from(DEFAULT_RAM_DIR);
+    if shm.parent().map(|p| p.is_dir()).unwrap_or(false) {
+        Some(shm)
+    } else {
+        None
+    }
+}
+
+/// Recursively copies `src`'s contents into `dst` with `rsync -rlpt` (symlinks,
+/// permissions and times preserved; no owner/group, which avoids privilege
+/// issues inside the Steam user namespace).
+fn rsync(src: &Path, dst: &Path, delete: bool) -> std::io::Result<()> {
+    let mut cmd = Command::new("rsync");
+    cmd.arg("-rlpt").arg("--no-owner").arg("--no-group");
+    if delete {
+        cmd.arg("--delete");
+    }
+    let src_contents = format!("{}/", src.display());
+    let out = cmd
+        .arg("--")
+        .arg(&src_contents)
+        .arg(dst)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
+}
+
+/// A cheap signature of the disk prefix: entry count, total size and newest
+/// mtime. Used to decide whether an already-prepared tmpfs copy is still valid.
+fn prefix_signature(disk: &Path) -> String {
+    let (count, bytes, newest) = walk_signature(disk);
+    format!("{count}:{bytes}:{}", newest)
+}
+
+fn signature_bytes(disk: &Path) -> u64 {
+    walk_signature(disk).1
+}
+
+fn walk_signature(root: &Path) -> (u64, u64, i128) {
+    let mut stack = vec![root.to_path_buf()];
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    let mut newest: i128 = 0;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(md) = entry.metadata() else { continue };
+            count += 1;
+            if md.is_dir() {
+                stack.push(entry.path());
+            } else if md.is_file() {
+                bytes += md.len();
+            }
+            if let Ok(modified) = md.modified() {
+                if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    newest = newest.max(d.as_nanos() as i128);
+                }
+            }
+        }
+    }
+    (count, bytes, newest)
+}
+
+#[cfg(unix)]
+fn free_bytes(path: &Path) -> Option<u64> {
+    let c = CString::new(path.to_str()?).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+fn free_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("gta-mo-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn signature_changes_with_content() {
+        let dir = tmp("sig");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), b"hello").unwrap();
+        let s1 = prefix_signature(&dir);
+        std::fs::write(dir.join("b"), b"world!").unwrap();
+        let s2 = prefix_signature(&dir);
+        assert_ne!(s1, s2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disabled_uses_disk() {
+        let disk = tmp("disk-off");
+        let _ = std::fs::remove_dir_all(&disk);
+        std::fs::create_dir_all(&disk).unwrap();
+        let p = PreparedPrefix::prepare(&disk, false);
+        assert!(!p.using_tmpfs());
+        assert_eq!(p.path(), disk.as_path());
+        let _ = std::fs::remove_dir_all(&disk);
+    }
+
+    #[test]
+    fn tmpfs_roundtrip_when_available() {
+        if !Path::new("/dev/shm").is_dir() {
+            return;
+        }
+        let root = PathBuf::from("/dev/shm/gta-mo-test");
+        std::env::set_var(RAM_DIR_ENV, root.display().to_string());
+        let disk = tmp("rt");
+        let _ = std::fs::remove_dir_all(&disk);
+        std::fs::create_dir_all(disk.join("drive_c")).unwrap();
+        std::fs::write(disk.join("drive_c/system.reg"), b"reg").unwrap();
+
+        let p = PreparedPrefix::prepare(&disk, true);
+        assert!(p.using_tmpfs());
+        // Written through the tmpfs copy...
+        std::fs::write(p.path().join("drive_c/new.reg"), b"new").unwrap();
+        let _ = p.finalize();
+        // ...lands back on disk.
+        assert!(disk.join("drive_c/new.reg").exists());
+        assert!(!root.join("pfx").exists());
+
+        std::env::remove_var(RAM_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&disk);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

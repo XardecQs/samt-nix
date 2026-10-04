@@ -186,20 +186,35 @@ auto_discover = true
 # timings = true
 # Write Proton's verbose steam-<appid>.log every launch (default off; on with --debug)
 # proton_log = false
+# Run the game against a tmpfs copy of the Wine prefix (default on)
+# prefix_ram = true
 ```
 
 > **Startup / preloading**: on slow storage the game spends a long time reading
-> the Wine prefix and the game's startup files on demand. `preload = "prefix"`
-> (default) warms the page cache — the Wine prefix, the game executable and the
-> mods' startup files (ASI/DLL/CLEO scripts, configs and the `modloader/` tree) —
-> on a background thread at *idle* I/O priority, and stops once the game process
+> the Wine prefix and the game's startup files on demand. `gta-mo` warms them in
+> two steps: a **critical** one (the Wine prefix, the game executable and the mod
+> loaders) runs synchronously at normal I/O priority *before* `umu`, so Wine
+> never hits the loader stall; the **extra** startup files (configs and the
+> `modloader/` tree) are warmed in the background and stop once the game process
 > appears. `preload = "full"` also reads the whole base game and every enabled
 > mod file (can be tens of GB); it prints a detailed warning and asks for
 > confirmation on an interactive terminal, and is better used ahead of time with
-> `gta-mo preload`. `preload = "off"` disables it. `timings = true` (default)
-> prints per-phase timings (`config/db`, `plan`, `mount`, `preload`) and,
-> while the game boots, the time to the game process and to DXVK's device
-> creation (a good proxy for "the window is up").
+> `gta-mo preload`. `preload = "off"` disables it.
+>
+> **Prefix in RAM (`prefix_ram`, default on)**: a long game session evicts the
+> Wine prefix from the page cache, which makes the *next* launch slow. To avoid
+> it, `gta-mo` `rsync`s the prefix to a tmpfs copy (`/dev/shm/gta-mo/pfx`) and
+> runs the game against it; after the session it syncs back to disk (the source
+> of truth) and drops the copy. `gta-mo preload` prepares the tmpfs copy ahead of
+> time (the GUI does it on startup and after each game), and the next `launch`
+> reuses it. It is user-space only (no `mlock`/system changes) and falls back to
+> the disk prefix if `/dev/shm` is unavailable. Disable with `--no-prefix-ram` or
+> `prefix_ram = false`.
+>
+> `timings = true` (default) prints per-phase timings (`config/db`, `plan`,
+> `mount`, `prefix-ram`, `preload`, `prefix-sync`) and, while the game boots, the
+> time to the game process and to DXVK's device creation (a good proxy for "the
+> window is up").
 
 
 > **Proton upscalers**: GE and CachyOS Proton run `protonfixes.setup_upscalers()`
@@ -450,7 +465,7 @@ gta-mo ctl which models/player.dff         # who wins that file
 ## CLI
 
 ```
-gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [--no-auto-discover] [--preload <off|prefix|full>] [--preload-yes]
+gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [--no-auto-discover] [--preload <off|prefix|full>] [--preload-yes] [--prefix-ram|--no-prefix-ram]
 gta-mo preload [--full] [--yes]       # warm the page cache without launching
 gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/mount namespace (for Steam)
 gta-mo mount [--temp] [--dry-run] [--profile <name>]   # mount the overlay without launching the game
@@ -641,6 +656,7 @@ Steam overlay will not attach to the game window.
 | `--no-auto-discover` | Do not auto-scan `mods/`, even if `auto_discover` is set |
 | `--preload <off\|prefix\|full>` | Page-cache preloading before launch (overrides the config) |
 | `--preload-yes` | Skip the `full` preload confirmation prompt |
+| `--prefix-ram` / `--no-prefix-ram` | Run the Wine prefix from tmpfs / from disk (overrides the config) |
 
 ## GUI
 

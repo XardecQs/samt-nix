@@ -139,6 +139,13 @@ fn behavior(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
     changed |= ui
         .checkbox(&mut s.confirm_deletes, "Pedir confirmación al eliminar")
         .changed();
+    changed |= ui
+        .checkbox(&mut s.prefix_ram, "Prefijo Wine en RAM (tmpfs)")
+        .on_hover_text(
+            "Copia el prefijo a /dev/shm durante la partida para acelerar el \
+             arranque en discos lentos; el disco se sincroniza al salir.",
+        )
+        .changed();
     changed
 }
 

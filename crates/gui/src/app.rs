@@ -332,7 +332,18 @@ impl GtaMoApp {
             graph_fit_pending: true,
         };
         app.refresh();
+        app.prewarm();
         app
+    }
+
+    /// Warms the page cache and prepares the tmpfs Wine prefix ahead of a
+    /// launch, so the next launch does not pay the cold read (C).
+    fn prewarm(&mut self) {
+        let slug = self.snapshot.active_slug.clone();
+        if slug.is_empty() {
+            return;
+        }
+        self.exec(vec!["preload".into(), "--profile".into(), slug], false);
     }
 
     /// Re-applies everything derived from [`GuiSettings`] after a change.
@@ -654,6 +665,8 @@ impl GtaMoApp {
                             crate::toasts::ToastKind::Success,
                             "El juego terminó",
                         );
+                        // Re-prepare the prefix for the next launch.
+                        self.prewarm();
                     }
                     self.pump();
                     if !self.busy {
@@ -1188,6 +1201,11 @@ impl eframe::App for GtaMoApp {
                             if self.launch_debug {
                                 args.push("--debug".into());
                             }
+                            args.push(if self.settings.prefix_ram {
+                                "--prefix-ram".into()
+                            } else {
+                                "--no-prefix-ram".into()
+                            });
                             if self.launch_dry_run {
                                 args.push("--dry-run".into());
                             }

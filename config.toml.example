@@ -37,3 +37,9 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 # Write Proton's verbose `steam-<appid>.log` on every launch (extra I/O; only
 # enabled by default with `--debug`).
 # proton_log = false
+#
+# Run the game against a tmpfs copy of the Wine prefix
+# (`/dev/shm/gta-mo/pfx`), so a long game session cannot evict it from RAM; the
+# on-disk prefix stays as the source of truth (rsync in/out around the launch).
+# Requires no system changes; falls back to disk if /dev/shm is unavailable.
+# prefix_ram = true

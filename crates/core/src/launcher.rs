@@ -159,6 +159,9 @@ pub struct LaunchOptions {
     pub preload: Option<PreloadMode>,
     /// Skip the `full` preload confirmation prompt.
     pub preload_yes: bool,
+    /// CLI override for running the Wine prefix from tmpfs (falls back to the
+    /// config).
+    pub prefix_ram: Option<bool>,
 }
 
 impl Default for LaunchOptions {
@@ -174,6 +177,7 @@ impl Default for LaunchOptions {
             deps_ignore: false,
             preload: None,
             preload_yes: false,
+            prefix_ram: None,
         }
     }
 }
@@ -755,23 +759,69 @@ impl LaunchEngine {
         let mut mode = Self::resolve_preload_mode(&boot.cfg, opts);
         Self::confirm_full_preload(&mut mode, opts, launch_log);
 
-        let preload_stop = Arc::new(AtomicBool::new(false));
-        let preloader = preload::Preload::spawn(
-            mode,
-            &boot.paths.wine_prefix,
+        // B1: run the game against a per-session tmpfs copy of the Wine prefix
+        // so a long game session cannot evict it from RAM.
+        let prefix_ram = opts.prefix_ram.unwrap_or_else(|| boot.cfg.prefix_ram());
+        let prepared_prefix =
+            crate::prefix_ram::PreparedPrefix::prepare(&boot.paths.wine_prefix, prefix_ram);
+        let prep = prepared_prefix.report();
+        if prep.reused {
+            Self::emit(
+                launch_log,
+                log,
+                "Prefijo ya preparado en tmpfs; se reutiliza.",
+            );
+        } else if prep.copied {
+            Self::emit(
+                launch_log,
+                log,
+                &format!("Prefijo → tmpfs en {:.1}s.", prep.elapsed.as_secs_f64()),
+            );
+        }
+        timer.mark("prefix-ram");
+
+        // A: warm the critical path synchronously, at normal I/O priority, so
+        // Wine never hits the loader stall. The disk prefix is skipped when the
+        // game will read it from the tmpfs copy.
+        let critical_prefix = if prepared_prefix.using_tmpfs() {
+            None
+        } else {
+            Some(boot.paths.wine_prefix.as_path())
+        };
+        let crit = preload::warm_critical(
+            critical_prefix,
             &boot.paths.base_game,
             boot.cfg.game_exe(),
+            layer_dirs,
+        );
+        if crit.files > 0 {
+            Self::emit(
+                launch_log,
+                log,
+                &format!(
+                    "Precarga crítica: {} archivo(s), {:.0} MiB.",
+                    crit.files,
+                    crit.bytes as f64 / 1_048_576.0
+                ),
+            );
+        }
+        timer.mark("preload");
+
+        // Extra files in the background (abortable when the game starts).
+        let preload_stop = Arc::new(AtomicBool::new(false));
+        let preloader = preload::Preload::spawn_extra(
+            mode,
+            &boot.paths.base_game,
             layer_dirs,
             preload_stop.clone(),
         );
         if preloader.is_some() {
-            let msg = format!("Precarga en caché ({}) en segundo plano.", mode.as_str());
-            log(&msg);
-            if let Some(l) = launch_log {
-                l.write(&msg);
-            }
+            Self::emit(
+                launch_log,
+                log,
+                &format!("Precarga en caché ({}) en segundo plano.", mode.as_str()),
+            );
         }
-        timer.mark("preload");
 
         let watcher_stop = Arc::new(AtomicBool::new(false));
         let watcher_log = launch_log.map(|l| l.path().to_path_buf());
@@ -793,7 +843,7 @@ impl LaunchEngine {
 
         Self::setup_env(
             &boot.cfg,
-            &boot.paths.wine_prefix,
+            prepared_prefix.path(),
             &prepared.ppaths.log_dir,
             opts.debug,
         );
@@ -819,8 +869,17 @@ impl LaunchEngine {
             let _ = h.join();
         }
         let warmed = preloader.map(|p| p.stop_and_join()).unwrap_or_default();
+        let sync = prepared_prefix.finalize();
+        if sync.synced {
+            Self::emit(
+                launch_log,
+                log,
+                &format!("tmpfs → disco en {:.1}s.", sync.elapsed.as_secs_f64()),
+            );
+        }
+        timer.mark("prefix-sync");
         let done = format!(
-            "⏱ sesión: {:.1}s | precarga: {} archivo(s){}",
+            "⏱ sesión: {:.1}s | extra: {} archivo(s){}",
             session.as_secs_f64(),
             warmed.files,
             if warmed.stopped {
@@ -833,8 +892,23 @@ impl LaunchEngine {
         if let Some(l) = launch_log {
             l.write(&done);
         }
+        let final_report = timer.report();
+        if !final_report.is_empty() {
+            log(&final_report);
+            if let Some(l) = launch_log {
+                l.write(&final_report);
+            }
+        }
 
         result
+    }
+
+    /// Prints `msg` to the launch log and the console.
+    fn emit(launch_log: Option<&LaunchLog>, log: &mut impl FnMut(&str), msg: &str) {
+        log(msg);
+        if let Some(l) = launch_log {
+            l.write(msg);
+        }
     }
 
     pub fn run(opts: &LaunchOptions, mut log: impl FnMut(&str)) -> anyhow::Result<LaunchResult> {
@@ -972,8 +1046,9 @@ impl LaunchEngine {
 
         let mut mode = Self::resolve_preload_mode(&boot.cfg, opts);
         Self::confirm_full_preload(&mut mode, opts, None);
-        if mode.is_off() {
-            log("Precarga desactivada (preload = \"off\").");
+        let prefix_ram = opts.prefix_ram.unwrap_or_else(|| boot.cfg.prefix_ram());
+        if mode.is_off() && !prefix_ram {
+            log("Precarga desactivada (preload = \"off\" y prefix_ram = false).");
             return Ok(String::new());
         }
 
@@ -982,6 +1057,28 @@ impl LaunchEngine {
             &prepared.resolved,
             &prepared.options_by_folder,
         );
+
+        // C: leave the tmpfs prefix ready for the next launch. Dropping the
+        // guard is a no-op, so the copy stays until `launch` consumes it.
+        let mut tmpfs_ready = false;
+        if prefix_ram {
+            let pf = crate::prefix_ram::PreparedPrefix::prepare(&boot.paths.wine_prefix, true);
+            let r = pf.report();
+            if r.copied {
+                log(&format!(
+                    "Prefijo → tmpfs en {:.1}s.",
+                    r.elapsed.as_secs_f64()
+                ));
+            } else if r.reused {
+                log("Prefijo ya estaba preparado en tmpfs.");
+            }
+            tmpfs_ready = pf.using_tmpfs();
+        }
+
+        if mode.is_off() {
+            return Ok(String::new());
+        }
+
         log(&format!(
             "Precargando perfil '{}' (modo {}): {} mod(s).",
             prepared.profile.name,
@@ -991,9 +1088,14 @@ impl LaunchEngine {
 
         let started = Instant::now();
         let stop = AtomicBool::new(false);
-        let stats = preload::warm(
+        let prefix = if tmpfs_ready {
+            None
+        } else {
+            Some(boot.paths.wine_prefix.as_path())
+        };
+        let stats = preload::warm_all(
             mode,
-            &boot.paths.wine_prefix,
+            prefix,
             &boot.paths.base_game,
             boot.cfg.game_exe(),
             &layers,
@@ -1639,6 +1741,7 @@ mod tests {
             preload: None,
             proton_log: None,
             timings: None,
+            prefix_ram: None,
         }
     }
 

@@ -28,6 +28,11 @@ pub struct Config {
     pub proton_log: Option<bool>,
     /// Print per-phase launch timings. Defaults to `true`.
     pub timings: Option<bool>,
+    /// Run the game against a per-launch copy of the Wine prefix on a tmpfs
+    /// (`/dev/shm/gta-mo/pfx`), so a long game session cannot evict it from
+    /// RAM. Defaults to `true`; the prefix on disk stays as the source of
+    /// truth (see [`crate::prefix_ram`]).
+    pub prefix_ram: Option<bool>,
 }
 
 impl Config {
@@ -91,6 +96,11 @@ impl Config {
     /// Whether per-phase launch timings are printed. Defaults to `true`.
     pub fn timings(&self) -> bool {
         self.timings.unwrap_or(true)
+    }
+
+    /// Whether the Wine prefix runs from a tmpfs copy. Defaults to `true`.
+    pub fn prefix_ram(&self) -> bool {
+        self.prefix_ram.unwrap_or(true)
     }
 }
 

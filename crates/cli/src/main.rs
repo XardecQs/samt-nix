@@ -134,6 +134,15 @@ struct LaunchArgs {
 
     #[arg(long, help = "Skip the 'full' preload confirmation prompt")]
     preload_yes: bool,
+
+    #[arg(
+        long,
+        help = "Run the game against a tmpfs copy of the Wine prefix (RAM)"
+    )]
+    prefix_ram: bool,
+
+    #[arg(long = "no-prefix-ram", help = "Use the on-disk Wine prefix")]
+    no_prefix_ram: bool,
 }
 
 #[derive(Args)]
@@ -615,6 +624,8 @@ fn main() {
         no_auto_discover: false,
         preload: None,
         preload_yes: false,
+        prefix_ram: false,
+        no_prefix_ram: false,
     }));
 
     let result = match command {
@@ -692,6 +703,13 @@ fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
             .as_deref()
             .map(|v| gta_mo_core::preload::PreloadMode::parse(Some(v))),
         preload_yes: args.preload_yes,
+        prefix_ram: if args.prefix_ram {
+            Some(true)
+        } else if args.no_prefix_ram {
+            Some(false)
+        } else {
+            None
+        },
     };
 
     let result = LaunchEngine::run(&opts, |msg| println!("{msg}"))?;
@@ -716,6 +734,7 @@ fn cmd_preload(args: PreloadArgs, profile: Option<&str>) -> anyhow::Result<()> {
         deps_ignore: false,
         preload: args.full.then_some(gta_mo_core::preload::PreloadMode::Full),
         preload_yes: args.yes,
+        prefix_ram: None,
     };
     LaunchEngine::preload(&opts, |msg| println!("{msg}"))?;
     Ok(())
@@ -733,6 +752,7 @@ fn cmd_mount(args: MountArgs, profile: Option<&str>) -> anyhow::Result<()> {
         deps_ignore: args.deps_ignore,
         preload: None,
         preload_yes: false,
+        prefix_ram: None,
     };
     let outcome = LaunchEngine::mount(&opts, args.temp)?;
     if let Some(report) = outcome.dry_run {
@@ -868,6 +888,12 @@ fn cmd_steam(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
     }
     if args.preload_yes {
         steam_args.push("--preload-yes".into());
+    }
+    if args.prefix_ram {
+        steam_args.push("--prefix-ram".into());
+    }
+    if args.no_prefix_ram {
+        steam_args.push("--no-prefix-ram".into());
     }
     if let Some(p) = profile {
         steam_args.push("--profile".into());

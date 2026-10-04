@@ -10,6 +10,7 @@ pub mod meta;
 pub mod modloader;
 pub mod mount_state;
 pub mod overlay;
+pub mod prefix_ram;
 pub mod preload;
 pub mod resolver;
 pub mod umu;

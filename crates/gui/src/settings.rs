@@ -272,6 +272,10 @@ pub struct GuiSettings {
     pub show_covers: bool,
     #[serde(default = "default_true")]
     pub confirm_deletes: bool,
+    /// Run the game against a tmpfs copy of the Wine prefix (faster startup on
+    /// slow disks). Passed to `gta-mo` as `--prefix-ram`/`--no-prefix-ram`.
+    #[serde(default = "default_true")]
+    pub prefix_ram: bool,
     #[serde(default)]
     pub graph: GraphSettings,
     /// Per-browser UI preferences (`[browsers.<id>]`).
@@ -291,6 +295,7 @@ impl Default for GuiSettings {
             density: Density::default(),
             show_covers: true,
             confirm_deletes: true,
+            prefix_ram: true,
             graph: GraphSettings::default(),
             browsers: HashMap::new(),
         }

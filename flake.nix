@@ -45,6 +45,7 @@
           wrapProgram "$out/bin/gta-mo" \
             --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
             --prefix PATH : ${pkgs.umu-launcher}/bin \
+            --prefix PATH : ${pkgs.rsync}/bin \
             --prefix PATH : ${pkgs.xdg-utils}/bin
 
           # NOTE: do not add `fuse3` to PATH here. Its bin/ contains a
