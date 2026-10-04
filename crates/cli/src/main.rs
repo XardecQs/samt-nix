@@ -184,7 +184,14 @@ pub enum CtlCommand {
         name: Option<String>,
     },
     #[command(about = "Generate a mod.toml metadata template in a mod folder")]
-    Init { folder: String },
+    Init {
+        folder: String,
+        #[arg(
+            long,
+            help = "Also create the content/, guides/ and screenshots/ directory skeleton"
+        )]
+        skeleton: bool,
+    },
     #[command(about = "Remove a mod")]
     Remove {
         ident: String,

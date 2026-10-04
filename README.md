@@ -439,7 +439,7 @@ gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
               [--search <text>] [--sort name|folder|author|order|mod_id|version|status] [--dir asc|desc]
               [--hidden|--only-hidden]
 gta-mo ctl add <folder> [--name <name>]
-gta-mo ctl init <folder>                    # create folder + mod.toml template and register the mod
+gta-mo ctl init <folder> [--skeleton]       # create folder + mod.toml (and content/guides/screenshots) and register the mod
 gta-mo ctl remove <id|folder>
 gta-mo ctl enable <id|folder> [--profile <name>]
 gta-mo ctl disable <id|folder> [--profile <name>]

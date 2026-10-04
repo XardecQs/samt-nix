@@ -281,6 +281,35 @@ fn init_creates_folder_template_and_registers() {
 }
 
 #[test]
+fn init_skeleton_creates_content_dirs() {
+    let t = TempDb::new("init-skeleton");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "pack", "--skeleton"]);
+
+    assert!(game_root.join("mods/pack/mod.toml").exists());
+    for sub in ["content", "guides", "screenshots"] {
+        assert!(
+            game_root.join("mods/pack").join(sub).is_dir(),
+            "falta {sub}/"
+        );
+    }
+    // The template now documents the newer manifest fields.
+    let tpl = std::fs::read_to_string(game_root.join("mods/pack/mod.toml")).unwrap();
+    for field in [
+        "[variant]",
+        "conflicts",
+        "requires_any",
+        "[modloader]",
+        "license",
+    ] {
+        assert!(tpl.contains(field), "la plantilla no menciona {field}");
+    }
+}
+
+#[test]
 fn open_url_rejects_non_http_schemes() {
     let t = TempDb::new("openurl");
     let game_root = t.dir.join("game");

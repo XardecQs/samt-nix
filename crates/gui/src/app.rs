@@ -2184,6 +2184,45 @@ impl GtaMoApp {
                     {
                         self.exec(vec!["ctl".into(), "init".into(), folder.clone()], false);
                     }
+                    if !m.has_manifest
+                        && ui
+                            .add_enabled(
+                                !(self.busy || self.playing),
+                                egui::Button::new(format!(
+                                    "{} Crear + esqueleto",
+                                    crate::icons::FOLDER_COG
+                                )),
+                            )
+                            .on_hover_text(
+                                "Crear mod.toml y las carpetas content/, guides/ y screenshots/",
+                            )
+                            .clicked()
+                    {
+                        self.exec(
+                            vec![
+                                "ctl".into(),
+                                "init".into(),
+                                folder.clone(),
+                                "--skeleton".into(),
+                            ],
+                            false,
+                        );
+                    }
+                    if ui
+                        .button(format!("{} Copiar ruta", crate::icons::FOLDER))
+                        .on_hover_text("Copiar la ruta de instalación del mod al portapapeles")
+                        .clicked()
+                    {
+                        if let Some(dir) = self.backend.mods_dir_path() {
+                            let path = dir.join(&folder);
+                            ui.ctx().copy_text(path.display().to_string());
+                            self.toasts.push(
+                                ui.ctx(),
+                                crate::toasts::ToastKind::Info,
+                                "Ruta copiada al portapapeles",
+                            );
+                        }
+                    }
                     if m.has_manifest
                         && ui
                             .add_enabled(
@@ -2269,9 +2308,9 @@ impl GtaMoApp {
                     if ui
                         .add_enabled(
                             !(self.busy || self.playing),
-                            egui::Checkbox::new(&mut hidden_here, "Oculto aquí"),
+                            egui::Checkbox::new(&mut hidden_here, "Ocultar en este perfil"),
                         )
-                        .on_hover_text("Ocultar este mod en el perfil activo")
+                        .on_hover_text("Ocultar este mod solo en el perfil activo")
                         .changed()
                     {
                         let cmd = if hidden_here { "hide" } else { "unhide" };
@@ -2281,9 +2320,12 @@ impl GtaMoApp {
                     if ui
                         .add_enabled(
                             !(self.busy || self.playing),
-                            egui::Checkbox::new(&mut hidden_global, "Oculto global"),
+                            egui::Checkbox::new(
+                                &mut hidden_global,
+                                "Ocultar en todos los perfiles",
+                            ),
                         )
-                        .on_hover_text("Ocultar este mod en todos los perfiles")
+                        .on_hover_text("Ocultar este mod globalmente (en todos los perfiles)")
                         .changed()
                     {
                         let cmd = if hidden_global { "hide" } else { "unhide" };

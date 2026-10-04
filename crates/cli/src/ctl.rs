@@ -193,7 +193,7 @@ pub fn run(
             )
         }
         super::CtlCommand::Add { folder, name } => cmd_add(conn, folder, name.as_deref()),
-        super::CtlCommand::Init { folder } => cmd_init(conn, folder),
+        super::CtlCommand::Init { folder, skeleton } => cmd_init(conn, folder, *skeleton),
         super::CtlCommand::Remove { ident, yes } => cmd_remove(conn, ident, *yes),
         super::CtlCommand::Enable { ident } => {
             let profile = active()?;
@@ -482,6 +482,7 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # author = ["AUTOR"]           # string o lista
 # url = "https://..."
 # description = "Descripción del mod."
+# license = "MIT"              # licencia/términos indicados por el autor
 # tags = ["tag1", "tag2"]      # para organizar/filtrar
 
 # Carátula y guías (rutas relativas dentro de esta carpeta)
@@ -500,6 +501,40 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # required = ["otro:mod"]      # sin esto el mod no funciona
 # optional = []
 
+# Variante de una familia mutuamente excluyente (4K/LITE, RoSA/vanilla…):
+# solo una variante del mismo `group` puede estar activa a la vez.
+# [variant]
+# group = "proper-fixes"
+# name = "RoSA"
+
+# Mods incompatibles (por id o carpeta); no se pueden activar juntos.
+# conflicts = ["mixmods:proper-fixes-vanilla"]
+
+# Al menos UNO de estos debe estar activo (alternativas). Solo se valida.
+# requires_any = ["mixmods:rosa-evolved-4k", "mixmods:rosa-evolved-lite"]
+
+# Opciones seleccionables por perfil (una entrada con variantes/configs). El
+# valor elegido monta options/<grupo>/<valor>/ ENCIMA de mount.
+# [[options]]
+# group = "variant"
+# name = "Variante"
+# default = "4k"
+#
+#   [[options.choices]]
+#   key = "4k"
+#   name = "4K"
+#
+#   [[options.choices]]
+#   key = "lite"
+#   name = "Lite"
+#   conflicts = ["mixmods:proper-fixes-vanilla"]
+#   requires_any = ["link2012:open-limit-adjuster"]
+
+# Prioridad en Mod Loader para las carpetas que este mod aporta a modloader/.
+# [modloader]
+# priority = 60
+# folders = ["Proper Fixes"]
+
 # Si es un pack de mods, lista sus componentes (solo metadata)
 # [[components]]
 # name = "Componente"
@@ -509,7 +544,11 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # path = "content/carpeta-del-componente"
 "#;
 
-fn cmd_init(conn: &Connection, folder: &str) -> anyhow::Result<()> {
+/// Directory skeleton created by `ctl init --skeleton` so a new mod follows the
+/// recommended `content/` + `guides/` layout (see README).
+const MOD_DIR_SKELETON: [&str; 3] = ["content", "guides", "screenshots"];
+
+fn cmd_init(conn: &Connection, folder: &str, skeleton: bool) -> anyhow::Result<()> {
     if !valid_folder_name(folder) {
         anyhow::bail!("Nombre de carpeta no válido: '{folder}'.");
     }
@@ -526,6 +565,16 @@ fn cmd_init(conn: &Connection, folder: &str) -> anyhow::Result<()> {
     }
     std::fs::write(&meta_path, MOD_TOML_TEMPLATE)?;
     log::info(format!("Plantilla creada: {}", meta_path.display()));
+
+    if skeleton {
+        for sub in MOD_DIR_SKELETON {
+            std::fs::create_dir_all(mod_dir.join(sub))?;
+        }
+        log::info(format!(
+            "Esqueleto de directorios creado: {}",
+            MOD_DIR_SKELETON.join(", ")
+        ));
+    }
 
     let registered = match db::get_mod_by_folder(conn, folder)? {
         Some(m) => Some(m.id),
