@@ -4,8 +4,11 @@ use std::io::{BufRead, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use crate::{config, db, mount_state, overlay, resolver, upper};
+use crate::{config, db, mount_state, overlay, preload, preload::PreloadMode, resolver, upper};
 
 pub struct LaunchEngine;
 
@@ -152,6 +155,10 @@ pub struct LaunchOptions {
     pub profile: Option<String>,
     pub deps_enable: bool,
     pub deps_ignore: bool,
+    /// CLI override for the page-cache preload mode (falls back to the config).
+    pub preload: Option<PreloadMode>,
+    /// Skip the `full` preload confirmation prompt.
+    pub preload_yes: bool,
 }
 
 impl Default for LaunchOptions {
@@ -165,12 +172,65 @@ impl Default for LaunchOptions {
             profile: None,
             deps_enable: false,
             deps_ignore: false,
+            preload: None,
+            preload_yes: false,
         }
     }
 }
 
 pub struct LaunchResult {
     pub log: String,
+}
+
+/// Collects the wall-clock duration of each launch phase.
+struct PhaseTimer {
+    enabled: bool,
+    start: Instant,
+    last: Instant,
+    marks: Vec<(&'static str, Duration)>,
+}
+
+impl PhaseTimer {
+    fn new(enabled: bool) -> Self {
+        let now = Instant::now();
+        Self {
+            enabled,
+            start: now,
+            last: now,
+            marks: Vec::new(),
+        }
+    }
+
+    /// Records the time since the previous mark under `name`.
+    fn mark(&mut self, name: &'static str) {
+        if !self.enabled {
+            return;
+        }
+        let now = Instant::now();
+        self.marks.push((name, now - self.last));
+        self.last = now;
+    }
+
+    /// Instant the launch command started, for absolute "time to X" metrics.
+    fn start_instant(&self) -> Instant {
+        self.start
+    }
+
+    fn report(&self) -> String {
+        if !self.enabled || self.marks.is_empty() {
+            return String::new();
+        }
+        let parts: Vec<String> = self
+            .marks
+            .iter()
+            .map(|(name, d)| format!("{name}={:.0}ms", d.as_secs_f64() * 1000.0))
+            .collect();
+        format!(
+            "⏱ fases: {} | total={:.1}s",
+            parts.join(" "),
+            self.start.elapsed().as_secs_f64()
+        )
+    }
 }
 
 impl LaunchEngine {
@@ -235,23 +295,36 @@ impl LaunchEngine {
         Ok(file)
     }
 
+    /// Real directories each enabled mod contributes to the overlay (already
+    /// expanded with the selected per-profile options), in load order.
+    pub fn mod_layer_dirs(
+        mods_dir: &Path,
+        resolved: &[String],
+        options_by_folder: &HashMap<String, HashMap<String, String>>,
+    ) -> Vec<PathBuf> {
+        let empty = HashMap::new();
+        resolved
+            .iter()
+            .flat_map(|f| {
+                let selected = options_by_folder.get(f).unwrap_or(&empty);
+                crate::meta::mod_layers_with_options(mods_dir, f, selected)
+            })
+            .collect()
+    }
+
     pub fn build_lowerdir(
         mods_dir: &Path,
         resolved: &[String],
         base_game: &Path,
         options_by_folder: &HashMap<String, HashMap<String, String>>,
     ) -> String {
-        let empty = HashMap::new();
-        let mut layers: Vec<String> = resolved
+        let mut layers = Self::mod_layer_dirs(mods_dir, resolved, options_by_folder);
+        layers.push(base_game.to_path_buf());
+        layers
             .iter()
-            .flat_map(|f| {
-                let selected = options_by_folder.get(f).unwrap_or(&empty);
-                crate::meta::mod_layers_with_options(mods_dir, f, selected)
-            })
             .map(|p| p.display().to_string())
-            .collect();
-        layers.push(base_game.display().to_string());
-        layers.join(":")
+            .collect::<Vec<_>>()
+            .join(":")
     }
 
     pub fn setup_env(
@@ -297,11 +370,16 @@ impl LaunchEngine {
             std::env::set_var("PROTON_USE_OPTISCALER", "0");
         }
 
-        // Always keep umu/Proton/DXVK logs inside the profile's logs/ dir so
-        // every launch is inspectable; the most verbose DXVK/Wine output is only
-        // enabled with --debug.
+        // Always keep umu/DXVK logs inside the profile's logs/ dir so every
+        // launch is inspectable; Proton's verbose `steam-<appid>.log` and the
+        // most verbose DXVK/Wine output are only enabled with `--debug` (or the
+        // `proton_log` config), because writing them is pure overhead.
         std::fs::create_dir_all(log_dir).ok();
-        std::env::set_var("PROTON_LOG", "1");
+        if debug || cfg.proton_log() {
+            std::env::set_var("PROTON_LOG", "1");
+        } else {
+            std::env::remove_var("PROTON_LOG");
+        }
         std::env::set_var("PROTON_LOG_DIR", log_dir);
         std::env::set_var("DXVK_LOG_PATH", log_dir);
         std::env::set_var("UMU_LOG", if debug { "debug" } else { "1" });
@@ -526,6 +604,239 @@ impl LaunchEngine {
         }
     }
 
+    fn resolve_preload_mode(cfg: &config::Config, opts: &LaunchOptions) -> PreloadMode {
+        opts.preload.unwrap_or_else(|| cfg.preload_mode())
+    }
+
+    /// Prints the `full` preload warning and, on an interactive terminal,
+    /// confirms it (downgrading to `prefix` when declined). On a non-TTY
+    /// (GUI/desktop) it just warns: the caller's config/flag is the consent.
+    fn confirm_full_preload(
+        mode: &mut PreloadMode,
+        opts: &LaunchOptions,
+        launch_log: Option<&LaunchLog>,
+    ) {
+        if *mode != PreloadMode::Full {
+            return;
+        }
+        for line in preload::FULL_WARNING.lines() {
+            crate::log::warn(line);
+            if let Some(l) = launch_log {
+                l.write(line);
+            }
+        }
+        if opts.preload_yes || !std::io::stdin().is_terminal() {
+            return;
+        }
+        eprint!("¿Continuar con la precarga completa? [s/N]: ");
+        let _ = std::io::stderr().flush();
+        let mut input = String::new();
+        let _ = std::io::stdin().read_line(&mut input);
+        if !matches!(
+            input.trim().to_ascii_lowercase().as_str(),
+            "s" | "si" | "sí" | "y" | "yes"
+        ) {
+            crate::log::info("Precarga completa cancelada; se usará 'prefix'.");
+            *mode = PreloadMode::Prefix;
+        }
+    }
+
+    fn append_log(path: &Path, msg: &str) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+
+    /// True when a process whose `comm` matches the game executable exists.
+    fn game_process_running(game_exe: &str) -> bool {
+        let want = &game_exe[..game_exe.len().min(15)];
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) {
+                if comm.trim().eq_ignore_ascii_case(want) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// True once DXVK's d3d9 log shows it created the device (a good proxy for
+    /// "the game window is up").
+    fn dxvk_ready(log_dir: &Path, game_exe: &str) -> bool {
+        let stem = Path::new(game_exe)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(game_exe);
+        let path = log_dir.join(format!("{stem}_d3d9.log"));
+        std::fs::read_to_string(path)
+            .map(|s| s.contains("DXVK:") && s.contains("Creating device"))
+            .unwrap_or(false)
+    }
+
+    /// Background thread that reports "time to game process" and "time to DXVK
+    /// device" (window proxy) while `umu`/Proton runs.
+    fn spawn_watcher(
+        game_exe: String,
+        log_dir: PathBuf,
+        started: Instant,
+        report: bool,
+        watcher_stop: Arc<AtomicBool>,
+        preload_stop: Arc<AtomicBool>,
+        launch_log: Option<PathBuf>,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        std::thread::Builder::new()
+            .name("gta-mo-timing".into())
+            .spawn(move || {
+                let emit = |msg: String| {
+                    if report {
+                        crate::log::info(&msg);
+                    }
+                    if let Some(p) = &launch_log {
+                        Self::append_log(p, &msg);
+                    }
+                };
+                let deadline = started + Duration::from_secs(900);
+                let mut proc_done = false;
+                let mut dxvk_done = false;
+                loop {
+                    if watcher_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if !proc_done && Self::game_process_running(&game_exe) {
+                        proc_done = true;
+                        preload_stop.store(true, Ordering::Relaxed);
+                        emit(format!(
+                            "⏱ proceso del juego: {:.2}s",
+                            started.elapsed().as_secs_f64()
+                        ));
+                    }
+                    if !dxvk_done && Self::dxvk_ready(&log_dir, &game_exe) {
+                        dxvk_done = true;
+                        emit(format!(
+                            "⏱ DXVK listo (≈ ventana): {:.2}s",
+                            started.elapsed().as_secs_f64()
+                        ));
+                    }
+                    if (proc_done && dxvk_done) || Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })
+            .ok()
+    }
+
+    /// Warms the page cache, sets the environment, launches `umu` and reports
+    /// the timing metrics. Shared by the clean and modded launch paths.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_phase(
+        boot: &Bootstrap,
+        prepared: &Prepared,
+        launch_log: Option<&LaunchLog>,
+        opts: &LaunchOptions,
+        game_exe: &Path,
+        working_dir: &Path,
+        layer_dirs: &[PathBuf],
+        timer: &mut PhaseTimer,
+        log: &mut impl FnMut(&str),
+    ) -> anyhow::Result<()> {
+        let mut mode = Self::resolve_preload_mode(&boot.cfg, opts);
+        Self::confirm_full_preload(&mut mode, opts, launch_log);
+
+        let preload_stop = Arc::new(AtomicBool::new(false));
+        let preloader = preload::Preload::spawn(
+            mode,
+            &boot.paths.wine_prefix,
+            &boot.paths.base_game,
+            boot.cfg.game_exe(),
+            layer_dirs,
+            preload_stop.clone(),
+        );
+        if preloader.is_some() {
+            let msg = format!("Precarga en caché ({}) en segundo plano.", mode.as_str());
+            log(&msg);
+            if let Some(l) = launch_log {
+                l.write(&msg);
+            }
+        }
+        timer.mark("preload");
+
+        let watcher_stop = Arc::new(AtomicBool::new(false));
+        let watcher_log = launch_log.map(|l| l.path().to_path_buf());
+        // The watcher also stops the preloader once the game starts, so it runs
+        // whenever there is something to warm even with timings disabled.
+        let watcher = if boot.cfg.timings() || preloader.is_some() {
+            Self::spawn_watcher(
+                boot.cfg.game_exe().to_string(),
+                prepared.ppaths.log_dir.clone(),
+                timer.start_instant(),
+                boot.cfg.timings(),
+                watcher_stop.clone(),
+                preload_stop.clone(),
+                watcher_log,
+            )
+        } else {
+            None
+        };
+
+        Self::setup_env(
+            &boot.cfg,
+            &boot.paths.wine_prefix,
+            &prepared.ppaths.log_dir,
+            opts.debug,
+        );
+
+        let summary = timer.report();
+        if !summary.is_empty() {
+            log(&summary);
+            if let Some(l) = launch_log {
+                l.write(&summary);
+            }
+        }
+        log("Lanzando juego...");
+        if let Some(l) = launch_log {
+            l.write("Lanzando juego...");
+        }
+
+        let started = Instant::now();
+        let result = Self::launch_game(game_exe, working_dir, launch_log);
+        let session = started.elapsed();
+
+        watcher_stop.store(true, Ordering::Relaxed);
+        if let Some(h) = watcher {
+            let _ = h.join();
+        }
+        let warmed = preloader.map(|p| p.stop_and_join()).unwrap_or_default();
+        let done = format!(
+            "⏱ sesión: {:.1}s | precarga: {} archivo(s){}",
+            session.as_secs_f64(),
+            warmed.files,
+            if warmed.stopped {
+                " (detenida al arrancar el juego)"
+            } else {
+                ""
+            }
+        );
+        log(&done);
+        if let Some(l) = launch_log {
+            l.write(&done);
+        }
+
+        result
+    }
+
     pub fn run(opts: &LaunchOptions, mut log: impl FnMut(&str)) -> anyhow::Result<LaunchResult> {
         let boot = Self::bootstrap(opts)?;
         if let Some(result) = Self::shortcut_result(&boot, opts, &mut log)? {
@@ -537,7 +848,11 @@ impl LaunchEngine {
         Self::check_system_deps()?;
         Self::validate_paths(&boot.cfg)?;
 
+        let mut timer = PhaseTimer::new(!opts.dry_run && boot.cfg.timings());
+        timer.mark("config/db");
+
         let prepared = Self::plan(&boot, opts, false)?;
+        timer.mark("plan");
 
         // One log file per real launch (not for dry-run), in the profile's dir.
         let launch_log = if opts.dry_run {
@@ -572,14 +887,19 @@ impl LaunchEngine {
                 });
             }
 
-            Self::setup_env(
-                &boot.cfg,
-                &boot.paths.wine_prefix,
-                &prepared.ppaths.log_dir,
-                opts.debug,
-            );
+            timer.mark("mount");
             let exe = boot.paths.base_game.join(boot.cfg.game_exe());
-            Self::launch_game(&exe, &boot.paths.base_game, launch_log.as_ref())?;
+            Self::launch_phase(
+                &boot,
+                &prepared,
+                launch_log.as_ref(),
+                opts,
+                &exe,
+                &boot.paths.base_game,
+                &[],
+                &mut timer,
+                &mut log,
+            )?;
             return Ok(LaunchResult {
                 log: "Juego lanzado (limpio).".into(),
             });
@@ -596,12 +916,18 @@ impl LaunchEngine {
             return Ok(LaunchResult { log: log_output });
         }
 
+        let layer_dirs = Self::mod_layer_dirs(
+            &boot.paths.mods_dir,
+            &prepared.resolved,
+            &prepared.options_by_folder,
+        );
         let lowerdir = Self::build_lowerdir(
             &boot.paths.mods_dir,
             &prepared.resolved,
             &boot.paths.base_game,
             &prepared.options_by_folder,
         );
+        timer.mark("lowerdir");
 
         let mut ov = overlay::OverlayMount::mount(
             &lowerdir,
@@ -610,28 +936,77 @@ impl LaunchEngine {
             &boot.paths.merged,
         )?;
         ov.start_guard();
+        timer.mark("mount");
 
         let game_exe = boot.paths.merged.join(boot.cfg.game_exe());
         if !game_exe.exists() {
             anyhow::bail!("{} no encontrado tras el montaje", game_exe.display());
         }
 
-        Self::setup_env(
-            &boot.cfg,
-            &boot.paths.wine_prefix,
-            &prepared.ppaths.log_dir,
-            opts.debug,
-        );
         log(log_output.trim_end());
-        log("Lanzando juego...");
         if let Some(l) = &launch_log {
             l.write(log_output.trim_end());
-            l.write("Lanzando juego...");
         }
-        Self::launch_game(&game_exe, &boot.paths.merged, launch_log.as_ref())?;
+        Self::launch_phase(
+            &boot,
+            &prepared,
+            launch_log.as_ref(),
+            opts,
+            &game_exe,
+            &boot.paths.merged,
+            &layer_dirs,
+            &mut timer,
+            &mut log,
+        )?;
 
         drop(ov);
         Ok(LaunchResult { log: String::new() })
+    }
+
+    /// Warms the page cache for the active profile without launching (used by
+    /// `gta-mo preload`).
+    pub fn preload(opts: &LaunchOptions, mut log: impl FnMut(&str)) -> anyhow::Result<String> {
+        let boot = Self::bootstrap(opts)?;
+        Self::validate_paths(&boot.cfg)?;
+        let prepared = Self::plan(&boot, opts, false)?;
+
+        let mut mode = Self::resolve_preload_mode(&boot.cfg, opts);
+        Self::confirm_full_preload(&mut mode, opts, None);
+        if mode.is_off() {
+            log("Precarga desactivada (preload = \"off\").");
+            return Ok(String::new());
+        }
+
+        let layers = Self::mod_layer_dirs(
+            &boot.paths.mods_dir,
+            &prepared.resolved,
+            &prepared.options_by_folder,
+        );
+        log(&format!(
+            "Precargando perfil '{}' (modo {}): {} mod(s).",
+            prepared.profile.name,
+            mode.as_str(),
+            prepared.resolved.len()
+        ));
+
+        let started = Instant::now();
+        let stop = AtomicBool::new(false);
+        let stats = preload::warm(
+            mode,
+            &boot.paths.wine_prefix,
+            &boot.paths.base_game,
+            boot.cfg.game_exe(),
+            &layers,
+            &stop,
+        );
+        let msg = format!(
+            "Precargado(s) {} archivo(s), {:.1} MiB, en {:.1}s.",
+            stats.files,
+            stats.bytes as f64 / 1_048_576.0,
+            started.elapsed().as_secs_f64()
+        );
+        log(&msg);
+        Ok(msg)
     }
 
     /// Loads config, takes the launcher lock, opens/migrates the DB, runs the
@@ -1261,6 +1636,9 @@ mod tests {
             auto_discover: None,
             mods_dir: None,
             default_profile: None,
+            preload: None,
+            proton_log: None,
+            timings: None,
         }
     }
 
@@ -1325,12 +1703,28 @@ mod tests {
             "/tmp/gta-mo-logs-test"
         );
         assert_eq!(std::env::var("UMU_LOG").unwrap(), "1");
-        // `--debug` switches umu to its verbose logger.
+        // Proton's verbose log is opt-in (off by default to avoid the I/O).
+        assert!(std::env::var_os("PROTON_LOG").is_none());
+        // `--debug` switches umu to its verbose logger and enables PROTON_LOG.
         LaunchEngine::setup_env(&cfg, Path::new("/tmp/pfx"), logs, true);
         assert_eq!(std::env::var("UMU_LOG").unwrap(), "debug");
-        for v in ["PROTON_LOG_DIR", "DXVK_LOG_PATH", "UMU_LOG"] {
+        assert_eq!(std::env::var("PROTON_LOG").unwrap(), "1");
+        for v in ["PROTON_LOG", "PROTON_LOG_DIR", "DXVK_LOG_PATH", "UMU_LOG"] {
             std::env::remove_var(v);
         }
+    }
+
+    #[test]
+    fn proton_log_can_be_enabled_from_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut cfg = base_config();
+        cfg.proton_log = Some(true);
+        LaunchEngine::setup_env(&cfg, Path::new("/tmp/pfx"), Path::new("/tmp/logs"), false);
+        assert_eq!(std::env::var("PROTON_LOG").unwrap(), "1");
+        std::env::remove_var("PROTON_LOG");
+        std::env::remove_var("PROTON_LOG_DIR");
+        std::env::remove_var("DXVK_LOG_PATH");
+        std::env::remove_var("UMU_LOG");
     }
 
     #[test]

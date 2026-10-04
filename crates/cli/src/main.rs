@@ -29,6 +29,8 @@ enum Command {
     Completions { shell: String },
     #[command(about = "Mount the overlay and launch the game")]
     Launch(LaunchArgs),
+    #[command(about = "Warm the page cache for the active profile without launching")]
+    Preload(PreloadArgs),
     #[command(about = "Launch from Steam (re-execs inside a user/mount namespace)")]
     Steam(LaunchArgs),
     #[command(about = "Mount the overlay without launching the game (kept alive by a daemon)")]
@@ -122,6 +124,28 @@ struct LaunchArgs {
         help = "Do not auto-discover mods/ on launch, even if auto_discover is set"
     )]
     no_auto_discover: bool,
+
+    #[arg(
+        long,
+        value_name = "MODE",
+        help = "Page-cache preloading before launch: off, prefix or full"
+    )]
+    preload: Option<String>,
+
+    #[arg(long, help = "Skip the 'full' preload confirmation prompt")]
+    preload_yes: bool,
+}
+
+#[derive(Args)]
+struct PreloadArgs {
+    #[arg(
+        long,
+        help = "Preload everything (whole base game + every enabled mod), not just the startup files"
+    )]
+    full: bool,
+
+    #[arg(long, help = "Skip the 'full' preload confirmation prompt")]
+    yes: bool,
 }
 
 #[derive(Args)]
@@ -589,6 +613,8 @@ fn main() {
         deps_enable: false,
         deps_ignore: false,
         no_auto_discover: false,
+        preload: None,
+        preload_yes: false,
     }));
 
     let result = match command {
@@ -621,6 +647,7 @@ fn main() {
             }
         }
         Command::Launch(args) => cmd_launch(args, profile.as_deref()),
+        Command::Preload(args) => cmd_preload(args, profile.as_deref()),
         Command::Steam(args) => cmd_steam(args, profile.as_deref()),
         Command::Mount(args) => cmd_mount(args, profile.as_deref()),
         Command::Unmount(args) => cmd_unmount(args),
@@ -660,6 +687,11 @@ fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
         profile: profile.map(String::from),
         deps_enable: args.deps_enable,
         deps_ignore: args.deps_ignore,
+        preload: args
+            .preload
+            .as_deref()
+            .map(|v| gta_mo_core::preload::PreloadMode::parse(Some(v))),
+        preload_yes: args.preload_yes,
     };
 
     let result = LaunchEngine::run(&opts, |msg| println!("{msg}"))?;
@@ -668,6 +700,24 @@ fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
         println!("{}", result.log);
     }
 
+    Ok(())
+}
+
+fn cmd_preload(args: PreloadArgs, profile: Option<&str>) -> anyhow::Result<()> {
+    println!("=== GTA SA Mod Organizer — precarga ===");
+    let opts = LaunchOptions {
+        dry_run: false,
+        debug: false,
+        discover: false,
+        clean: false,
+        auto_discover: true,
+        profile: profile.map(String::from),
+        deps_enable: false,
+        deps_ignore: false,
+        preload: args.full.then_some(gta_mo_core::preload::PreloadMode::Full),
+        preload_yes: args.yes,
+    };
+    LaunchEngine::preload(&opts, |msg| println!("{msg}"))?;
     Ok(())
 }
 
@@ -681,6 +731,8 @@ fn cmd_mount(args: MountArgs, profile: Option<&str>) -> anyhow::Result<()> {
         profile: profile.map(String::from),
         deps_enable: args.deps_enable,
         deps_ignore: args.deps_ignore,
+        preload: None,
+        preload_yes: false,
     };
     let outcome = LaunchEngine::mount(&opts, args.temp)?;
     if let Some(report) = outcome.dry_run {
@@ -809,6 +861,13 @@ fn cmd_steam(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
     }
     if args.no_auto_discover {
         steam_args.push("--no-auto-discover".into());
+    }
+    if let Some(p) = &args.preload {
+        steam_args.push("--preload".into());
+        steam_args.push(p.into());
+    }
+    if args.preload_yes {
+        steam_args.push("--preload-yes".into());
     }
     if let Some(p) = profile {
         steam_args.push("--profile".into());

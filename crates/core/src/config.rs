@@ -20,6 +20,14 @@ pub struct Config {
     pub auto_discover: Option<bool>,
     pub mods_dir: Option<String>,
     pub default_profile: Option<String>,
+    /// Page-cache preloading before launch: `"off"`, `"prefix"` (default) or
+    /// `"full"` (see [`crate::preload`]).
+    pub preload: Option<String>,
+    /// Write Proton's verbose `steam-<appid>.log`. Off by default to save the
+    /// extra I/O of every launch; `--debug` forces it on.
+    pub proton_log: Option<bool>,
+    /// Print per-phase launch timings. Defaults to `true`.
+    pub timings: Option<bool>,
 }
 
 impl Config {
@@ -68,6 +76,21 @@ impl Config {
 
     pub fn default_profile(&self) -> Option<&str> {
         self.default_profile.as_deref()
+    }
+
+    /// Selected page-cache preloading mode (`prefix` by default).
+    pub fn preload_mode(&self) -> crate::preload::PreloadMode {
+        crate::preload::PreloadMode::parse(self.preload.as_deref())
+    }
+
+    /// Whether Proton's verbose log file should be written.
+    pub fn proton_log(&self) -> bool {
+        self.proton_log.unwrap_or(false)
+    }
+
+    /// Whether per-phase launch timings are printed. Defaults to `true`.
+    pub fn timings(&self) -> bool {
+        self.timings.unwrap_or(true)
     }
 }
 

@@ -180,7 +180,27 @@ auto_discover = true
 # umu_runtime_update = false   # true = let umu-launcher update its steamrt4 runtime on launch
 # Optional: custom mods directory (defaults to game_root/mods)
 # mods_dir = "/path/to/mods"
+# Page-cache preloading before launch (default): "off", "prefix" or "full"
+# preload = "prefix"
+# Per-phase launch timings (default on)
+# timings = true
+# Write Proton's verbose steam-<appid>.log every launch (default off; on with --debug)
+# proton_log = false
 ```
+
+> **Startup / preloading**: on slow storage the game spends a long time reading
+> the Wine prefix and the game's startup files on demand. `preload = "prefix"`
+> (default) warms the page cache — the Wine prefix, the game executable and the
+> mods' startup files (ASI/DLL/CLEO scripts, configs and the `modloader/` tree) —
+> on a background thread at *idle* I/O priority, and stops once the game process
+> appears. `preload = "full"` also reads the whole base game and every enabled
+> mod file (can be tens of GB); it prints a detailed warning and asks for
+> confirmation on an interactive terminal, and is better used ahead of time with
+> `gta-mo preload`. `preload = "off"` disables it. `timings = true` (default)
+> prints per-phase timings (`config/db`, `plan`, `mount`, `preload`) and,
+> while the game boots, the time to the game process and to DXVK's device
+> creation (a good proxy for "the window is up").
+
 
 > **Proton upscalers**: GE and CachyOS Proton run `protonfixes.setup_upscalers()`
 > on every launch, which downloads/installs upscaler DLLs (FSR3/FSR4/MLFG/DLSS/
@@ -203,9 +223,10 @@ auto_discover = true
 > **Logs**: every launch writes a timestamped `launch-<ts>.log` under
 > `run/profiles/<slug>/logs/` (high-level launcher messages plus the `umu`/Proton
 > output, teed from the game process). `PROTON_LOG_DIR` and `DXVK_LOG_PATH` point
-> there too, and `UMU_LOG` keeps umu's output (`debug` with `--debug`). The
-> newest 20 launch logs per profile are kept. The GUI's Log tab and ⋮ menu have
-> an **Abrir carpeta de logs** action.
+> there too, and `UMU_LOG` keeps umu's output (`debug` with `--debug`). Proton's
+> verbose `steam-<appid>.log` is only written with `--debug` (or
+> `proton_log = true`). The newest 20 launch logs per profile are kept. The GUI's
+> Log tab and ⋮ menu have an **Abrir carpeta de logs** action.
 
 ## Mod packaging (`mod.toml`)
 
@@ -429,7 +450,8 @@ gta-mo ctl which models/player.dff         # who wins that file
 ## CLI
 
 ```
-gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [--no-auto-discover]
+gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [--no-auto-discover] [--preload <off|prefix|full>] [--preload-yes]
+gta-mo preload [--full] [--yes]       # warm the page cache without launching
 gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/mount namespace (for Steam)
 gta-mo mount [--temp] [--dry-run] [--profile <name>]   # mount the overlay without launching the game
 gta-mo unmount [--capture <mod>] [--discard]           # stop the mount daemon (capture/discard a temp upper)
@@ -617,6 +639,8 @@ Steam overlay will not attach to the game window.
 | `--deps-enable` | Auto-enable disabled dependencies without prompting |
 | `--deps-ignore` | Skip disabled dependencies without prompting |
 | `--no-auto-discover` | Do not auto-scan `mods/`, even if `auto_discover` is set |
+| `--preload <off\|prefix\|full>` | Page-cache preloading before launch (overrides the config) |
+| `--preload-yes` | Skip the `full` preload confirmation prompt |
 
 ## GUI
 

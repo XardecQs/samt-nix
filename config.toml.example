@@ -23,3 +23,17 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 # default_profile = "vanilla"   # used by `launch` when --profile is not given
 # dxvk_hud = "devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls"
 # mods_dir = "/path/to/mods"    # defaults to game_root/mods
+#
+# Page-cache preloading before launch (speeds up startup on slow disks):
+#   "off"    = do not preload
+#   "prefix" = warm the Wine prefix, the game exe and the mods' startup files (default)
+#   "full"   = also warm the whole base game and every enabled mod file (slow;
+#              warns and asks for confirmation on an interactive terminal)
+# preload = "prefix"
+#
+# Print per-phase launch timings (config/db, plan, mount, preload, time to window).
+# timings = true
+#
+# Write Proton's verbose `steam-<appid>.log` on every launch (extra I/O; only
+# enabled by default with `--debug`).
+# proton_log = false
