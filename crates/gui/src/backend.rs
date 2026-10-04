@@ -317,9 +317,15 @@ impl Backend {
             .collect::<Result<Vec<_>, _>>()?;
 
         let resolved = resolve_enabled_order(conn, &profile).map_err(|e| e.to_string())?;
-        let dep_status = db::dependency_issues(conn, profile.id).map_err(|e| e.to_string())?;
-        let dep_cycles =
-            resolver::dependency_cycles(conn, profile.id).map_err(|e| e.to_string())?;
+
+        // Dependencies are read live from each mod.toml (falling back to the DB
+        // for mods without a manifest), so editing `[dependencies]` and pressing
+        // refresh (Ctrl+R) updates the graph/status without `ctl discover`.
+        let deps = db::load_live_dependencies(conn, &paths.mods_dir).map_err(|e| e.to_string())?;
+        let dep_status =
+            db::dependency_issues_with(conn, profile.id, &deps).map_err(|e| e.to_string())?;
+        let dep_cycles = resolver::dependency_cycles_with(conn, profile.id, deps.clone())
+            .map_err(|e| e.to_string())?;
 
         let mut options_by_folder: HashMap<String, HashMap<String, String>> = HashMap::new();
         for m in &mods {
@@ -328,10 +334,9 @@ impl Backend {
             }
         }
 
-        // Dependency graph edges: required/optional deps (DB) + conflicts and
-        // variant families (manifests).
+        // Dependency graph edges: required/optional deps (live manifests) +
+        // conflicts and variant families.
         let mut edges: Vec<GEdge> = Vec::new();
-        let deps = db::load_dependencies(conn).map_err(|e| e.to_string())?;
         for (mid, refs) in &deps {
             for r in refs {
                 edges.push(GEdge {

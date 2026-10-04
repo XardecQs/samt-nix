@@ -1196,7 +1196,8 @@ impl eframe::App for GtaMoApp {
                                 egui::Button::new(format!("{} Descubrir", crate::icons::SEARCH)),
                             )
                             .on_hover_text(
-                                "Escanear mods/ y registrar/actualizar mods y dependencias",
+                                "Registrar mods nuevos de mods/ e importar sus dependencias \
+                                 a la base de datos (recargar/Ctrl+R ya muestra las de mod.toml)",
                             )
                             .clicked()
                     {

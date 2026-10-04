@@ -473,13 +473,23 @@ pub fn dependency_cycles(
     conn: &rusqlite::Connection,
     profile_id: i64,
 ) -> anyhow::Result<Vec<Vec<String>>> {
+    let deps = crate::db::load_dependencies(conn)?;
+    dependency_cycles_with(conn, profile_id, deps)
+}
+
+/// Like [`dependency_cycles`] but with an explicit (e.g. live-read) dependency
+/// map, so the GUI reflects `mod.toml` edits without a discover pass.
+pub fn dependency_cycles_with(
+    conn: &rusqlite::Connection,
+    profile_id: i64,
+    deps: HashMap<i64, Vec<crate::db::DepRef>>,
+) -> anyhow::Result<Vec<Vec<String>>> {
     let all_mods = crate::db::load_all_mods_for_profile(conn, profile_id)?;
     let folder_of: HashMap<i64, String> = all_mods
         .iter()
         .map(|m| (m.id, m.folder_name.clone()))
         .collect();
     let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
-    let deps = crate::db::load_dependencies(conn)?;
     let enabled_ids = crate::db::load_enabled_mod_ids_for_profile(conn, profile_id)?;
     let graph = DepGraph::new(mods_map, deps, enabled_ids);
     Ok(graph

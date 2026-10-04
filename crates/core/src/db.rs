@@ -1160,23 +1160,75 @@ pub fn load_dependencies(conn: &Connection) -> anyhow::Result<HashMap<i64, Vec<D
     Ok(deps)
 }
 
+/// Dependencies read **live** from each mod's `mod.toml` (falling back to the
+/// cached DB rows for mods without a manifest). Used by the GUI so editing
+/// `[dependencies]` shows up on refresh without running `ctl discover`.
+pub fn load_live_dependencies(
+    conn: &Connection,
+    mods_dir: &std::path::Path,
+) -> anyhow::Result<HashMap<i64, Vec<DepRef>>> {
+    let cached = load_dependencies(conn)?;
+    let mut out: HashMap<i64, Vec<DepRef>> = HashMap::new();
+    for m in load_all_mods(conn)? {
+        match crate::meta::read_mod_meta(mods_dir, &m.folder_name) {
+            // Manifest present: its `[dependencies]` is authoritative (an absent
+            // section means "no dependencies").
+            Ok(Some(meta)) => {
+                let mut refs: Vec<DepRef> = Vec::new();
+                if let Some(deps) = &meta.dependencies {
+                    for (reference, required) in deps
+                        .required
+                        .iter()
+                        .map(|r| (r, true))
+                        .chain(deps.optional.iter().map(|r| (r, false)))
+                    {
+                        if let Some(id) = resolve_dep_ref(conn, reference) {
+                            if id != m.id && !refs.iter().any(|d| d.id == id) {
+                                refs.push(DepRef { id, required });
+                            }
+                        }
+                    }
+                }
+                out.insert(m.id, refs);
+            }
+            // No manifest (or unreadable): keep the manually managed DB rows.
+            _ => {
+                if let Some(d) = cached.get(&m.id) {
+                    out.insert(m.id, d.clone());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Dependency health of every mod in a profile: counts plus the required
 /// dependencies that are disabled or missing, keyed by mod id.
 pub fn dependency_issues(
     conn: &Connection,
     profile_id: i64,
 ) -> anyhow::Result<HashMap<i64, ModDepStatus>> {
+    let deps = load_dependencies(conn)?;
+    dependency_issues_with(conn, profile_id, &deps)
+}
+
+/// Like [`dependency_issues`] but with an explicit (e.g. live-read) dependency
+/// map, so the GUI reflects `mod.toml` edits without a discover pass.
+pub fn dependency_issues_with(
+    conn: &Connection,
+    profile_id: i64,
+    deps: &HashMap<i64, Vec<DepRef>>,
+) -> anyhow::Result<HashMap<i64, ModDepStatus>> {
     let mods = load_all_mods_for_profile(conn, profile_id)?;
     let folder_of: HashMap<i64, String> =
         mods.iter().map(|m| (m.id, m.folder_name.clone())).collect();
     let enabled_of: HashMap<i64, bool> = mods.iter().map(|m| (m.id, m.enabled)).collect();
-    let deps = load_dependencies(conn)?;
 
     let mut out: HashMap<i64, ModDepStatus> = HashMap::new();
     for m in &mods {
         out.entry(m.id).or_default();
     }
-    for (mid, refs) in &deps {
+    for (mid, refs) in deps {
         let entry = out.entry(*mid).or_default();
         for r in refs {
             if r.required {
@@ -2581,6 +2633,38 @@ mod tests {
         let s = &issues[&m1.id];
         assert_eq!(s.required, 1);
         assert_eq!(s.disabled, vec!["dep1".to_string()]);
+    }
+
+    #[test]
+    fn live_dependencies_reflect_mod_toml_without_discover() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "dep1", "Dep1").unwrap();
+        let m1 = get_mod_by_folder(&conn, "m1").unwrap().unwrap();
+        let dep = get_mod_by_folder(&conn, "dep1").unwrap().unwrap();
+
+        let dir = std::env::temp_dir().join(format!("gta-mo-livedeps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("m1")).unwrap();
+        std::fs::create_dir_all(dir.join("dep1")).unwrap();
+        std::fs::write(
+            dir.join("m1/mod.toml"),
+            "name = \"M1\"\n[dependencies]\nrequired = [\"dep1\"]\n",
+        )
+        .unwrap();
+
+        let deps = load_live_dependencies(&conn, &dir).unwrap();
+        assert_eq!(deps[&m1.id].len(), 1);
+        assert_eq!(deps[&m1.id][0].id, dep.id);
+        assert!(deps[&m1.id][0].required);
+
+        // Removing `[dependencies]` is reflected immediately, without discover.
+        std::fs::write(dir.join("m1/mod.toml"), "name = \"M1\"\n").unwrap();
+        let deps = load_live_dependencies(&conn, &dir).unwrap();
+        assert!(deps.get(&m1.id).map(|v| v.is_empty()).unwrap_or(true));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
