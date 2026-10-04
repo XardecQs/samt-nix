@@ -146,6 +146,26 @@ fn behavior(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
              arranque en discos lentos; el disco se sincroniza al salir.",
         )
         .changed();
+    ui.add_enabled_ui(s.prefix_ram, |ui| {
+        changed |= ui
+            .checkbox(
+                &mut s.prefix_ram_proton,
+                "Materializar DLL de Proton en el tmpfs",
+            )
+            .on_hover_text(
+                "Copia al tmpfs las DLL de Wine que el prefijo enlaza desde Proton, \
+                 para que se lean de RAM en vez del disco.",
+            )
+            .changed();
+    });
+    changed |= ui
+        .checkbox(&mut s.preload_proton, "Precalentar Proton (caché)")
+        .on_hover_text("Lee el runtime de Proton a la caché de página en segundo plano (~1,5 GB).")
+        .changed();
+    changed |= ui
+        .checkbox(&mut s.preload_steamrt, "Precalentar steamrt de umu (caché)")
+        .on_hover_text("Lee el runtime steamrt4 de umu a la caché de página en segundo plano.")
+        .changed();
     changed
 }
 

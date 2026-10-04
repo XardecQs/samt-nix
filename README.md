@@ -214,10 +214,22 @@ auto_discover = true
 > if `/dev/shm` is unavailable. Disable with `--no-prefix-ram` or
 > `prefix_ram = false`.
 >
+> When `prefix_ram` is on, `prefix_ram_proton` (default on) also **materializes**
+> into the tmpfs prefix the file symlinks that point into the Proton install
+> (`drive_c/windows/{system32,syswow64}` → `GE-Proton/files/lib/wine/*`), so Wine
+> reads its system DLLs from RAM instead of disk. `preload_proton` and
+> `preload_steamrt` (both **off** by default) additionally prefetch the Proton
+> runtime and umu's `steamrt4` into the page cache in the background. The RAM
+> used by the tmpfs prefix is reported in the launch log and by
+> `gta-mo prefix status`. All of these are toggleable in the GUI's Preferences
+> (Comportamiento).
+>
 > `timings = true` (default) prints per-phase timings (`config/db`, `plan`,
 > `mount`, `prefix-ram`, `preload`, `sesión`, `prefix-sync`) and, while the game
 > boots, the time to the game process and to DXVK's device creation (a good proxy
-> for "the window is up").
+> for "the window is up"). The GUI's Log tab follows the newest lines unless you
+> scroll up (there is an **Ir al final** button), and the status bar shows the
+> running/queued jobs with a popover to cancel them.
 
 
 > **Proton upscalers**: GE and CachyOS Proton run `protonfixes.setup_upscalers()`
@@ -662,6 +674,9 @@ Steam overlay will not attach to the game window.
 | `--preload <off\|prefix\|full>` | Page-cache preloading before launch (overrides the config) |
 | `--preload-yes` | Skip the `full` preload confirmation prompt |
 | `--prefix-ram` / `--no-prefix-ram` | Run the Wine prefix from tmpfs / from disk (overrides the config) |
+| `--prefix-ram-proton` / `--no-prefix-ram-proton` | Materialize the Proton DLL symlinks into the tmpfs prefix |
+| `--preload-proton` / `--no-preload-proton` | Prefetch the Proton runtime into the page cache |
+| `--preload-steamrt` / `--no-preload-steamrt` | Prefetch umu's steamrt runtime into the page cache |
 
 ## GUI
 

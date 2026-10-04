@@ -45,3 +45,12 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 # changes; falls back to disk if /dev/shm is unavailable. Inspect it with
 # `gta-mo prefix status` and free it with `gta-mo prefix clean`.
 # prefix_ram = true
+#
+# Also copy into the tmpfs prefix the Wine DLLs that the prefix symlinks from
+# the Proton install (they otherwise stay on disk and cause cold-load stalls).
+# prefix_ram_proton = true
+#
+# Prefetch the Proton runtime and umu's steamrt4 into the page cache in the
+# background (opt-in; useful on slow disks).
+# preload_proton = false
+# preload_steamrt = false

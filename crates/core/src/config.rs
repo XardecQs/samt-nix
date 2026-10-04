@@ -33,6 +33,16 @@ pub struct Config {
     /// RAM. Defaults to `true`; the prefix on disk stays as the source of
     /// truth (see [`crate::prefix_ram`]).
     pub prefix_ram: Option<bool>,
+    /// When `prefix_ram` is on, also materialize into the tmpfs copy the prefix
+    /// file symlinks that point into the Proton install (the `*-windows` DLLs
+    /// Wine loads). Defaults to `true`.
+    pub prefix_ram_proton: Option<bool>,
+    /// Prefetch the Proton runtime (`<proton>/files`) into the page cache in the
+    /// background. Defaults to `false` (opt-in, ~1.5 GB).
+    pub preload_proton: Option<bool>,
+    /// Prefetch umu's `steamrt4` runtime into the page cache in the background.
+    /// Defaults to `false` (opt-in).
+    pub preload_steamrt: Option<bool>,
 }
 
 impl Config {
@@ -101,6 +111,22 @@ impl Config {
     /// Whether the Wine prefix runs from a tmpfs copy. Defaults to `true`.
     pub fn prefix_ram(&self) -> bool {
         self.prefix_ram.unwrap_or(true)
+    }
+
+    /// Whether to materialize Proton symlinks into the tmpfs prefix. Defaults
+    /// to `true`.
+    pub fn prefix_ram_proton(&self) -> bool {
+        self.prefix_ram_proton.unwrap_or(true)
+    }
+
+    /// Whether to prefetch the Proton runtime. Defaults to `false`.
+    pub fn preload_proton(&self) -> bool {
+        self.preload_proton.unwrap_or(false)
+    }
+
+    /// Whether to prefetch umu's steamrt runtime. Defaults to `false`.
+    pub fn preload_steamrt(&self) -> bool {
+        self.preload_steamrt.unwrap_or(false)
     }
 }
 

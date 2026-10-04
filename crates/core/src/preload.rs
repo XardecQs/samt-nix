@@ -155,6 +155,33 @@ impl Preload {
             None => WarmStats::default(),
         }
     }
+
+    /// Spawns a background warmer for **every** file under `root` (used for the
+    /// optional Proton/steamrt prefetches). Abortable via `stop`.
+    pub fn spawn_tree(root: &Path, stop: Arc<AtomicBool>) -> Option<Self> {
+        let root = root.to_path_buf();
+        let stop_thread = stop.clone();
+        let handle = std::thread::Builder::new()
+            .name("gta-mo-prefetch".into())
+            .spawn(move || {
+                let mut stats = WarmStats::default();
+                warm_tree(&root, Filter::All, Some(&stop_thread), &mut stats);
+                stats
+            })
+            .ok()?;
+        Some(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+}
+
+/// Warms every regular file under `root` synchronously (used by `gta-mo
+/// preload` for the Proton/steamrt prefetches).
+pub fn warm_root(root: &Path, stop: &AtomicBool) -> WarmStats {
+    let mut stats = WarmStats::default();
+    warm_tree(root, Filter::All, Some(stop), &mut stats);
+    stats
 }
 
 /// Warms the **critical** path synchronously: the Wine prefix (unless

@@ -12,6 +12,17 @@ use crate::{config, db, mount_state, overlay, preload, preload::PreloadMode, res
 
 pub struct LaunchEngine;
 
+/// umu's `steamrt4` runtime directory (`$XDG_DATA_HOME/umu/steamrt4`),
+/// optionally overridden with `GTA_MO_STEAMRT_DIR` (mainly for tests).
+fn steamrt_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("GTA_MO_STEAMRT_DIR") {
+        let p = PathBuf::from(dir);
+        return p.is_dir().then_some(p);
+    }
+    let p = dirs::data_dir()?.join("umu/steamrt4");
+    p.is_dir().then_some(p)
+}
+
 /// Per-launch log file. It holds the high-level launcher messages and, through
 /// the tee in [`LaunchEngine::run_umu`], the raw `umu`/Proton output. One file
 /// per launch lives in the profile's `logs/` dir; the newest 20 are kept.
@@ -162,6 +173,12 @@ pub struct LaunchOptions {
     /// CLI override for running the Wine prefix from tmpfs (falls back to the
     /// config).
     pub prefix_ram: Option<bool>,
+    /// CLI override: materialize Proton symlinks into the tmpfs prefix.
+    pub prefix_ram_proton: Option<bool>,
+    /// CLI override: prefetch the Proton runtime.
+    pub preload_proton: Option<bool>,
+    /// CLI override: prefetch umu's steamrt runtime.
+    pub preload_steamrt: Option<bool>,
 }
 
 impl Default for LaunchOptions {
@@ -178,6 +195,9 @@ impl Default for LaunchOptions {
             preload: None,
             preload_yes: false,
             prefix_ram: None,
+            prefix_ram_proton: None,
+            preload_proton: None,
+            preload_steamrt: None,
         }
     }
 }
@@ -762,21 +782,36 @@ impl LaunchEngine {
         // B1: run the game against a per-session tmpfs copy of the Wine prefix
         // so a long game session cannot evict it from RAM.
         let prefix_ram = opts.prefix_ram.unwrap_or_else(|| boot.cfg.prefix_ram());
-        let prepared_prefix =
-            crate::prefix_ram::PreparedPrefix::prepare(&boot.paths.wine_prefix, prefix_ram);
+        let materialize = opts
+            .prefix_ram_proton
+            .unwrap_or_else(|| boot.cfg.prefix_ram_proton());
+        let proton_path = PathBuf::from(&boot.cfg.proton_path);
+        let prepared_prefix = crate::prefix_ram::PreparedPrefix::prepare(
+            &boot.paths.wine_prefix,
+            prefix_ram,
+            Some(&proton_path),
+            materialize,
+        );
         let prep = prepared_prefix.report();
-        if prep.reused {
-            Self::emit(
-                launch_log,
-                log,
-                "Prefijo ya preparado en tmpfs; se reutiliza.",
-            );
-        } else if prep.copied {
-            Self::emit(
-                launch_log,
-                log,
-                &format!("Prefijo → tmpfs en {:.1}s.", prep.elapsed.as_secs_f64()),
-            );
+        if prepared_prefix.using_tmpfs() {
+            let ram = crate::prefix_ram::prepared_bytes() as f64 / 1_048_576.0;
+            if prep.reused {
+                Self::emit(
+                    launch_log,
+                    log,
+                    &format!("Prefijo ya en tmpfs (RAM {ram:.0} MiB); se reutiliza."),
+                );
+            } else if prep.copied {
+                Self::emit(
+                    launch_log,
+                    log,
+                    &format!(
+                        "Prefijo → tmpfs en {:.1}s (RAM {ram:.0} MiB, materializado {:.0} MiB).",
+                        prep.elapsed.as_secs_f64(),
+                        prep.materialized as f64 / 1_048_576.0
+                    ),
+                );
+            }
         }
         timer.mark("prefix-ram");
 
@@ -822,12 +857,39 @@ impl LaunchEngine {
                 &format!("Precarga en caché ({}) en segundo plano.", mode.as_str()),
             );
         }
+        let mut prefetchers: Vec<preload::Preload> = Vec::new();
+        if opts
+            .preload_proton
+            .unwrap_or_else(|| boot.cfg.preload_proton())
+        {
+            let files = proton_path.join("files");
+            let root = if files.is_dir() {
+                files
+            } else {
+                proton_path.clone()
+            };
+            if let Some(p) = preload::Preload::spawn_tree(&root, preload_stop.clone()) {
+                Self::emit(launch_log, log, "Prefetch de Proton en segundo plano.");
+                prefetchers.push(p);
+            }
+        }
+        if opts
+            .preload_steamrt
+            .unwrap_or_else(|| boot.cfg.preload_steamrt())
+        {
+            if let Some(root) = steamrt_dir() {
+                if let Some(p) = preload::Preload::spawn_tree(&root, preload_stop.clone()) {
+                    Self::emit(launch_log, log, "Prefetch de steamrt en segundo plano.");
+                    prefetchers.push(p);
+                }
+            }
+        }
 
         let watcher_stop = Arc::new(AtomicBool::new(false));
         let watcher_log = launch_log.map(|l| l.path().to_path_buf());
         // The watcher also stops the preloader once the game starts, so it runs
         // whenever there is something to warm even with timings disabled.
-        let watcher = if boot.cfg.timings() || preloader.is_some() {
+        let watcher = if boot.cfg.timings() || preloader.is_some() || !prefetchers.is_empty() {
             Self::spawn_watcher(
                 boot.cfg.game_exe().to_string(),
                 prepared.ppaths.log_dir.clone(),
@@ -870,6 +932,13 @@ impl LaunchEngine {
             let _ = h.join();
         }
         let warmed = preloader.map(|p| p.stop_and_join()).unwrap_or_default();
+        let mut extra_files = warmed.files;
+        let mut extra_stopped = warmed.stopped;
+        for p in prefetchers {
+            let s = p.stop_and_join();
+            extra_files += s.files;
+            extra_stopped |= s.stopped;
+        }
         let sync = prepared_prefix.finalize();
         if sync.synced {
             Self::emit(
@@ -882,8 +951,8 @@ impl LaunchEngine {
         let done = format!(
             "⏱ sesión: {:.1}s | extra: {} archivo(s){}",
             session.as_secs_f64(),
-            warmed.files,
-            if warmed.stopped {
+            extra_files,
+            if extra_stopped {
                 " (detenida al arrancar el juego)"
             } else {
                 ""
@@ -1048,7 +1117,16 @@ impl LaunchEngine {
         let mut mode = Self::resolve_preload_mode(&boot.cfg, opts);
         Self::confirm_full_preload(&mut mode, opts, None);
         let prefix_ram = opts.prefix_ram.unwrap_or_else(|| boot.cfg.prefix_ram());
-        if mode.is_off() && !prefix_ram {
+        let materialize = opts
+            .prefix_ram_proton
+            .unwrap_or_else(|| boot.cfg.prefix_ram_proton());
+        let do_proton = opts
+            .preload_proton
+            .unwrap_or_else(|| boot.cfg.preload_proton());
+        let do_steamrt = opts
+            .preload_steamrt
+            .unwrap_or_else(|| boot.cfg.preload_steamrt());
+        if mode.is_off() && !prefix_ram && !do_proton && !do_steamrt {
             log("Precarga desactivada (preload = \"off\" y prefix_ram = false).");
             return Ok(String::new());
         }
@@ -1063,49 +1141,83 @@ impl LaunchEngine {
         // guard is a no-op, so the copy stays until `launch` consumes it.
         let mut tmpfs_ready = false;
         if prefix_ram {
-            let pf = crate::prefix_ram::PreparedPrefix::prepare(&boot.paths.wine_prefix, true);
+            let proton = PathBuf::from(&boot.cfg.proton_path);
+            let pf = crate::prefix_ram::PreparedPrefix::prepare(
+                &boot.paths.wine_prefix,
+                true,
+                Some(&proton),
+                materialize,
+            );
             let r = pf.report();
+            let ram = crate::prefix_ram::prepared_bytes() as f64 / 1_048_576.0;
             if r.copied {
                 log(&format!(
-                    "Prefijo → tmpfs en {:.1}s.",
-                    r.elapsed.as_secs_f64()
+                    "Prefijo → tmpfs en {:.1}s (RAM {ram:.0} MiB, materializado {:.0} MiB).",
+                    r.elapsed.as_secs_f64(),
+                    r.materialized as f64 / 1_048_576.0
                 ));
             } else if r.reused {
-                log("Prefijo ya estaba preparado en tmpfs.");
+                log(&format!("Prefijo ya en tmpfs (RAM {ram:.0} MiB)."));
             }
             tmpfs_ready = pf.using_tmpfs();
         }
 
-        if mode.is_off() {
-            return Ok(String::new());
-        }
-
-        log(&format!(
-            "Precargando perfil '{}' (modo {}): {} mod(s).",
-            prepared.profile.name,
-            mode.as_str(),
-            prepared.resolved.len()
-        ));
-
         let started = Instant::now();
         let stop = AtomicBool::new(false);
-        let prefix = if tmpfs_ready {
-            None
-        } else {
-            Some(boot.paths.wine_prefix.as_path())
-        };
-        let stats = preload::warm_all(
-            mode,
-            prefix,
-            &boot.paths.base_game,
-            boot.cfg.game_exe(),
-            &layers,
-            &stop,
-        );
+        if !mode.is_off() {
+            log(&format!(
+                "Precargando perfil '{}' (modo {}): {} mod(s).",
+                prepared.profile.name,
+                mode.as_str(),
+                prepared.resolved.len()
+            ));
+            let prefix = if tmpfs_ready {
+                None
+            } else {
+                Some(boot.paths.wine_prefix.as_path())
+            };
+            let stats = preload::warm_all(
+                mode,
+                prefix,
+                &boot.paths.base_game,
+                boot.cfg.game_exe(),
+                &layers,
+                &stop,
+            );
+            log(&format!(
+                "Precargado(s) {} archivo(s), {:.1} MiB.",
+                stats.files,
+                stats.bytes as f64 / 1_048_576.0
+            ));
+        }
+
+        if do_proton {
+            let files = PathBuf::from(&boot.cfg.proton_path).join("files");
+            let root = if files.is_dir() {
+                files
+            } else {
+                PathBuf::from(&boot.cfg.proton_path)
+            };
+            let s = preload::warm_root(&root, &stop);
+            log(&format!(
+                "Proton prefetch: {} archivo(s), {:.0} MiB.",
+                s.files,
+                s.bytes as f64 / 1_048_576.0
+            ));
+        }
+        if do_steamrt {
+            if let Some(root) = steamrt_dir() {
+                let s = preload::warm_root(&root, &stop);
+                log(&format!(
+                    "steamrt prefetch: {} archivo(s), {:.0} MiB.",
+                    s.files,
+                    s.bytes as f64 / 1_048_576.0
+                ));
+            }
+        }
+
         let msg = format!(
-            "Precargado(s) {} archivo(s), {:.1} MiB, en {:.1}s.",
-            stats.files,
-            stats.bytes as f64 / 1_048_576.0,
+            "Precarga completada en {:.1}s.",
             started.elapsed().as_secs_f64()
         );
         log(&msg);
@@ -1743,6 +1855,9 @@ mod tests {
             proton_log: None,
             timings: None,
             prefix_ram: None,
+            prefix_ram_proton: None,
+            preload_proton: None,
+            preload_steamrt: None,
         }
     }
 

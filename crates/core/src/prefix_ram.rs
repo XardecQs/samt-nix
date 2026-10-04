@@ -33,6 +33,8 @@ pub struct PrepareReport {
     pub copied: bool,
     /// True when an already-prepared tmpfs copy was reused.
     pub reused: bool,
+    /// Bytes materialized from Proton symlinks (only when copied).
+    pub materialized: u64,
     pub elapsed: Duration,
 }
 
@@ -48,6 +50,7 @@ pub struct PreparedPrefix {
     path: PathBuf,
     disk: PathBuf,
     tmpfs: Option<PathBuf>,
+    proton: Option<PathBuf>,
     report: PrepareReport,
 }
 
@@ -67,12 +70,20 @@ impl PreparedPrefix {
     }
 
     /// Prepares the prefix: copies it to tmpfs (or reuses an already-prepared
-    /// copy). Falls back to the disk prefix when RAM mode is off/unavailable.
-    pub fn prepare(disk: &Path, enabled: bool) -> Self {
+    /// copy) and, when `materialize_proton` is set, replaces the prefix's file
+    /// symlinks into `proton` with real copies so Wine reads them from RAM.
+    /// Falls back to the disk prefix when RAM mode is off/unavailable.
+    pub fn prepare(
+        disk: &Path,
+        enabled: bool,
+        proton: Option<&Path>,
+        materialize_proton: bool,
+    ) -> Self {
         let disk_only = |report: PrepareReport| Self {
             path: disk.to_path_buf(),
             disk: disk.to_path_buf(),
             tmpfs: None,
+            proton: None,
             report,
         };
 
@@ -86,7 +97,7 @@ impl PreparedPrefix {
         let tmpfs = root.join("pfx");
         let marker = root.join(".prepared");
 
-        let signature = prefix_signature(disk);
+        let signature = prefix_signature(disk, proton);
         if tmpfs.is_dir()
             && std::fs::read_to_string(&marker)
                 .map(|m| m.trim() == signature)
@@ -96,9 +107,11 @@ impl PreparedPrefix {
                 path: tmpfs.clone(),
                 disk: disk.to_path_buf(),
                 tmpfs: Some(tmpfs),
+                proton: proton.map(Path::to_path_buf),
                 report: PrepareReport {
                     copied: false,
                     reused: true,
+                    materialized: 0,
                     elapsed: Duration::ZERO,
                 },
             };
@@ -129,15 +142,25 @@ impl PreparedPrefix {
             let _ = std::fs::remove_dir_all(&tmpfs);
             return disk_only(PrepareReport::default());
         }
+        let materialized = if materialize_proton {
+            match proton {
+                Some(proton) => materialize_proton_symlinks(&tmpfs, proton),
+                None => 0,
+            }
+        } else {
+            0
+        };
         let _ = std::fs::write(&marker, &signature);
 
         Self {
             path: tmpfs.clone(),
             disk: disk.to_path_buf(),
             tmpfs: Some(tmpfs),
+            proton: proton.map(Path::to_path_buf),
             report: PrepareReport {
                 copied: true,
                 reused: false,
+                materialized,
                 elapsed: started.elapsed(),
             },
         }
@@ -155,8 +178,10 @@ impl PreparedPrefix {
             match rsync(&tmpfs, &self.disk, false) {
                 Ok(()) => {
                     if let Some(parent) = tmpfs.parent() {
-                        let _ =
-                            std::fs::write(parent.join(".prepared"), prefix_signature(&self.disk));
+                        let _ = std::fs::write(
+                            parent.join(".prepared"),
+                            prefix_signature(&self.disk, self.proton.as_deref()),
+                        );
                     }
                     return SyncReport {
                         synced: true,
@@ -282,11 +307,81 @@ fn rsync(src: &Path, dst: &Path, delete: bool) -> std::io::Result<()> {
     }
 }
 
-/// A cheap signature of the disk prefix: entry count, total size and newest
-/// mtime. Used to decide whether an already-prepared tmpfs copy is still valid.
-fn prefix_signature(disk: &Path) -> String {
+/// A cheap signature of the disk prefix: entry count, total size, newest mtime
+/// and the Proton install (path + mtime). Used to decide whether an
+/// already-prepared tmpfs copy is still valid.
+fn prefix_signature(disk: &Path, proton: Option<&Path>) -> String {
     let (count, bytes, newest) = walk_signature(disk);
-    format!("{count}:{bytes}:{}", newest)
+    let proton_tag = proton
+        .map(|p| {
+            let mtime = std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("{}:{}", p.display(), mtime)
+        })
+        .unwrap_or_default();
+    format!("{count}:{bytes}:{newest}:{proton_tag}")
+}
+
+/// Replaces the prefix's file symlinks that resolve inside `proton` with real
+/// copies, so Wine loads its system DLLs from the tmpfs (RAM) instead of the
+/// Proton install on disk. Directory symlinks (`dosdevices`, …) are left as-is.
+fn materialize_proton_symlinks(prefix: &Path, proton: &Path) -> u64 {
+    let proton_canon = std::fs::canonicalize(proton).ok();
+    let mut stack = vec![prefix.to_path_buf()];
+    let mut bytes = 0u64;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !ft.is_symlink() {
+                continue;
+            }
+            // Resolve the link and only act on files that live inside Proton.
+            let Ok(real) = std::fs::canonicalize(&path) else {
+                continue;
+            };
+            if let Some(pc) = &proton_canon {
+                if !real.starts_with(pc) {
+                    continue;
+                }
+            }
+            let Ok(md) = std::fs::metadata(&real) else {
+                continue;
+            };
+            if !md.is_file() {
+                continue;
+            }
+            let Ok(content) = std::fs::read(&real) else {
+                continue;
+            };
+            if std::fs::remove_file(&path).is_err() {
+                continue;
+            }
+            if std::fs::write(&path, &content).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &path,
+                        std::fs::Permissions::from_mode(md.permissions().mode()),
+                    );
+                }
+                bytes += md.len();
+            }
+        }
+    }
+    bytes
 }
 
 fn signature_bytes(disk: &Path) -> u64 {
@@ -351,9 +446,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a"), b"hello").unwrap();
-        let s1 = prefix_signature(&dir);
+        let s1 = prefix_signature(&dir, None);
         std::fs::write(dir.join("b"), b"world!").unwrap();
-        let s2 = prefix_signature(&dir);
+        let s2 = prefix_signature(&dir, None);
         assert_ne!(s1, s2);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -363,7 +458,7 @@ mod tests {
         let disk = tmp("disk-off");
         let _ = std::fs::remove_dir_all(&disk);
         std::fs::create_dir_all(&disk).unwrap();
-        let p = PreparedPrefix::prepare(&disk, false);
+        let p = PreparedPrefix::prepare(&disk, false, None, false);
         assert!(!p.using_tmpfs());
         assert_eq!(p.path(), disk.as_path());
         let _ = std::fs::remove_dir_all(&disk);
@@ -382,7 +477,7 @@ mod tests {
         std::fs::create_dir_all(disk.join("drive_c")).unwrap();
         std::fs::write(disk.join("drive_c/system.reg"), b"reg").unwrap();
 
-        let p = PreparedPrefix::prepare(&disk, true);
+        let p = PreparedPrefix::prepare(&disk, true, None, false);
         assert!(p.using_tmpfs());
         // Written through the tmpfs copy...
         std::fs::write(p.path().join("drive_c/new.reg"), b"new").unwrap();
@@ -395,7 +490,7 @@ mod tests {
         assert!(status().is_some());
 
         // A second prepare reuses it instead of copying.
-        let p2 = PreparedPrefix::prepare(&disk, true);
+        let p2 = PreparedPrefix::prepare(&disk, true, None, false);
         assert!(p2.using_tmpfs());
         assert!(p2.report().reused);
         drop(p2);

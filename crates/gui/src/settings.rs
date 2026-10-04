@@ -276,6 +276,15 @@ pub struct GuiSettings {
     /// slow disks). Passed to `gta-mo` as `--prefix-ram`/`--no-prefix-ram`.
     #[serde(default = "default_true")]
     pub prefix_ram: bool,
+    /// Materialize the Proton DLL symlinks into the tmpfs prefix.
+    #[serde(default = "default_true")]
+    pub prefix_ram_proton: bool,
+    /// Prefetch the Proton runtime into the page cache.
+    #[serde(default)]
+    pub preload_proton: bool,
+    /// Prefetch umu's steamrt runtime into the page cache.
+    #[serde(default)]
+    pub preload_steamrt: bool,
     #[serde(default)]
     pub graph: GraphSettings,
     /// Per-browser UI preferences (`[browsers.<id>]`).
@@ -296,6 +305,9 @@ impl Default for GuiSettings {
             show_covers: true,
             confirm_deletes: true,
             prefix_ram: true,
+            prefix_ram_proton: true,
+            preload_proton: false,
+            preload_steamrt: false,
             graph: GraphSettings::default(),
             browsers: HashMap::new(),
         }

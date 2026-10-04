@@ -154,14 +154,8 @@ struct LaunchArgs {
     #[arg(long, help = "Skip the 'full' preload confirmation prompt")]
     preload_yes: bool,
 
-    #[arg(
-        long,
-        help = "Run the game against a tmpfs copy of the Wine prefix (RAM)"
-    )]
-    prefix_ram: bool,
-
-    #[arg(long = "no-prefix-ram", help = "Use the on-disk Wine prefix")]
-    no_prefix_ram: bool,
+    #[command(flatten)]
+    optimize: OptimizeArgs,
 }
 
 #[derive(Args)]
@@ -174,6 +168,78 @@ struct PreloadArgs {
 
     #[arg(long, help = "Skip the 'full' preload confirmation prompt")]
     yes: bool,
+
+    #[command(flatten)]
+    optimize: OptimizeArgs,
+}
+
+/// RAM/optimization toggles shared by `launch` and `preload`.
+#[derive(Args, Clone, Default)]
+struct OptimizeArgs {
+    #[arg(
+        long,
+        help = "Run the game against a tmpfs copy of the Wine prefix (RAM)"
+    )]
+    prefix_ram: bool,
+
+    #[arg(long = "no-prefix-ram", help = "Use the on-disk Wine prefix")]
+    no_prefix_ram: bool,
+
+    #[arg(
+        long,
+        help = "Materialize the Proton DLL symlinks into the tmpfs prefix"
+    )]
+    prefix_ram_proton: bool,
+
+    #[arg(
+        long = "no-prefix-ram-proton",
+        help = "Do not materialize Proton symlinks into the tmpfs prefix"
+    )]
+    no_prefix_ram_proton: bool,
+
+    #[arg(long, help = "Prefetch the Proton runtime into the page cache")]
+    preload_proton: bool,
+
+    #[arg(
+        long = "no-preload-proton",
+        help = "Do not prefetch the Proton runtime"
+    )]
+    no_preload_proton: bool,
+
+    #[arg(long, help = "Prefetch umu's steamrt runtime into the page cache")]
+    preload_steamrt: bool,
+
+    #[arg(
+        long = "no-preload-steamrt",
+        help = "Do not prefetch umu's steamrt runtime"
+    )]
+    no_preload_steamrt: bool,
+}
+
+impl OptimizeArgs {
+    fn prefix_ram(&self) -> Option<bool> {
+        tri(self.prefix_ram, self.no_prefix_ram)
+    }
+    fn prefix_ram_proton(&self) -> Option<bool> {
+        tri(self.prefix_ram_proton, self.no_prefix_ram_proton)
+    }
+    fn preload_proton(&self) -> Option<bool> {
+        tri(self.preload_proton, self.no_preload_proton)
+    }
+    fn preload_steamrt(&self) -> Option<bool> {
+        tri(self.preload_steamrt, self.no_preload_steamrt)
+    }
+}
+
+/// `Some(true)` / `Some(false)` / `None` from an `--x` / `--no-x` flag pair.
+fn tri(enable: bool, disable: bool) -> Option<bool> {
+    if enable {
+        Some(true)
+    } else if disable {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 #[derive(Args)]
@@ -643,8 +709,7 @@ fn main() {
         no_auto_discover: false,
         preload: None,
         preload_yes: false,
-        prefix_ram: false,
-        no_prefix_ram: false,
+        optimize: OptimizeArgs::default(),
     }));
 
     let result = match command {
@@ -723,13 +788,10 @@ fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
             .as_deref()
             .map(|v| gta_mo_core::preload::PreloadMode::parse(Some(v))),
         preload_yes: args.preload_yes,
-        prefix_ram: if args.prefix_ram {
-            Some(true)
-        } else if args.no_prefix_ram {
-            Some(false)
-        } else {
-            None
-        },
+        prefix_ram: args.optimize.prefix_ram(),
+        prefix_ram_proton: args.optimize.prefix_ram_proton(),
+        preload_proton: args.optimize.preload_proton(),
+        preload_steamrt: args.optimize.preload_steamrt(),
     };
 
     let result = LaunchEngine::run(&opts, |msg| println!("{msg}"))?;
@@ -754,7 +816,10 @@ fn cmd_preload(args: PreloadArgs, profile: Option<&str>) -> anyhow::Result<()> {
         deps_ignore: false,
         preload: args.full.then_some(gta_mo_core::preload::PreloadMode::Full),
         preload_yes: args.yes,
-        prefix_ram: None,
+        prefix_ram: args.optimize.prefix_ram(),
+        prefix_ram_proton: args.optimize.prefix_ram_proton(),
+        preload_proton: args.optimize.preload_proton(),
+        preload_steamrt: args.optimize.preload_steamrt(),
     };
     LaunchEngine::preload(&opts, |msg| println!("{msg}"))?;
     Ok(())
@@ -773,6 +838,9 @@ fn cmd_mount(args: MountArgs, profile: Option<&str>) -> anyhow::Result<()> {
         preload: None,
         preload_yes: false,
         prefix_ram: None,
+        prefix_ram_proton: None,
+        preload_proton: None,
+        preload_steamrt: None,
     };
     let outcome = LaunchEngine::mount(&opts, args.temp)?;
     if let Some(report) = outcome.dry_run {
@@ -965,11 +1033,33 @@ fn cmd_steam(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
     if args.preload_yes {
         steam_args.push("--preload-yes".into());
     }
-    if args.prefix_ram {
-        steam_args.push("--prefix-ram".into());
-    }
-    if args.no_prefix_ram {
-        steam_args.push("--no-prefix-ram".into());
+    for (on, off, flag) in [
+        (
+            args.optimize.prefix_ram,
+            args.optimize.no_prefix_ram,
+            "--prefix-ram",
+        ),
+        (
+            args.optimize.prefix_ram_proton,
+            args.optimize.no_prefix_ram_proton,
+            "--prefix-ram-proton",
+        ),
+        (
+            args.optimize.preload_proton,
+            args.optimize.no_preload_proton,
+            "--preload-proton",
+        ),
+        (
+            args.optimize.preload_steamrt,
+            args.optimize.no_preload_steamrt,
+            "--preload-steamrt",
+        ),
+    ] {
+        if on {
+            steam_args.push(flag.into());
+        } else if off {
+            steam_args.push(format!("--no-{}", &flag[2..]).into());
+        }
     }
     if let Some(p) = profile {
         steam_args.push("--profile".into());

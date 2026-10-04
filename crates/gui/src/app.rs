@@ -152,6 +152,17 @@ struct Job {
     warm: bool,
 }
 
+/// Human-readable label for a queued CLI job.
+fn job_label(args: &[String]) -> String {
+    match args.first().map(String::as_str) {
+        Some("preload") => "Precargar (RAM/caché)".into(),
+        Some("launch") => "Lanzar juego".into(),
+        Some("ctl") => format!("ctl {}", args.get(1).map(String::as_str).unwrap_or("")),
+        Some(other) => other.to_string(),
+        None => "?".to_string(),
+    }
+}
+
 pub struct GtaMoApp {
     backend: Backend,
     snapshot: Snapshot,
@@ -166,6 +177,16 @@ pub struct GtaMoApp {
     playing: bool,
     /// True while the running job is the prefix prewarm (Play stays enabled).
     warming: bool,
+    /// True while the running job was canceled from the queue UI.
+    canceled: bool,
+    /// Set by the queue popover to cancel the running job after the frame.
+    cancel_running: bool,
+    /// Label of the job currently running (for the queue popover).
+    current_job_label: Option<String>,
+    /// Log: follow new lines unless the user scrolled up.
+    log_follow: bool,
+    /// Log: scroll to the end on the next draw.
+    log_scroll_to_end: bool,
     launch_debug: bool,
     launch_dry_run: bool,
     pending: VecDeque<Job>,
@@ -279,6 +300,11 @@ impl GtaMoApp {
             busy: false,
             playing: false,
             warming: false,
+            canceled: false,
+            cancel_running: false,
+            current_job_label: None,
+            log_follow: true,
+            log_scroll_to_end: false,
             launch_debug: false,
             launch_dry_run: false,
             pending: VecDeque::new(),
@@ -351,13 +377,31 @@ impl GtaMoApp {
         }
         // Serialized with the other CLI jobs, but flagged so it does not disable
         // the Play button.
+        let mut args = vec!["preload".into(), "--profile".into(), slug];
+        self.push_optimize_args(&mut args);
         self.pending.push_back(Job {
-            args: vec!["preload".into(), "--profile".into(), slug],
+            args,
             launch: false,
             stdin: None,
             warm: true,
         });
         self.pump();
+    }
+
+    /// Appends the RAM/optimization flags from preferences.
+    fn push_optimize_args(&self, args: &mut Vec<String>) {
+        for (on, flag) in [
+            (self.settings.prefix_ram, "--prefix-ram"),
+            (self.settings.prefix_ram_proton, "--prefix-ram-proton"),
+            (self.settings.preload_proton, "--preload-proton"),
+            (self.settings.preload_steamrt, "--preload-steamrt"),
+        ] {
+            if on {
+                args.push(flag.into());
+            } else {
+                args.push(format!("--no-{}", &flag[2..]));
+            }
+        }
     }
 
     /// Re-applies everything derived from [`GuiSettings`] after a change.
@@ -617,12 +661,25 @@ impl GtaMoApp {
             self.busy = true;
             self.playing = job.launch;
             self.warming = job.warm;
+            self.current_job_label = Some(job_label(&job.args));
             let tx = self.tx.clone();
             self.backend
-                .run_cli_async(job.args, job.launch, job.stdin, self.child_pid.clone(), tx);
+                .run_cli_async(job.args, job.stdin, self.child_pid.clone(), tx);
         } else {
             self.playing = false;
             self.warming = false;
+            self.current_job_label = None;
+        }
+    }
+
+    /// Cancels the job currently running (e.g. a prewarm): the process group is
+    /// killed and its `CommandDone` is reported as "Cancelado".
+    fn cancel_current_job(&mut self) {
+        if let Ok(slot) = self.child_pid.lock() {
+            if let Some(pid) = *slot {
+                crate::backend::stop_child_group(pid);
+                self.canceled = true;
+            }
         }
     }
 
@@ -658,13 +715,19 @@ impl GtaMoApp {
                 GuiEvent::CommandDone(ok, msg) => {
                     let launched = self.playing;
                     let was_stopping = self.stopping;
+                    let was_canceled = self.canceled;
                     self.busy = false;
                     self.playing = false;
                     self.stopping = false;
+                    self.canceled = false;
+                    self.current_job_label = None;
                     if let Ok(mut slot) = self.child_pid.lock() {
                         *slot = None;
                     }
-                    if was_stopping {
+                    if was_canceled {
+                        self.toasts
+                            .push(ctx, crate::toasts::ToastKind::Info, "Cancelado");
+                    } else if was_stopping {
                         self.toasts
                             .push(ctx, crate::toasts::ToastKind::Info, "Juego detenido");
                     } else if !ok {
@@ -1139,7 +1202,7 @@ impl eframe::App for GtaMoApp {
                         for p in &profiles {
                             if ui.selectable_label(p.slug == active, &p.name).clicked()
                                 && p.slug != active
-                                && !(self.busy || self.playing)
+                                && !self.playing
                             {
                                 self.exec(
                                     vec![
@@ -1201,7 +1264,7 @@ impl eframe::App for GtaMoApp {
                     } else {
                         // Play stays enabled during the prefix prewarm; the
                         // launch is queued and starts once it finishes.
-                        let can_play = !self.playing && !(self.busy && !self.warming);
+                        let can_play = !self.playing && (!self.busy || self.warming);
                         let play = egui::Button::new(
                             egui::RichText::new(format!("{} Jugar", crate::icons::PLAY))
                                 .color(palette.on_accent)
@@ -1222,11 +1285,7 @@ impl eframe::App for GtaMoApp {
                             if self.launch_debug {
                                 args.push("--debug".into());
                             }
-                            args.push(if self.settings.prefix_ram {
-                                "--prefix-ram".into()
-                            } else {
-                                "--no-prefix-ram".into()
-                            });
+                            self.push_optimize_args(&mut args);
                             if self.launch_dry_run {
                                 args.push("--dry-run".into());
                             }
@@ -1418,6 +1477,52 @@ impl GtaMoApp {
                     ui.colored_label(palette.warning, e);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Queue indicator + cancel.
+                    let queued = self.pending.len();
+                    let total = queued + usize::from(self.busy);
+                    if total > 0 {
+                        let label = if self.playing {
+                            "● Lanzando…".to_string()
+                        } else if self.warming {
+                            format!("◐ Precargando… (+{queued})")
+                        } else {
+                            format!("Cola: {total}")
+                        };
+                        let mut cancel_idx: Option<usize> = None;
+                        ui.menu_button(label, |ui| {
+                            ui.set_min_width(280.0);
+                            if self.busy {
+                                let cur = self
+                                    .current_job_label
+                                    .clone()
+                                    .unwrap_or_else(|| "En curso".to_string());
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("▶ {cur}"));
+                                    if ui.button("Cancelar").clicked() {
+                                        self.cancel_running = true;
+                                    }
+                                });
+                                ui.separator();
+                            }
+                            for (i, job) in self.pending.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(format!("{}. {}", i + 1, job_label(&job.args)));
+                                    if ui.small_button("✕").clicked() {
+                                        cancel_idx = Some(i);
+                                    }
+                                });
+                            }
+                            if self.pending.is_empty() {
+                                ui.label("(sin trabajos en cola)");
+                            } else if ui.button("Vaciar cola").clicked() {
+                                self.pending.clear();
+                            }
+                        });
+                        if let Some(i) = cancel_idx {
+                            self.pending.remove(i);
+                        }
+                        ui.separator();
+                    }
                     let n = self.conflicts.iter().filter(|c| !c.duplicate).count();
                     let conflicts_label = if self.conflicts_pending {
                         format!("Conflictos: {n}…")
@@ -1453,6 +1558,10 @@ impl GtaMoApp {
                 });
             });
         });
+        if self.cancel_running {
+            self.cancel_running = false;
+            self.cancel_current_job();
+        }
     }
 
     /// Bottom navigation bar for the narrow (phone-like) layout.
@@ -3901,16 +4010,33 @@ impl GtaMoApp {
             {
                 self.open_logs_dir();
             }
+            if ui
+                .add_enabled(!self.log_follow, egui::Button::new("↓ Ir al final"))
+                .on_hover_text("Volver a seguir el log automáticamente")
+                .clicked()
+            {
+                self.log_follow = true;
+                self.log_scroll_to_end = true;
+            }
         });
         ui.separator();
-        egui::ScrollArea::vertical()
+        let out = egui::ScrollArea::vertical()
             .id_salt("log_scroll")
             .auto_shrink(false)
+            .stick_to_bottom(self.log_follow)
             .show(ui, |ui| {
                 for l in &self.log {
                     ui.monospace(l);
                 }
+                if self.log_scroll_to_end {
+                    ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                }
             });
+        self.log_scroll_to_end = false;
+        // Stop following when the user scrolls away from the bottom; resume at
+        // the bottom (or with the "Ir al final" button).
+        let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+        self.log_follow = out.state.offset.y >= max - 4.0;
     }
 
     /// Full-screen image viewer with arrows, counter and dots.

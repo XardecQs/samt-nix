@@ -534,13 +534,12 @@ impl Backend {
 
     /// Spawns `gta-mo <args>` in a background thread, streaming output to `tx`.
     ///
-    /// For `launch` jobs the child is placed in its own process group (so the
-    /// whole game tree can be stopped later) and its pid is published in
+    /// The child is placed in its own process group (so `stop_child_group` can
+    /// cancel any running job, not only a launch) and its pid is published in
     /// `pid_slot`; it is cleared once the process exits.
     pub fn run_cli_async(
         &self,
         args: Vec<String>,
-        launch: bool,
         stdin: Option<String>,
         pid_slot: Arc<Mutex<Option<u32>>>,
         tx: Sender<GuiEvent>,
@@ -556,11 +555,8 @@ impl Backend {
             if stdin.is_some() {
                 cmd.stdin(Stdio::piped());
             }
-            if launch {
-                // New process group so `stop_child_group` can signal the whole
-                // tree (umu-run, Proton, the game).
-                cmd.process_group(0);
-            }
+            // Own process group so the whole tree can be canceled.
+            cmd.process_group(0);
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {
@@ -571,10 +567,8 @@ impl Backend {
                     return;
                 }
             };
-            if launch {
-                if let Ok(mut slot) = pid_slot.lock() {
-                    *slot = Some(child.id());
-                }
+            if let Ok(mut slot) = pid_slot.lock() {
+                *slot = Some(child.id());
             }
             if let Some(text) = stdin {
                 if let Some(mut si) = child.stdin.take() {
@@ -599,10 +593,8 @@ impl Backend {
                 });
             }
             let ok = child.wait().map(|s| s.success()).unwrap_or(false);
-            if launch {
-                if let Ok(mut slot) = pid_slot.lock() {
-                    *slot = None;
-                }
+            if let Ok(mut slot) = pid_slot.lock() {
+                *slot = None;
             }
             let _ = tx.send(GuiEvent::CommandDone(ok, String::new()));
         });
