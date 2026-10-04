@@ -205,16 +205,19 @@ auto_discover = true
 > Wine prefix from the page cache, which makes the *next* launch slow. To avoid
 > it, `gta-mo` `rsync`s the prefix to a tmpfs copy (`/dev/shm/gta-mo/pfx`) and
 > runs the game against it; after the session it syncs back to disk (the source
-> of truth) and drops the copy. `gta-mo preload` prepares the tmpfs copy ahead of
-> time (the GUI does it on startup and after each game), and the next `launch`
-> reuses it. It is user-space only (no `mlock`/system changes) and falls back to
-> the disk prefix if `/dev/shm` is unavailable. Disable with `--no-prefix-ram` or
+> of truth) and **keeps** the copy, so the following launches reuse it without
+> copying. The copy is only made once per login/reboot (or when the disk prefix
+> changes); inspect it with `gta-mo prefix status` and free it with
+> `gta-mo prefix clean`. `gta-mo preload` prepares the copy ahead of time (the GUI
+> does it on startup and after each game), and the next `launch` reuses it. It is
+> user-space only (no `mlock`/system changes) and falls back to the disk prefix
+> if `/dev/shm` is unavailable. Disable with `--no-prefix-ram` or
 > `prefix_ram = false`.
 >
 > `timings = true` (default) prints per-phase timings (`config/db`, `plan`,
-> `mount`, `prefix-ram`, `preload`, `prefix-sync`) and, while the game boots, the
-> time to the game process and to DXVK's device creation (a good proxy for "the
-> window is up").
+> `mount`, `prefix-ram`, `preload`, `sesión`, `prefix-sync`) and, while the game
+> boots, the time to the game process and to DXVK's device creation (a good proxy
+> for "the window is up").
 
 
 > **Proton upscalers**: GE and CachyOS Proton run `protonfixes.setup_upscalers()`
@@ -471,6 +474,8 @@ gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/m
 gta-mo mount [--temp] [--dry-run] [--profile <name>]   # mount the overlay without launching the game
 gta-mo unmount [--capture <mod>] [--discard]           # stop the mount daemon (capture/discard a temp upper)
 gta-mo status [--json]                                 # show the current manual mount, if any
+gta-mo prefix status                                   # show the prepared tmpfs Wine prefix copy
+gta-mo prefix clean [--yes]                            # remove the tmpfs prefix copy
 gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
               [--tag <tag>] [--group <group>] [--author <author>] [--id <id>]
               [--search <text>] [--sort name|folder|author|order|mod_id|version|status] [--dir asc|desc]

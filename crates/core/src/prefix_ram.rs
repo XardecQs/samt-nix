@@ -143,28 +143,101 @@ impl PreparedPrefix {
         }
     }
 
-    /// Syncs the tmpfs copy back to disk and removes it.
+    /// Syncs the tmpfs copy back to disk. On success the copy is **kept** (and
+    /// its marker refreshed) so the next launch reuses it without copying; on
+    /// failure it is dropped so the next launch starts from a clean disk state.
     pub fn finalize(self) -> SyncReport {
         let Some(tmpfs) = self.tmpfs else {
             return SyncReport::default();
         };
         let started = Instant::now();
-        let mut synced = false;
         if tmpfs.is_dir() {
             match rsync(&tmpfs, &self.disk, false) {
-                Ok(()) => synced = true,
-                Err(e) => log::warn(format!("prefix_ram: sincronización a disco falló: {e}")),
+                Ok(()) => {
+                    if let Some(parent) = tmpfs.parent() {
+                        let _ =
+                            std::fs::write(parent.join(".prepared"), prefix_signature(&self.disk));
+                    }
+                    return SyncReport {
+                        synced: true,
+                        elapsed: started.elapsed(),
+                    };
+                }
+                Err(e) => {
+                    log::warn(format!("prefix_ram: sincronización a disco falló: {e}"));
+                    let _ = std::fs::remove_dir_all(&tmpfs);
+                    if let Some(parent) = tmpfs.parent() {
+                        let _ = std::fs::remove_file(parent.join(".prepared"));
+                    }
+                }
             }
-        }
-        let _ = std::fs::remove_dir_all(&tmpfs);
-        if let Some(parent) = tmpfs.parent() {
+        } else if let Some(parent) = tmpfs.parent() {
             let _ = std::fs::remove_file(parent.join(".prepared"));
         }
         SyncReport {
-            synced,
+            synced: false,
             elapsed: started.elapsed(),
         }
     }
+}
+
+/// Result of [`clean`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CleanReport {
+    pub existed: bool,
+    pub bytes: u64,
+}
+
+/// Removes the tmpfs prefix copy (and its marker). The disk prefix is untouched.
+pub fn clean() -> CleanReport {
+    let Some(root) = ram_root() else {
+        return CleanReport::default();
+    };
+    if !root.exists() {
+        return CleanReport::default();
+    }
+    let bytes = dir_size(&root);
+    let _ = std::fs::remove_dir_all(&root);
+    CleanReport {
+        existed: true,
+        bytes,
+    }
+}
+
+/// Path of the prepared tmpfs prefix, if there is one.
+pub fn status() -> Option<PathBuf> {
+    let pfx = ram_root()?.join("pfx");
+    pfx.is_dir().then_some(pfx)
+}
+
+/// Size in bytes of the prepared tmpfs prefix copy, if any.
+pub fn prepared_bytes() -> u64 {
+    match status() {
+        Some(pfx) => dir_size(&pfx),
+        None => 0,
+    }
+}
+
+fn dir_size(root: &Path) -> u64 {
+    let mut stack = vec![root.to_path_buf()];
+    let mut total = 0u64;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(md) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if md.is_dir() {
+                stack.push(path);
+            } else if md.is_file() {
+                total += md.len();
+            }
+        }
+    }
+    total
 }
 
 fn ram_root() -> Option<PathBuf> {
@@ -239,7 +312,9 @@ fn walk_signature(root: &Path) -> (u64, u64, i128) {
             }
             if let Ok(modified) = md.modified() {
                 if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    newest = newest.max(d.as_nanos() as i128);
+                    // Seconds (not nanos): tolerates mtime rounding differences
+                    // between btrfs and tmpfs after an rsync.
+                    newest = newest.max(d.as_secs() as i128);
                 }
             }
         }
@@ -295,11 +370,12 @@ mod tests {
     }
 
     #[test]
-    fn tmpfs_roundtrip_when_available() {
+    fn tmpfs_roundtrip_persist_and_clean() {
         if !Path::new("/dev/shm").is_dir() {
             return;
         }
         let root = PathBuf::from("/dev/shm/gta-mo-test");
+        let _ = std::fs::remove_dir_all(&root);
         std::env::set_var(RAM_DIR_ENV, root.display().to_string());
         let disk = tmp("rt");
         let _ = std::fs::remove_dir_all(&disk);
@@ -310,10 +386,24 @@ mod tests {
         assert!(p.using_tmpfs());
         // Written through the tmpfs copy...
         std::fs::write(p.path().join("drive_c/new.reg"), b"new").unwrap();
-        let _ = p.finalize();
-        // ...lands back on disk.
+        let sync = p.finalize();
+        assert!(sync.synced);
+        // ...lands back on disk...
         assert!(disk.join("drive_c/new.reg").exists());
-        assert!(!root.join("pfx").exists());
+        // ...and the tmpfs copy is kept for the next launch.
+        assert!(root.join("pfx").exists());
+        assert!(status().is_some());
+
+        // A second prepare reuses it instead of copying.
+        let p2 = PreparedPrefix::prepare(&disk, true);
+        assert!(p2.using_tmpfs());
+        assert!(p2.report().reused);
+        drop(p2);
+
+        // clean() removes it.
+        let report = clean();
+        assert!(report.existed);
+        assert!(!root.exists());
 
         std::env::remove_var(RAM_DIR_ENV);
         let _ = std::fs::remove_dir_all(&disk);

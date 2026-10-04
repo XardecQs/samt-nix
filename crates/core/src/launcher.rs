@@ -863,6 +863,7 @@ impl LaunchEngine {
         let started = Instant::now();
         let result = Self::launch_game(game_exe, working_dir, launch_log);
         let session = started.elapsed();
+        timer.mark("sesión");
 
         watcher_stop.store(true, Ordering::Relaxed);
         if let Some(h) = watcher {

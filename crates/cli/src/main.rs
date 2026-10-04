@@ -7,7 +7,7 @@ use gta_mo_core::config;
 use gta_mo_core::db;
 use gta_mo_core::launcher::{LaunchEngine, LaunchOptions};
 use gta_mo_core::log;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +42,8 @@ enum Command {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },
+    #[command(about = "Manage the tmpfs Wine prefix copy (prefix_ram)")]
+    Prefix(PrefixArgs),
     #[command(about = "Manage mods, profiles, groups and dependencies")]
     Ctl(CtlArgs),
 }
@@ -89,6 +91,23 @@ struct UnmountArgs {
 
     #[arg(long, help = "Discard a temporary profile's upper")]
     discard: bool,
+}
+
+#[derive(Args)]
+struct PrefixArgs {
+    #[command(subcommand)]
+    command: PrefixCommand,
+}
+
+#[derive(Subcommand)]
+enum PrefixCommand {
+    #[command(about = "Show whether a tmpfs Wine prefix copy is prepared")]
+    Status,
+    #[command(about = "Remove the tmpfs Wine prefix copy (the disk prefix is untouched)")]
+    Clean {
+        #[arg(long, help = "Do not ask for confirmation")]
+        yes: bool,
+    },
 }
 
 #[derive(Args)]
@@ -663,6 +682,7 @@ fn main() {
         Command::Mount(args) => cmd_mount(args, profile.as_deref()),
         Command::Unmount(args) => cmd_unmount(args),
         Command::Status { json } => cmd_status(json),
+        Command::Prefix(args) => cmd_prefix(args),
         Command::Ctl(args) => {
             let db_path = config::db_path();
             db::ensure_db_dir(&db_path).unwrap_or_else(|e| {
@@ -843,6 +863,62 @@ fn cmd_status(json: bool) -> anyhow::Result<()> {
         None => println!("No hay ningún overlay montado manualmente."),
     }
     Ok(())
+}
+
+fn cmd_prefix(args: PrefixArgs) -> anyhow::Result<()> {
+    match args.command {
+        PrefixCommand::Status => {
+            match gta_mo_core::prefix_ram::status() {
+                Some(p) => {
+                    let bytes = gta_mo_core::prefix_ram::prepared_bytes();
+                    println!(
+                        "Prefijo en tmpfs: {} ({:.1} MiB).",
+                        p.display(),
+                        bytes as f64 / 1_048_576.0
+                    );
+                }
+                None => println!("No hay copia del prefijo en tmpfs."),
+            }
+            Ok(())
+        }
+        PrefixCommand::Clean { yes } => {
+            // Refuse to run while a launch/mount holds the launcher lock.
+            let _lock = LaunchEngine::acquire_lock(&config::lockfile_path()).map_err(|e| {
+                anyhow::anyhow!("No se puede limpiar con una instancia en ejecución: {e}")
+            })?;
+            if !yes && !confirm("¿Eliminar la copia del prefijo en tmpfs? [s/N]: ") {
+                println!("Cancelado.");
+                return Ok(());
+            }
+            let report = gta_mo_core::prefix_ram::clean();
+            if report.existed {
+                println!(
+                    "Copia tmpfs eliminada ({:.1} MiB liberados).",
+                    report.bytes as f64 / 1_048_576.0
+                );
+            } else {
+                println!("No había copia en tmpfs.");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Short interactive confirmation (empty/`n`/headless means no).
+fn confirm(prompt: &str) -> bool {
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+    let mut input = String::new();
+    if std::io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    matches!(
+        input.trim().to_ascii_lowercase().as_str(),
+        "s" | "si" | "sí" | "y" | "yes"
+    )
 }
 
 fn cmd_steam(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {

@@ -147,6 +147,9 @@ struct Job {
     launch: bool,
     /// Optional text to send to the CLI's stdin (e.g. a manifest to save).
     stdin: Option<String>,
+    /// True for the background prefix prewarm: it stays serialized in the queue
+    /// but does not disable the Play button.
+    warm: bool,
 }
 
 pub struct GtaMoApp {
@@ -161,6 +164,8 @@ pub struct GtaMoApp {
     selected_profile: Option<String>,
     busy: bool,
     playing: bool,
+    /// True while the running job is the prefix prewarm (Play stays enabled).
+    warming: bool,
     launch_debug: bool,
     launch_dry_run: bool,
     pending: VecDeque<Job>,
@@ -273,6 +278,7 @@ impl GtaMoApp {
             selected_profile: None,
             busy: false,
             playing: false,
+            warming: false,
             launch_debug: false,
             launch_dry_run: false,
             pending: VecDeque::new(),
@@ -343,7 +349,15 @@ impl GtaMoApp {
         if slug.is_empty() {
             return;
         }
-        self.exec(vec!["preload".into(), "--profile".into(), slug], false);
+        // Serialized with the other CLI jobs, but flagged so it does not disable
+        // the Play button.
+        self.pending.push_back(Job {
+            args: vec!["preload".into(), "--profile".into(), slug],
+            launch: false,
+            stdin: None,
+            warm: true,
+        });
+        self.pump();
     }
 
     /// Re-applies everything derived from [`GuiSettings`] after a change.
@@ -557,6 +571,7 @@ impl GtaMoApp {
             args,
             launch,
             stdin: None,
+            warm: false,
         });
         self.pump();
     }
@@ -589,6 +604,7 @@ impl GtaMoApp {
             args,
             launch: false,
             stdin: Some(stdin),
+            warm: false,
         });
         self.pump();
     }
@@ -600,11 +616,13 @@ impl GtaMoApp {
         if let Some(job) = self.pending.pop_front() {
             self.busy = true;
             self.playing = job.launch;
+            self.warming = job.warm;
             let tx = self.tx.clone();
             self.backend
                 .run_cli_async(job.args, job.launch, job.stdin, self.child_pid.clone(), tx);
         } else {
             self.playing = false;
+            self.warming = false;
         }
     }
 
@@ -1181,13 +1199,16 @@ impl eframe::App for GtaMoApp {
                             }
                         }
                     } else {
+                        // Play stays enabled during the prefix prewarm; the
+                        // launch is queued and starts once it finishes.
+                        let can_play = !self.playing && !(self.busy && !self.warming);
                         let play = egui::Button::new(
                             egui::RichText::new(format!("{} Jugar", crate::icons::PLAY))
                                 .color(palette.on_accent)
                                 .strong(),
                         )
                         .fill(palette.accent);
-                        if ui.add_enabled(idle, play).clicked() {
+                        if ui.add_enabled(can_play, play).clicked() {
                             let slug = self.snapshot.active_slug.clone();
                             self.log.clear();
                             let mode = if self.launch_dry_run {

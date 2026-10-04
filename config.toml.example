@@ -40,6 +40,8 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 #
 # Run the game against a tmpfs copy of the Wine prefix
 # (`/dev/shm/gta-mo/pfx`), so a long game session cannot evict it from RAM; the
-# on-disk prefix stays as the source of truth (rsync in/out around the launch).
-# Requires no system changes; falls back to disk if /dev/shm is unavailable.
+# on-disk prefix stays as the source of truth (rsync in before the launch and
+# back after it, keeping the copy for the next launch). Requires no system
+# changes; falls back to disk if /dev/shm is unavailable. Inspect it with
+# `gta-mo prefix status` and free it with `gta-mo prefix clean`.
 # prefix_ram = true
