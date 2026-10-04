@@ -12,6 +12,10 @@ pub struct Config {
     pub proton_use_wined3d: Option<bool>,
     pub proton_disable_ntsync: Option<bool>,
     pub proton_disable_upscalers: Option<bool>,
+    /// Whether `umu-launcher` may update its steamrt runtime on launch.
+    /// Defaults to `false`: it avoids re-downloading the runtime every launch
+    /// (and the digest-mismatch failure when a cached/mirrored archive is bad).
+    pub umu_runtime_update: Option<bool>,
     pub dxvk_hud: Option<String>,
     pub auto_discover: Option<bool>,
     pub mods_dir: Option<String>,
@@ -44,6 +48,12 @@ impl Config {
 
     pub fn proton_disable_upscalers(&self) -> bool {
         self.proton_disable_upscalers.unwrap_or(false)
+    }
+
+    /// Whether umu-launcher may update/redownload its runtime. Defaults to
+    /// `false` so an already-installed `steamrt4` is reused as-is.
+    pub fn umu_runtime_update(&self) -> bool {
+        self.umu_runtime_update.unwrap_or(false)
     }
 
     pub fn auto_discover(&self) -> bool {

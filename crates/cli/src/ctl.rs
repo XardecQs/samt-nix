@@ -273,6 +273,97 @@ pub fn run(
         super::CtlCommand::Profile { action } => cmd_profile(conn, action),
         super::CtlCommand::Group { action } => cmd_group(conn, action, profile_ident),
         super::CtlCommand::Option { action } => cmd_option(conn, action, profile_ident),
+        super::CtlCommand::Runtime { action } => cmd_runtime(action),
+    }
+}
+
+fn cmd_runtime(action: &super::RuntimeAction) -> anyhow::Result<()> {
+    match action {
+        super::RuntimeAction::Status { json } => {
+            let st = gta_mo_core::umu::status();
+            if *json {
+                #[derive(Serialize)]
+                struct RuntimeJson<'a> {
+                    runtime_dir: String,
+                    installed: bool,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    version: &'a Option<String>,
+                    cache_dir: String,
+                    cache_files: u64,
+                    cache_bytes: u64,
+                }
+                let out = RuntimeJson {
+                    runtime_dir: st.runtime_dir.display().to_string(),
+                    installed: st.installed,
+                    version: &st.version,
+                    cache_dir: st.cache_dir.display().to_string(),
+                    cache_files: st.cache_files,
+                    cache_bytes: st.cache_bytes,
+                };
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                let state = if st.installed {
+                    "instalado".green().to_string()
+                } else {
+                    "no instalado".yellow().to_string()
+                };
+                println!("Runtime de umu:      {state}");
+                println!("Directorio:          {}", st.runtime_dir.display());
+                match &st.version {
+                    Some(v) => println!("Versión:             {v}"),
+                    None => println!("Versión:             (desconocida)"),
+                }
+                println!(
+                    "Caché de descargas:  {} ({} archivo(s), {})",
+                    st.cache_dir.display(),
+                    st.cache_files,
+                    human_bytes(st.cache_bytes)
+                );
+            }
+            Ok(())
+        }
+        super::RuntimeAction::Clean => {
+            let freed = gta_mo_core::umu::clean_cache()?;
+            log::info(format!(
+                "Caché de umu limpiada ({} liberados).",
+                human_bytes(freed)
+            ));
+            Ok(())
+        }
+        super::RuntimeAction::Reinstall { yes } => {
+            let dir = gta_mo_core::umu::steamrt4_dir();
+            if !*yes
+                && !confirm(&format!(
+                    "¿Borrar el runtime '{}'? umu lo reinstalará en el próximo lanzamiento.",
+                    dir.display()
+                ))?
+            {
+                log::info("Cancelado.");
+                return Ok(());
+            }
+            gta_mo_core::umu::reinstall_runtime()?;
+            log::info(format!(
+                "Runtime eliminado ({}). Se reinstalará al lanzar.",
+                dir.display()
+            ));
+            Ok(())
+        }
+    }
+}
+
+/// Formats a byte count in a human-friendly way.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 

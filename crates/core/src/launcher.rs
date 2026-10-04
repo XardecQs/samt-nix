@@ -178,6 +178,14 @@ impl LaunchEngine {
                 "0"
             },
         );
+        // umu-launcher re-checks and re-downloads its steamrt runtime on every
+        // launch. When the upstream digest mismatches (bad cache/mirror) that
+        // fails noisily and wastes time even though the runtime already works,
+        // so it is disabled by default (see Config::umu_runtime_update).
+        std::env::set_var(
+            "UMU_RUNTIME_UPDATE",
+            if cfg.umu_runtime_update() { "1" } else { "0" },
+        );
 
         if cfg.proton_disable_upscalers() {
             // GE/CachyOS Proton's protonfixes setup_upscalers() downloads and
@@ -959,6 +967,10 @@ impl LaunchEngine {
             cfg.proton_disable_upscalers()
         ));
         out.push_str(&format!(
+            "UMU_RUNTIME_UPDATE:        {}\n",
+            cfg.umu_runtime_update()
+        ));
+        out.push_str(&format!(
             "AUTO_DISCOVER:             {}\n",
             cfg.auto_discover()
         ));
@@ -1061,6 +1073,7 @@ mod tests {
             proton_use_wined3d: None,
             proton_disable_ntsync: None,
             proton_disable_upscalers: None,
+            umu_runtime_update: None,
             dxvk_hud: None,
             auto_discover: None,
             mods_dir: None,
@@ -1091,6 +1104,27 @@ mod tests {
         assert!(UPSCALER_VARS
             .iter()
             .all(|var| std::env::var_os(var).is_none()));
+    }
+
+    #[test]
+    fn umu_runtime_update_disabled_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let cfg = base_config();
+        assert!(!cfg.umu_runtime_update());
+        LaunchEngine::setup_env(&cfg, Path::new("/tmp/pfx"), Path::new("/tmp/logs"), false);
+        assert_eq!(std::env::var("UMU_RUNTIME_UPDATE").unwrap(), "0");
+        std::env::remove_var("UMU_RUNTIME_UPDATE");
+    }
+
+    #[test]
+    fn umu_runtime_update_can_be_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut cfg = base_config();
+        cfg.umu_runtime_update = Some(true);
+        assert!(cfg.umu_runtime_update());
+        LaunchEngine::setup_env(&cfg, Path::new("/tmp/pfx"), Path::new("/tmp/logs"), false);
+        assert_eq!(std::env::var("UMU_RUNTIME_UPDATE").unwrap(), "1");
+        std::env::remove_var("UMU_RUNTIME_UPDATE");
     }
 
     #[test]

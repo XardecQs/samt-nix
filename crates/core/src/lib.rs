@@ -11,5 +11,6 @@ pub mod modloader;
 pub mod mount_state;
 pub mod overlay;
 pub mod resolver;
+pub mod umu;
 pub mod upper;
 pub mod userdata;

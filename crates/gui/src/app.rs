@@ -131,6 +131,7 @@ enum ConfirmAction {
     DeleteUserData(Vec<String>),
     DiscardUpper(Vec<String>),
     UnmountDiscard,
+    ReinstallRuntime,
 }
 
 struct ConfirmState {
@@ -206,6 +207,7 @@ pub struct GtaMoApp {
     show_preferences: bool,
     show_about: bool,
     show_shortcuts: bool,
+    show_runtime: bool,
     focus_search: bool,
     toasts: crate::toasts::Toasts,
     lightbox: Option<crate::lightbox::Lightbox>,
@@ -306,6 +308,7 @@ impl GtaMoApp {
             show_preferences: false,
             show_about: false,
             show_shortcuts: false,
+            show_runtime: false,
             focus_search: false,
             toasts: crate::toasts::Toasts::new(),
             lightbox: None,
@@ -357,6 +360,7 @@ impl GtaMoApp {
             || self.show_preferences
             || self.show_about
             || self.show_shortcuts
+            || self.show_runtime
     }
 
     /// Persists a browser's UI state (view/sort/thumbnail size) when it changed.
@@ -995,7 +999,8 @@ impl eframe::App for GtaMoApp {
                 || self.notes_editor.is_some()
                 || self.show_preferences
                 || self.show_about
-                || self.show_shortcuts)
+                || self.show_shortcuts
+                || self.show_runtime)
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             self.input = None;
@@ -1005,6 +1010,7 @@ impl eframe::App for GtaMoApp {
             self.show_preferences = false;
             self.show_about = false;
             self.show_shortcuts = false;
+            self.show_runtime = false;
         }
 
         // Force a reflow after a window resize so every layout (including the
@@ -1297,6 +1303,25 @@ impl eframe::App for GtaMoApp {
         }
         if self.show_shortcuts {
             crate::about::show_shortcuts(ctx, &mut self.show_shortcuts);
+        }
+        if self.show_runtime {
+            if let Some(action) = crate::runtime::show_runtime(ctx, &mut self.show_runtime) {
+                match action {
+                    crate::runtime::RuntimeAction::Clean => {
+                        self.exec(vec!["ctl".into(), "runtime".into(), "clean".into()], false);
+                    }
+                    crate::runtime::RuntimeAction::Reinstall => {
+                        self.show_runtime = false;
+                        self.confirm = Some(ConfirmState {
+                            title: "Reinstalar runtime de umu".into(),
+                            message: "Se borrará el runtime instalado de steamrt4 y umu lo \
+                                      reinstalará en el próximo lanzamiento."
+                                .into(),
+                            action: ConfirmAction::ReinstallRuntime,
+                        });
+                    }
+                }
+            }
         }
 
         self.ui_lightbox(ctx);
@@ -4417,6 +4442,17 @@ impl GtaMoApp {
             ConfirmAction::UnmountDiscard => {
                 self.exec(vec!["unmount".into(), "--discard".into()], false);
             }
+            ConfirmAction::ReinstallRuntime => {
+                self.exec(
+                    vec![
+                        "ctl".into(),
+                        "runtime".into(),
+                        "reinstall".into(),
+                        "--yes".into(),
+                    ],
+                    false,
+                );
+            }
         }
     }
 }
@@ -4803,6 +4839,13 @@ fn app_menu_items(
         .clicked()
     {
         app.show_shortcuts = true;
+        ui.close();
+    }
+    if ui
+        .button(format!("{} Runtime de umu…", crate::icons::REFRESH))
+        .clicked()
+    {
+        app.show_runtime = true;
         ui.close();
     }
     ui.separator();

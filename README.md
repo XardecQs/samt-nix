@@ -177,6 +177,7 @@ proton_disable_ntsync = false
 auto_discover = true
 # default_profile = "vanilla"   # used by `launch` when --profile is not given
 # proton_disable_upscalers = false   # true = stop Proton (GE/CachyOS) from downloading/upgrading FSR/DLSS/XeSS/OptiScaler DLLs
+# umu_runtime_update = false   # true = let umu-launcher update its steamrt4 runtime on launch
 # Optional: custom mods directory (defaults to game_root/mods)
 # mods_dir = "/path/to/mods"
 ```
@@ -187,6 +188,17 @@ auto_discover = true
 > `PROTON_*_UPGRADE=0` and skip that. This works fully on GE-Proton; recent
 > CachyOS builds may still fetch the FSR4 DLL on first use (their code enables
 > it unconditionally), though the upgrade will not be applied to the game.
+
+> **umu runtime (steamrt4)**: `umu-launcher` re-checks its steamrt runtime on
+> every launch and, if the upstream archive digest does not match (a corrupted
+> cache or a bad mirror), aborts the download with `Digest mismatched` while the
+> game still starts with the installed runtime. gta-mo sets
+> `UMU_RUNTIME_UPDATE=0` by default (`umu_runtime_update = false`) so an
+> already-installed runtime is reused as-is. Inspect it with
+> `gta-mo ctl runtime status`, and use `ctl runtime clean` (downloads cache) or
+> `ctl runtime reinstall` (force umu to re-download on the next launch) to repair
+> a broken install. Set `umu_runtime_update = true` to re-enable automatic
+> updates.
 
 ## Mod packaging (`mod.toml`)
 
@@ -472,6 +484,9 @@ gta-mo ctl option unset <id|folder> <group> [--profile <name>]
 gta-mo ctl health [--conflicts]
 gta-mo ctl conflicts [--json]
 gta-mo ctl which <game-relative-path>
+gta-mo ctl runtime status [--json]             # umu/steamrt runtime + cache state
+gta-mo ctl runtime clean                        # delete umu's partial-download cache
+gta-mo ctl runtime reinstall [--yes]            # remove steamrt4 so umu re-downloads it
 gta-mo ctl export [<file>]
 gta-mo ctl import <file> [--force]
 ```

@@ -18,6 +18,7 @@ let
     # game_exe = "gta_sa.exe"
     # proton_use_wined3d = true
     # proton_disable_ntsync = false
+    # umu_runtime_update = false
     # auto_discover = false
     # dxvk_hud = "devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls"
     # mods_dir = "/home/user/path/to/custom/mods"

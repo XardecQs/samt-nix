@@ -335,6 +335,27 @@ pub enum CtlCommand {
         #[command(subcommand)]
         action: OptionAction,
     },
+    #[command(about = "Inspect or repair the umu-launcher/steamrt runtime")]
+    Runtime {
+        #[command(subcommand)]
+        action: RuntimeAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RuntimeAction {
+    #[command(about = "Show the installed umu runtime and cache state")]
+    Status {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+    #[command(about = "Delete umu's partial-download cache")]
+    Clean,
+    #[command(about = "Remove the installed steamrt runtime so umu reinstalls it")]
+    Reinstall {
+        #[arg(long, help = "Skip confirmation")]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]

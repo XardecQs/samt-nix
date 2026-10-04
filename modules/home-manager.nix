@@ -56,6 +56,7 @@ in {
           game_exe = "gta_sa.exe";
           proton_use_wined3d = false;
           proton_disable_ntsync = false;
+          umu_runtime_update = false;
           auto_discover = true;
           dxvk_hud = "devinfo,fps,frametimes";
           mods_dir = "/home/user/Games/GTA_SA/custom_mods";
