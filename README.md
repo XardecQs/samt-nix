@@ -738,7 +738,8 @@ In the detail panel, clicking the cover or any screenshot opens a **full-screen
 image viewer** with previous/next arrows, a counter and page dots (also `←`/`→`
 and `Esc`, or click the backdrop). The viewer and its controls scale to fit the
 window on both axes, and the image animates from its thumbnail (shared-element
-"hero" transition).
+"hero" transition). Animated **GIF** files play in the viewer (via the
+`egui_extras` gif loader); `bmp` and `gif` also get static thumbnails.
 
 ### Motion
 

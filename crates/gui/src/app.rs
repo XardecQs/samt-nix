@@ -248,6 +248,8 @@ impl GtaMoApp {
         cc.egui_ctx
             .set_pixels_per_point(base_ppp * settings.ui_scale);
         crate::fonts::install(&cc.egui_ctx);
+        // Enables `egui::Image` file loading (needed for animated GIFs).
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         cc.egui_ctx.set_theme(settings.theme.to_egui());
         theme::apply(&cc.egui_ctx, settings.theme_config());
         apply_style(&cc.egui_ctx, &settings);
@@ -3975,52 +3977,76 @@ impl GtaMoApp {
 
                 // Image: fit "contain" inside the current view, centered.
                 let area = view.shrink(margin);
-                match &tex {
-                    Some(tex) => {
-                        let size = tex.size_vec2();
-                        let target = contain_rect(area, size);
-                        let rect = match source {
-                            Some(s) if hero < 1.0 => egui::Rect::from_min_max(
-                                crate::motion::lerp_pos(s.left_top(), target.left_top(), hero),
-                                crate::motion::lerp_pos(
-                                    s.right_bottom(),
-                                    target.right_bottom(),
-                                    hero,
+                let is_gif = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("gif"))
+                    .unwrap_or(false);
+                if is_gif {
+                    // Animated GIF: decode/play it through the egui_extras loader.
+                    let uri = format!("file://{}", path.display());
+                    ui.put(
+                        area,
+                        egui::Image::new(uri)
+                            .max_size(area.size())
+                            .maintain_aspect_ratio(true),
+                    );
+                    let _ = ui.interact(area, egui::Id::new("lb_image"), egui::Sense::click());
+                } else {
+                    match &tex {
+                        Some(tex) => {
+                            let size = tex.size_vec2();
+                            let target = contain_rect(area, size);
+                            let rect = match source {
+                                Some(s) if hero < 1.0 => egui::Rect::from_min_max(
+                                    crate::motion::lerp_pos(s.left_top(), target.left_top(), hero),
+                                    crate::motion::lerp_pos(
+                                        s.right_bottom(),
+                                        target.right_bottom(),
+                                        hero,
+                                    ),
                                 ),
-                            ),
-                            _ => target,
-                        };
-                        ui.painter().image(
-                            tex.id(),
-                            rect,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
-                        );
-                        // Clicks on the image itself do nothing (only the margins
-                        // close), matching the previous modal behaviour.
-                        let _ = ui.interact(rect, egui::Id::new("lb_image"), egui::Sense::click());
-                    }
-                    None => {
-                        if loading && !timed_out {
-                            ui.put(
-                                egui::Rect::from_center_size(area.center(), egui::vec2(30.0, 30.0)),
-                                egui::Spinner::new(),
+                                _ => target,
+                            };
+                            ui.painter().image(
+                                tex.id(),
+                                rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                egui::Color32::WHITE,
                             );
-                            ui.painter().text(
-                                area.center() + egui::vec2(0.0, 28.0),
-                                egui::Align2::CENTER_CENTER,
-                                "Cargando…",
-                                egui::FontId::proportional(14.0),
-                                egui::Color32::from_white_alpha(200),
-                            );
-                        } else {
-                            ui.painter().text(
-                                area.center(),
-                                egui::Align2::CENTER_CENTER,
-                                "No se pudo cargar la imagen",
-                                egui::FontId::proportional(15.0),
-                                palette.danger,
-                            );
+                            // Clicks on the image itself do nothing (only the margins
+                            // close), matching the previous modal behaviour.
+                            let _ =
+                                ui.interact(rect, egui::Id::new("lb_image"), egui::Sense::click());
+                        }
+                        None => {
+                            if loading && !timed_out {
+                                ui.put(
+                                    egui::Rect::from_center_size(
+                                        area.center(),
+                                        egui::vec2(30.0, 30.0),
+                                    ),
+                                    egui::Spinner::new(),
+                                );
+                                ui.painter().text(
+                                    area.center() + egui::vec2(0.0, 28.0),
+                                    egui::Align2::CENTER_CENTER,
+                                    "Cargando…",
+                                    egui::FontId::proportional(14.0),
+                                    egui::Color32::from_white_alpha(200),
+                                );
+                            } else {
+                                ui.painter().text(
+                                    area.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "No se pudo cargar la imagen",
+                                    egui::FontId::proportional(15.0),
+                                    palette.danger,
+                                );
+                            }
                         }
                     }
                 }

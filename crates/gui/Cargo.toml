@@ -12,9 +12,10 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 eframe = "0.32"
+egui_extras = { version = "0.32", default-features = false, features = ["file", "image", "gif"] }
 egui_graphs = "0.28"
 gta-mo-core = { path = "../core" }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 libc = "0.2"
 petgraph = "0.8"
 rusqlite = { version = "0.31", features = ["bundled"] }
