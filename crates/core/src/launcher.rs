@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::{config, db, mount_state, overlay, preload, preload::PreloadMode, resolver, upper};
 
@@ -696,14 +696,28 @@ impl LaunchEngine {
         false
     }
 
-    /// True once DXVK's d3d9 log shows it created the device (a good proxy for
-    /// "the game window is up").
-    fn dxvk_ready(log_dir: &Path, game_exe: &str) -> bool {
+    /// Path of DXVK's d3d9 log for `game_exe`.
+    fn dxvk_log_path(log_dir: &Path, game_exe: &str) -> PathBuf {
         let stem = Path::new(game_exe)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(game_exe);
-        let path = log_dir.join(format!("{stem}_d3d9.log"));
+        log_dir.join(format!("{stem}_d3d9.log"))
+    }
+
+    /// True once DXVK's d3d9 log shows it created the device (a good proxy for
+    /// "the game window is up"). The log must be newer than `since`, otherwise
+    /// a stale file from a previous launch would report success immediately.
+    fn dxvk_ready(log_dir: &Path, game_exe: &str, since: SystemTime) -> bool {
+        let path = Self::dxvk_log_path(log_dir, game_exe);
+        let Ok(md) = std::fs::metadata(&path) else {
+            return false;
+        };
+        // Allow a small tolerance for coarse filesystem timestamp granularity.
+        let since = since - Duration::from_secs(2);
+        if md.modified().map(|m| m < since).unwrap_or(true) {
+            return false;
+        }
         std::fs::read_to_string(path)
             .map(|s| s.contains("DXVK:") && s.contains("Creating device"))
             .unwrap_or(false)
@@ -711,10 +725,12 @@ impl LaunchEngine {
 
     /// Background thread that reports "time to game process" and "time to DXVK
     /// device" (window proxy) while `umu`/Proton runs.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_watcher(
         game_exe: String,
         log_dir: PathBuf,
         started: Instant,
+        started_wall: SystemTime,
         report: bool,
         watcher_stop: Arc<AtomicBool>,
         preload_stop: Arc<AtomicBool>,
@@ -746,7 +762,7 @@ impl LaunchEngine {
                             started.elapsed().as_secs_f64()
                         ));
                     }
-                    if !dxvk_done && Self::dxvk_ready(&log_dir, &game_exe) {
+                    if !dxvk_done && Self::dxvk_ready(&log_dir, &game_exe, started_wall) {
                         dxvk_done = true;
                         emit(format!(
                             "⏱ DXVK listo (≈ ventana): {:.2}s",
@@ -885,6 +901,14 @@ impl LaunchEngine {
             }
         }
 
+        // Drop DXVK's d3d9 log from the previous launch so the watcher cannot
+        // mistake it for this session's "device created" signal.
+        let _ = std::fs::remove_file(Self::dxvk_log_path(
+            &prepared.ppaths.log_dir,
+            boot.cfg.game_exe(),
+        ));
+        let launch_wall = SystemTime::now();
+
         let watcher_stop = Arc::new(AtomicBool::new(false));
         let watcher_log = launch_log.map(|l| l.path().to_path_buf());
         // The watcher also stops the preloader once the game starts, so it runs
@@ -894,6 +918,7 @@ impl LaunchEngine {
                 boot.cfg.game_exe().to_string(),
                 prepared.ppaths.log_dir.clone(),
                 timer.start_instant(),
+                launch_wall,
                 boot.cfg.timings(),
                 watcher_stop.clone(),
                 preload_stop.clone(),
