@@ -55,3 +55,21 @@ jobs:
 
       - name: Check licenses, bans and sources
         run: cargo deny --all-features check
+
+  nix:
+    name: nix flake and packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Evaluate the flake (packages, checks, modules)
+        run: nix flake check --no-build
+
+      - name: Build the CLI and GUI packages
+        run: nix build -L .#gta-mod-organizer .#gta-mo-gui

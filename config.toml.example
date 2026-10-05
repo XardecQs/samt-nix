@@ -1,9 +1,10 @@
 # GTA Mod Organizer — Configuration template
 #
-# Copy this file to `config.toml` (next to the binary, or in the repo root)
-# and edit the paths. gta-mo looks for it in this order:
+# Copy this file to ~/.config/gta-mo/config.toml (recommended; this is what the
+# GUI and a normal install read) and edit the paths. gta-mo looks for it in this
+# order, so a ./config.toml in the current directory takes precedence:
 #   1. $GTA_MO_CONFIG
-#   2. ./config.toml
+#   2. ./config.toml (current working directory)
 #   3. $XDG_CONFIG_HOME/gta-mo/config.toml
 #
 # The database lives at $GTA_MO_DB or $XDG_DATA_HOME/gta-mo/organizer.db.
@@ -19,7 +20,7 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 # proton_disable_ntsync = false
 # proton_disable_upscalers = false   # true = evitar que Proton (GE/CachyOS) descargue/actualice upscalers (FSR/DLSS/XeSS/OptiScaler)
 # umu_runtime_update = false         # true = permitir que umu-launcher actualice su runtime steamrt4 al lanzar
-# auto_discover = true
+# auto_discover = false
 # default_profile = "vanilla"   # used by `launch` when --profile is not given
 # dxvk_hud = "devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls"
 # mods_dir = "/path/to/mods"    # defaults to game_root/mods
@@ -48,6 +49,7 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 #
 # Also copy into the tmpfs prefix the Wine DLLs that the prefix symlinks from
 # the Proton install (they otherwise stay on disk and cause cold-load stalls).
+# This only affects the tmpfs copy: the on-disk prefix keeps its symlinks.
 # prefix_ram_proton = true
 #
 # Prefetch the Proton runtime and umu's steamrt4 into the page cache in the

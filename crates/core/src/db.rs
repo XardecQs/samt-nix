@@ -724,14 +724,43 @@ pub fn groups_of_mod_in_profile(
 
 pub fn ensure_db_dir(db_path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        create_private_dir(parent)?;
     }
     Ok(())
 }
 
+/// Creates the DB directory with mode `0700` (the DB can hold user notes), the
+/// same hardening the launcher lock directory uses.
+#[cfg(unix)]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+/// Restricts the DB file to its owner (`0600`).
+#[cfg(unix)]
+fn restrict_db_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn restrict_db_file(_path: &Path) {}
+
 pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
     ensure_db_dir(db_path)?;
     let conn = Connection::open(db_path)?;
+    restrict_db_file(db_path);
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA journal_mode = WAL;
@@ -2494,6 +2523,28 @@ mod tests {
 
         let err = clean_orphans(&conn, &missing).unwrap_err();
         assert!(err.to_string().contains("no existe"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn db_directory_and_file_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("gta-mo-dbperm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let db = base.join("gta-mo/test.db");
+
+        drop(open_db(&db).unwrap());
+
+        let dir_mode = std::fs::metadata(db.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "el directorio de la BD debe ser 0700");
+        let file_mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "el fichero de la BD debe ser 0600");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
