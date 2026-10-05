@@ -2022,22 +2022,29 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
     }
 
     let mut disk_folders: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(mods_dir) {
-        for entry in entries.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') {
-                    continue;
-                }
-                if !crate::meta::overlay_safe_folder(&name) {
-                    log::warn(format!(
-                        "    [!] Carpeta ignorada '{name}': contiene ',' o ':' y no se puede \
-                         usar como capa de overlay"
-                    ));
-                    continue;
-                }
-                disk_folders.push(name);
+    // If the directory exists but cannot be read (permissions, an unmounted
+    // filesystem, I/O error) fail loudly instead of treating it as empty and
+    // disabling every mod in every profile.
+    let entries = std::fs::read_dir(mods_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "No se pudo leer el directorio de mods '{}': {e}",
+            mods_dir.display()
+        )
+    })?;
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
             }
+            if !crate::meta::overlay_safe_folder(&name) {
+                log::warn(format!(
+                    "    [!] Carpeta ignorada '{name}': contiene ',' o ':' y no se puede \
+                     usar como capa de overlay"
+                ));
+                continue;
+            }
+            disk_folders.push(name);
         }
     }
 
@@ -2191,6 +2198,14 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
 }
 
 pub fn clean_orphans(conn: &Connection, mods_dir: &Path) -> anyhow::Result<usize> {
+    // Never delete state when the mods directory is missing/unreadable: a
+    // transient mount or permission problem would otherwise wipe every mod.
+    if !mods_dir.is_dir() {
+        anyhow::bail!(
+            "El directorio de mods no existe o no es un directorio: {}",
+            mods_dir.display()
+        );
+    }
     let all_mods = load_all_mods(conn)?;
     let mut deleted = 0usize;
 
@@ -2449,6 +2464,36 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_fails_when_mods_dir_is_not_readable() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        // A regular file where the mods directory is expected: `exists()` is
+        // true but `read_dir` fails, which used to look like "no mods".
+        let path = std::env::temp_dir().join(format!("gta-mo-disc-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::write(&path, b"not a dir").unwrap();
+
+        let err = discover_mods(&conn, &path).unwrap_err();
+        assert!(err.to_string().contains("No se pudo leer"), "{err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn clean_orphans_refuses_missing_mods_dir() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        let missing =
+            std::env::temp_dir().join(format!("gta-mo-clean-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+
+        let err = clean_orphans(&conn, &missing).unwrap_err();
+        assert!(err.to_string().contains("no existe"), "{err}");
     }
 
     #[test]

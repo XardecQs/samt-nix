@@ -186,7 +186,9 @@ impl PreparedPrefix {
         if tmpfs.is_dir() {
             // Exclude the materialized Proton files so the back-sync does not
             // replace the on-disk symlinks with (bloated) regular file copies.
-            match rsync(&tmpfs, &self.disk, false, &self.materialized) {
+            // `--delete` propagates files removed during the session; excluded
+            // paths are protected from deletion by rsync.
+            match rsync(&tmpfs, &self.disk, true, &self.materialized) {
                 Ok(()) => {
                     if let Some(parent) = tmpfs.parent() {
                         let _ = std::fs::write(
