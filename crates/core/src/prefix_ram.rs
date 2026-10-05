@@ -51,6 +51,10 @@ pub struct PreparedPrefix {
     disk: PathBuf,
     tmpfs: Option<PathBuf>,
     proton: Option<PathBuf>,
+    /// Paths (relative to the prefix root) that were materialized from Proton
+    /// symlinks. They are excluded from the back-sync so the on-disk prefix
+    /// keeps its symlinks instead of being replaced by regular file copies.
+    materialized: Vec<PathBuf>,
     report: PrepareReport,
 }
 
@@ -84,6 +88,7 @@ impl PreparedPrefix {
             disk: disk.to_path_buf(),
             tmpfs: None,
             proton: None,
+            materialized: Vec::new(),
             report,
         };
 
@@ -108,6 +113,7 @@ impl PreparedPrefix {
                 disk: disk.to_path_buf(),
                 tmpfs: Some(tmpfs),
                 proton: proton.map(Path::to_path_buf),
+                materialized: Vec::new(),
                 report: PrepareReport {
                     copied: false,
                     reused: true,
@@ -115,6 +121,16 @@ impl PreparedPrefix {
                     elapsed: Duration::ZERO,
                 },
             };
+        }
+
+        // Create the tmpfs root first: `free_bytes` returns `None` for a
+        // non-existent path, which would silently skip the space check.
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            log::warn(format!(
+                "prefix_ram: no se pudo crear {}: {e}",
+                root.display()
+            ));
+            return disk_only(PrepareReport::default());
         }
 
         let needed = signature_bytes(disk) + SPACE_MARGIN;
@@ -126,29 +142,21 @@ impl PreparedPrefix {
             return disk_only(PrepareReport::default());
         }
 
-        if let Err(e) = std::fs::create_dir_all(&root) {
-            log::warn(format!(
-                "prefix_ram: no se pudo crear {}: {e}",
-                root.display()
-            ));
-            return disk_only(PrepareReport::default());
-        }
-
         let started = Instant::now();
-        if let Err(e) = rsync(disk, &tmpfs, true) {
+        if let Err(e) = rsync(disk, &tmpfs, true, &[]) {
             log::warn(format!(
                 "prefix_ram: copia a tmpfs falló ({e}); usando disco."
             ));
             let _ = std::fs::remove_dir_all(&tmpfs);
             return disk_only(PrepareReport::default());
         }
-        let materialized = if materialize_proton {
+        let (materialized, materialized_paths) = if materialize_proton {
             match proton {
                 Some(proton) => materialize_proton_symlinks(&tmpfs, proton),
-                None => 0,
+                None => (0, Vec::new()),
             }
         } else {
-            0
+            (0, Vec::new())
         };
         let _ = std::fs::write(&marker, &signature);
 
@@ -157,6 +165,7 @@ impl PreparedPrefix {
             disk: disk.to_path_buf(),
             tmpfs: Some(tmpfs),
             proton: proton.map(Path::to_path_buf),
+            materialized: materialized_paths,
             report: PrepareReport {
                 copied: true,
                 reused: false,
@@ -175,7 +184,9 @@ impl PreparedPrefix {
         };
         let started = Instant::now();
         if tmpfs.is_dir() {
-            match rsync(&tmpfs, &self.disk, false) {
+            // Exclude the materialized Proton files so the back-sync does not
+            // replace the on-disk symlinks with (bloated) regular file copies.
+            match rsync(&tmpfs, &self.disk, false, &self.materialized) {
                 Ok(()) => {
                     if let Some(parent) = tmpfs.parent() {
                         let _ = std::fs::write(
@@ -283,11 +294,17 @@ fn ram_root() -> Option<PathBuf> {
 /// Recursively copies `src`'s contents into `dst` with `rsync -rlpt` (symlinks,
 /// permissions and times preserved; no owner/group, which avoids privilege
 /// issues inside the Steam user namespace).
-fn rsync(src: &Path, dst: &Path, delete: bool) -> std::io::Result<()> {
+fn rsync(src: &Path, dst: &Path, delete: bool, excludes: &[PathBuf]) -> std::io::Result<()> {
     let mut cmd = Command::new("rsync");
     cmd.arg("-rlpt").arg("--no-owner").arg("--no-group");
     if delete {
         cmd.arg("--delete");
+    }
+    // Anchored excludes (leading `/`) relative to the transfer root. rsync
+    // protects excluded files from `--delete` unless `--delete-excluded` is set.
+    for e in excludes {
+        cmd.arg("--exclude")
+            .arg(format!("/{}", e.to_string_lossy().replace('\\', "/")));
     }
     let src_contents = format!("{}/", src.display());
     let out = cmd
@@ -329,10 +346,11 @@ fn prefix_signature(disk: &Path, proton: Option<&Path>) -> String {
 /// Replaces the prefix's file symlinks that resolve inside `proton` with real
 /// copies, so Wine loads its system DLLs from the tmpfs (RAM) instead of the
 /// Proton install on disk. Directory symlinks (`dosdevices`, …) are left as-is.
-fn materialize_proton_symlinks(prefix: &Path, proton: &Path) -> u64 {
+fn materialize_proton_symlinks(prefix: &Path, proton: &Path) -> (u64, Vec<PathBuf>) {
     let proton_canon = std::fs::canonicalize(proton).ok();
     let mut stack = vec![prefix.to_path_buf()];
     let mut bytes = 0u64;
+    let mut materialized = Vec::new();
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -365,23 +383,37 @@ fn materialize_proton_symlinks(prefix: &Path, proton: &Path) -> u64 {
             let Ok(content) = std::fs::read(&real) else {
                 continue;
             };
-            if std::fs::remove_file(&path).is_err() {
+            // Write to a sibling temp file and rename over the symlink: rename
+            // is atomic and never leaves the DLL missing if the write fails.
+            let Some(dir) = path.parent() else { continue };
+            let tmp = dir.join(format!(
+                ".{}.gta-mo-tmp-{}",
+                entry.file_name().to_string_lossy(),
+                std::process::id()
+            ));
+            if std::fs::write(&tmp, &content).is_err() {
+                let _ = std::fs::remove_file(&tmp);
                 continue;
             }
-            if std::fs::write(&path, &content).is_ok() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &path,
-                        std::fs::Permissions::from_mode(md.permissions().mode()),
-                    );
-                }
-                bytes += md.len();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &tmp,
+                    std::fs::Permissions::from_mode(md.permissions().mode()),
+                );
             }
+            if std::fs::rename(&tmp, &path).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+                continue;
+            }
+            if let Ok(rel) = path.strip_prefix(prefix) {
+                materialized.push(rel.to_path_buf());
+            }
+            bytes += md.len();
         }
     }
-    bytes
+    (bytes, materialized)
 }
 
 fn signature_bytes(disk: &Path) -> u64 {
@@ -435,6 +467,10 @@ fn free_bytes(_path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // `RAM_DIR_ENV` is process-global, so tests that set it must serialize.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn tmp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("gta-mo-{name}-{}", std::process::id()))
@@ -469,6 +505,7 @@ mod tests {
         if !Path::new("/dev/shm").is_dir() {
             return;
         }
+        let _guard = ENV_LOCK.lock().unwrap();
         let root = PathBuf::from("/dev/shm/gta-mo-test");
         let _ = std::fs::remove_dir_all(&root);
         std::env::set_var(RAM_DIR_ENV, root.display().to_string());
@@ -502,6 +539,49 @@ mod tests {
 
         std::env::remove_var(RAM_DIR_ENV);
         let _ = std::fs::remove_dir_all(&disk);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalize_keeps_disk_symlinks() {
+        if !Path::new("/dev/shm").is_dir() {
+            return;
+        }
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = PathBuf::from("/dev/shm/gta-mo-symlink-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var(RAM_DIR_ENV, root.display().to_string());
+
+        // Fake Proton install with a real DLL.
+        let proton = tmp("proton");
+        let _ = std::fs::remove_dir_all(&proton);
+        std::fs::create_dir_all(proton.join("files/lib/wine")).unwrap();
+        std::fs::write(proton.join("files/lib/wine/advapi32.dll"), b"dll").unwrap();
+
+        // Prefix whose DLL is a symlink into Proton (as a fresh prefix has).
+        let disk = tmp("symlink-pfx");
+        let _ = std::fs::remove_dir_all(&disk);
+        std::fs::create_dir_all(disk.join("drive_c/windows/system32")).unwrap();
+        let link = disk.join("drive_c/windows/system32/advapi32.dll");
+        std::os::unix::fs::symlink(proton.join("files/lib/wine/advapi32.dll"), &link).unwrap();
+
+        let p = PreparedPrefix::prepare(&disk, true, Some(&proton), true);
+        assert!(p.using_tmpfs());
+        assert!(p.report().materialized > 0, "debió materializar el DLL");
+        let sync = p.finalize();
+        assert!(sync.synced);
+
+        // The on-disk path must still be a symlink, not a regular copy.
+        let md = std::fs::symlink_metadata(&link).unwrap();
+        assert!(
+            md.file_type().is_symlink(),
+            "el back-sync reemplazó el symlink del disco"
+        );
+
+        std::env::remove_var(RAM_DIR_ENV);
+        let _ = std::fs::remove_dir_all(&disk);
+        let _ = std::fs::remove_dir_all(&proton);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
