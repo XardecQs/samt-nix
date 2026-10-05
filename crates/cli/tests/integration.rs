@@ -1092,6 +1092,30 @@ fn upper_capture_creates_and_registers_a_mod() {
 }
 
 #[test]
+fn upper_capture_rejects_path_traversal() {
+    let t = TempDb::new("uppercap-traversal");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    let upper = game_root.join("run/profiles/default/upper");
+    std::fs::create_dir_all(upper.join("models")).unwrap();
+    std::fs::write(upper.join("models/x.dff"), "x").unwrap();
+
+    for bad in ["../escape", "sub/dir", "/tmp/absolute-escape"] {
+        let out = t.run(&["ctl", "upper", "capture", bad]);
+        assert!(
+            !out.status.success(),
+            "'{bad}' debería rechazarse\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(!game_root.join("escape").exists());
+    assert!(!game_root.join("mods/sub").exists());
+}
+
+#[test]
 fn mount_dry_run_and_status_need_no_overlay() {
     let t = TempDb::new("mountdry");
     let game_root = t.dir.join("game");

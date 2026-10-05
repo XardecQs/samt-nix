@@ -252,6 +252,17 @@ pub fn capture(
     if name.trim().is_empty() {
         anyhow::bail!("El nombre del mod no puede estar vacío.");
     }
+    // Defense in depth: `name` must be a single, relative path component.
+    if name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || name.contains(',')
+        || name == "."
+        || name == ".."
+        || Path::new(name).is_absolute()
+    {
+        anyhow::bail!("Nombre de mod inválido: '{name}'.");
+    }
     if dest_mod_dir.exists() {
         anyhow::bail!(
             "El destino ya existe: {} (usa otro nombre de mod)",

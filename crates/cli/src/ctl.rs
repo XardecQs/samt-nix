@@ -3005,6 +3005,11 @@ fn cmd_upper(
             if !source.is_dir() {
                 anyhow::bail!("El upper no existe: {}", source.display());
             }
+            if !valid_folder_name(name) {
+                anyhow::bail!(
+                    "Nombre de mod inválido: '{name}' (sin separadores ni rutas absolutas)."
+                );
+            }
             let dest = paths.mods_dir.join(name);
             let report =
                 gta_mo_core::upper::capture(&source, &dest, name, spec.user_data_dir, true)?;
