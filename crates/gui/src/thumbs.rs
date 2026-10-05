@@ -389,7 +389,13 @@ impl ThumbCache {
 impl Drop for ThumbCache {
     fn drop(&mut self) {
         if let Some(shared) = &self.shared {
-            shared.shutdown.store(true, Ordering::SeqCst);
+            // Set the flag while holding the same lock `pop` uses, otherwise a
+            // worker that already checked the flag and is about to wait on the
+            // condvar would miss the notification and hang `join` forever.
+            {
+                let _guard = shared.queue.lock().unwrap();
+                shared.shutdown.store(true, Ordering::SeqCst);
+            }
             shared.cv.notify_all();
         }
         // Drop the sender so workers blocked on `send` can finish.

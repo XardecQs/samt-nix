@@ -10,8 +10,11 @@ pub enum RuntimeAction {
     Reinstall,
 }
 
-pub fn show_runtime(ctx: &egui::Context, open: &mut bool) -> Option<RuntimeAction> {
-    let st = gta_mo_core::umu::status();
+pub fn show_runtime(
+    ctx: &egui::Context,
+    open: &mut bool,
+    st: &gta_mo_core::umu::RuntimeStatus,
+) -> Option<RuntimeAction> {
     let mut close = false;
     let mut action = None;
 

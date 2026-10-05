@@ -24,6 +24,24 @@ pub enum GuiEvent {
     Detached(bool, String),
     /// Upper scan for the Overwrite tab: `(gen, rows, deletions)`.
     UpperScan(u64, Vec<UpperView>, usize),
+    /// Result of a background refresh: `(gen, payload)`.
+    Snapshot(u64, Box<RefreshPayload>),
+}
+
+/// Everything a background refresh computes away from the UI thread.
+#[derive(Debug)]
+pub struct RefreshPayload {
+    pub snapshot: Result<Snapshot, String>,
+    pub userdata: UserdataPayload,
+}
+
+/// Profile user data (saves/tracks/screenshots) plus PortableGTA status.
+#[derive(Debug)]
+pub struct UserdataPayload {
+    pub entries: Vec<gta_mo_core::userdata::Entry>,
+    pub base: Option<PathBuf>,
+    pub portablegta: bool,
+    pub error: Option<String>,
 }
 
 /// One file in a profile's overlay upper (overwrite layer).
@@ -420,6 +438,59 @@ impl Backend {
             options_by_folder,
             edges,
         })
+    }
+
+    /// Builds the [`Snapshot`] and the profile user-data scan on a background
+    /// thread (a fresh [`Backend`] with its own DB connection), so the UI thread
+    /// never blocks reading every `mod.toml` or walking the saves folder.
+    /// Results arrive as [`GuiEvent::Snapshot`].
+    pub fn refresh_async(gen: u64, tx: Sender<GuiEvent>) {
+        thread::spawn(move || {
+            let backend = Backend::new();
+            let snapshot = backend.snapshot();
+            let userdata = backend.userdata_payload(&snapshot);
+            let _ = tx.send(GuiEvent::Snapshot(
+                gen,
+                Box::new(RefreshPayload { snapshot, userdata }),
+            ));
+        });
+    }
+
+    /// Scans the active profile's user-data folder. Runs off the UI thread as
+    /// part of [`Self::refresh_async`].
+    fn userdata_payload(&self, snapshot: &Result<Snapshot, String>) -> UserdataPayload {
+        let none = |error: Option<String>| UserdataPayload {
+            entries: Vec::new(),
+            base: None,
+            portablegta: false,
+            error,
+        };
+        let cfg = match config::load_config() {
+            Ok(c) => c,
+            Err(e) => return none(Some(format!("Error de config: {e}"))),
+        };
+        let Some(subdir) = cfg.game_spec().user_data_dir else {
+            return none(Some("El juego no define datos de usuario.".into()));
+        };
+        let Ok(snap) = snapshot else {
+            return none(None);
+        };
+        let upper = config::RuntimePaths::from_config(&cfg)
+            .profile_paths(&snap.active_slug)
+            .upper;
+        let entries = gta_mo_core::userdata::scan(&upper, subdir);
+        let base = upper.join(subdir);
+        let portablegta = self
+            .mods_dir
+            .as_ref()
+            .map(|md| gta_mo_core::userdata::portablegta_installed(md, &snap.resolved))
+            .unwrap_or(false);
+        UserdataPayload {
+            entries,
+            base: Some(base),
+            portablegta,
+            error: None,
+        }
     }
 
     /// Scans file conflicts on a background thread so the UI thread is never

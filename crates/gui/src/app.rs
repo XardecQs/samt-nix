@@ -265,6 +265,14 @@ pub struct GtaMoApp {
     graph_reset_layout: bool,
     /// Fit the view to the graph on the next draw (used on build/reorganize).
     graph_fit_pending: bool,
+    /// Background snapshot generation; stale results are discarded.
+    snapshot_gen: u64,
+    /// A background refresh is in flight (keeps repainting until it lands).
+    snapshot_pending: bool,
+    /// Prewarm the prefix once the first snapshot with an active profile lands.
+    prewarm_pending: bool,
+    /// Cached umu runtime status, loaded when the dialog opens (not per frame).
+    runtime_status: Option<gta_mo_core::umu::RuntimeStatus>,
 }
 
 impl GtaMoApp {
@@ -362,9 +370,12 @@ impl GtaMoApp {
             graph_signature: 0,
             graph_reset_layout: false,
             graph_fit_pending: true,
+            snapshot_gen: 0,
+            snapshot_pending: false,
+            prewarm_pending: true,
+            runtime_status: None,
         };
         app.refresh();
-        app.prewarm();
         app
     }
 
@@ -447,8 +458,24 @@ impl GtaMoApp {
         }
     }
 
+    /// Requests a background refresh of the snapshot and user data. The result
+    /// is applied in `poll_events` when it arrives (stale ones are discarded).
     fn refresh(&mut self) {
-        match self.backend.snapshot() {
+        self.snapshot_gen += 1;
+        self.snapshot_pending = true;
+        // Clear at request time (as the old synchronous refresh did on success),
+        // so a status set right after `refresh()` is not later clobbered.
+        self.status = None;
+        crate::backend::Backend::refresh_async(self.snapshot_gen, self.tx.clone());
+    }
+
+    /// Applies a finished background refresh (UI thread).
+    fn apply_snapshot(
+        &mut self,
+        result: Result<Snapshot, String>,
+        userdata: crate::backend::UserdataPayload,
+    ) {
+        match result {
             Ok(s) => {
                 // Keep the selection only if it still exists (a profile may
                 // have been renamed/deleted); otherwise fall back to active.
@@ -461,7 +488,10 @@ impl GtaMoApp {
                     self.selected_profile = Some(s.active_slug.clone());
                 }
                 self.snapshot = s;
-                self.status = None;
+                self.userdata = userdata.entries;
+                self.userdata_base = userdata.base;
+                self.portablegta = userdata.portablegta;
+                self.userdata_error = userdata.error;
                 // The dependency graph is derived from the snapshot; sync it lazily
                 // so an appearance-only change keeps the current node positions.
                 self.graph_stale = true;
@@ -477,46 +507,17 @@ impl GtaMoApp {
                 }
                 self.reload_relations();
                 self.reload_groups();
-                self.reload_userdata();
                 self.start_conflict_scan();
                 self.reload_mount();
                 self.start_upper_scan();
+                // Prewarm the prefix once the first usable snapshot is in.
+                if self.prewarm_pending && !self.snapshot.active_slug.is_empty() {
+                    self.prewarm_pending = false;
+                    self.prewarm();
+                }
             }
             Err(e) => self.status = Some(e),
         }
-    }
-
-    /// Rescans the active profile's user data (saves/tracks/screenshots) and
-    /// checks whether PortableGTA is enabled.
-    fn reload_userdata(&mut self) {
-        let cfg = match gta_mo_core::config::load_config() {
-            Ok(c) => c,
-            Err(e) => {
-                self.userdata.clear();
-                self.portablegta = false;
-                self.userdata_base = None;
-                self.userdata_error = Some(format!("Error de config: {e}"));
-                return;
-            }
-        };
-        let Some(subdir) = cfg.game_spec().user_data_dir else {
-            self.userdata.clear();
-            self.portablegta = false;
-            self.userdata_base = None;
-            self.userdata_error = Some("El juego no define datos de usuario.".into());
-            return;
-        };
-        let upper = gta_mo_core::config::RuntimePaths::from_config(&cfg)
-            .profile_paths(&self.snapshot.active_slug)
-            .upper;
-        self.userdata = gta_mo_core::userdata::scan(&upper, subdir);
-        self.userdata_base = Some(upper.join(subdir));
-        self.portablegta = self
-            .backend
-            .mods_dir_path()
-            .map(|md| gta_mo_core::userdata::portablegta_installed(&md, &self.snapshot.resolved))
-            .unwrap_or(false);
-        self.userdata_error = None;
     }
 
     /// Kicks off a background conflict scan. Results are discarded if they
@@ -704,6 +705,13 @@ impl GtaMoApp {
                         self.upper = rows;
                         self.upper_deleted = deleted;
                         self.upper_pending = false;
+                    }
+                }
+                GuiEvent::Snapshot(gen, payload) => {
+                    if gen == self.snapshot_gen {
+                        self.snapshot_pending = false;
+                        let payload = *payload;
+                        self.apply_snapshot(payload.snapshot, payload.userdata);
                     }
                 }
                 GuiEvent::Detached(ok, msg) => {
@@ -1101,6 +1109,11 @@ impl eframe::App for GtaMoApp {
         self.poll_events(ctx);
         self.thumbs.poll(ctx);
         self.handle_lightbox_input(ctx);
+        // Keep the frame loop alive while background work is in flight so its
+        // result is observed promptly even when the user is idle.
+        if self.snapshot_pending || self.conflicts_pending || self.upper_pending {
+            ctx.request_repaint();
+        }
 
         // Escape closes the top dialog before the detail overlay can see it, so
         // closing a dialog never also closes the detail behind it.
@@ -1263,8 +1276,12 @@ impl eframe::App for GtaMoApp {
                         }
                     } else {
                         // Play stays enabled during the prefix prewarm; the
-                        // launch is queued and starts once it finishes.
-                        let can_play = !self.playing && (!self.busy || self.warming);
+                        // launch is queued and starts once it finishes. It is
+                        // disabled if a launch is already queued/running, so a
+                        // burst of clicks cannot queue several launches.
+                        let launch_queued = self.pending.iter().any(|j| j.launch);
+                        let can_play =
+                            !self.playing && !launch_queued && (!self.busy || self.warming);
                         let play = egui::Button::new(
                             egui::RichText::new(format!("{} Jugar", crate::icons::PLAY))
                                 .color(palette.on_accent)
@@ -1422,13 +1439,21 @@ impl eframe::App for GtaMoApp {
             crate::about::show_shortcuts(ctx, &mut self.show_shortcuts);
         }
         if self.show_runtime {
-            if let Some(action) = crate::runtime::show_runtime(ctx, &mut self.show_runtime) {
+            // Compute the runtime status once when the dialog opens instead of
+            // walking the umu cache on every frame.
+            let st = self
+                .runtime_status
+                .get_or_insert_with(gta_mo_core::umu::status);
+            let action = crate::runtime::show_runtime(ctx, &mut self.show_runtime, st);
+            if let Some(action) = action {
                 match action {
                     crate::runtime::RuntimeAction::Clean => {
                         self.exec(vec!["ctl".into(), "runtime".into(), "clean".into()], false);
+                        self.runtime_status = None;
                     }
                     crate::runtime::RuntimeAction::Reinstall => {
                         self.show_runtime = false;
+                        self.runtime_status = None;
                         self.confirm = Some(ConfirmState {
                             title: "Reinstalar runtime de umu".into(),
                             message: "Se borrará el runtime instalado de steamrt4 y umu lo \
@@ -1438,6 +1463,9 @@ impl eframe::App for GtaMoApp {
                         });
                     }
                 }
+            }
+            if !self.show_runtime {
+                self.runtime_status = None;
             }
         }
 
@@ -3602,7 +3630,7 @@ impl GtaMoApp {
             ]);
         }
         if resp.refresh {
-            self.reload_userdata();
+            self.refresh();
         }
         for action in resp.actions {
             match action {
