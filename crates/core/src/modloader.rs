@@ -64,6 +64,9 @@ pub fn entries_for(
             Some(f) if !f.is_empty() => f,
             _ => detect_folders(mods_dir, folder, selected),
         };
+        // Mod Loader's PriorityLimit is 100; clamp so a manifest cannot emit an
+        // out-of-range value into the generated `modloader.ini`.
+        let priority = priority.clamp(1, 100);
         for name in folders {
             if crate::meta::valid_modloader_folder(&name) {
                 entries.push((name, priority));
@@ -74,9 +77,16 @@ pub fn entries_for(
             }
         }
     }
-    entries.sort();
-    entries.dedup_by(|a, b| a.0 == b.0);
-    entries
+    // One entry per folder; when several mods set the same folder, keep the
+    // highest priority (higher values override lower ones in Mod Loader).
+    let mut by_name: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+    for (name, prio) in entries {
+        let slot = by_name.entry(name).or_insert(prio);
+        if prio > *slot {
+            *slot = prio;
+        }
+    }
+    by_name.into_iter().collect()
 }
 
 /// Text before a Mod Loader `;` comment.
@@ -278,6 +288,38 @@ _ignore
         assert_eq!(
             read_priorities(&content, "Default"),
             vec![("Proper Fixes".to_string(), 60)]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn entries_for_clamps_priority_and_keeps_highest() {
+        let dir = std::env::temp_dir().join(format!("gta-mo-mlprio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for m in ["A", "B", "C"] {
+            std::fs::create_dir_all(dir.join(m)).unwrap();
+        }
+        std::fs::write(
+            dir.join("A/mod.toml"),
+            "[modloader]\npriority = 150\nfolders = [\"Shared\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("B/mod.toml"),
+            "[modloader]\npriority = 30\nfolders = [\"Shared\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("C/mod.toml"),
+            "[modloader]\npriority = -5\nfolders = [\"Low\"]\n",
+        )
+        .unwrap();
+
+        let enabled = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let entries = entries_for(&dir, &enabled, &HashMap::new());
+        assert_eq!(
+            entries,
+            vec![("Low".to_string(), 1), ("Shared".to_string(), 100)]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

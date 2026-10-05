@@ -147,6 +147,7 @@ struct LaunchArgs {
     #[arg(
         long,
         value_name = "MODE",
+        value_parser = ["off", "prefix", "full"],
         help = "Page-cache preloading before launch: off, prefix or full"
     )]
     preload: Option<String>,
@@ -178,6 +179,7 @@ struct PreloadArgs {
 struct OptimizeArgs {
     #[arg(
         long,
+        conflicts_with = "no_prefix_ram",
         help = "Run the game against a tmpfs copy of the Wine prefix (RAM)"
     )]
     prefix_ram: bool,
@@ -187,6 +189,7 @@ struct OptimizeArgs {
 
     #[arg(
         long,
+        conflicts_with = "no_prefix_ram_proton",
         help = "Materialize the Proton DLL symlinks into the tmpfs prefix"
     )]
     prefix_ram_proton: bool,
@@ -197,7 +200,11 @@ struct OptimizeArgs {
     )]
     no_prefix_ram_proton: bool,
 
-    #[arg(long, help = "Prefetch the Proton runtime into the page cache")]
+    #[arg(
+        long,
+        conflicts_with = "no_preload_proton",
+        help = "Prefetch the Proton runtime into the page cache"
+    )]
     preload_proton: bool,
 
     #[arg(
@@ -206,7 +213,11 @@ struct OptimizeArgs {
     )]
     no_preload_proton: bool,
 
-    #[arg(long, help = "Prefetch umu's steamrt runtime into the page cache")]
+    #[arg(
+        long,
+        conflicts_with = "no_preload_steamrt",
+        help = "Prefetch umu's steamrt runtime into the page cache"
+    )]
     preload_steamrt: bool,
 
     #[arg(

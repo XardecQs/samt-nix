@@ -1116,6 +1116,25 @@ fn upper_capture_rejects_path_traversal() {
 }
 
 #[test]
+fn contradictory_or_invalid_launch_flags_are_rejected() {
+    let t = TempDb::new("flags-conflict");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    // --x / --no-x pairs must conflict.
+    let out = t.run(&["launch", "--prefix-ram", "--no-prefix-ram"]);
+    assert!(!out.status.success(), "flags contradictorios aceptados");
+
+    // Unknown --preload value must fail instead of silently using 'prefix'.
+    let out = t.run(&["launch", "--preload", "ful"]);
+    assert!(
+        !out.status.success(),
+        "valor de --preload inválido aceptado"
+    );
+}
+
+#[test]
 fn mount_dry_run_and_status_need_no_overlay() {
     let t = TempDb::new("mountdry");
     let game_root = t.dir.join("game");

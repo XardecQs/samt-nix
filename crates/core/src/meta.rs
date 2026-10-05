@@ -280,6 +280,11 @@ pub fn valid_modloader_folder(folder: &str) -> bool {
         && !folder.contains('\\')
         && !folder.contains(',')
         && !folder.contains(':')
+        // `=` starts a value in `modloader.ini`; control characters (newlines,
+        // tabs…) would inject extra lines/sections.
+        && !folder.contains('=')
+        && !folder.chars().any(char::is_control)
+        && folder.trim() == folder
 }
 
 /// Reads `mod.toml` from `mods_dir/<folder>`. Returns `None` when there is no
@@ -999,5 +1004,23 @@ default = "4k"
             vec![dir.join("M/content")]
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modloader_folder_rejects_ini_injection() {
+        assert!(valid_modloader_folder("MyFolder"));
+        assert!(valid_modloader_folder("my-folder_1"));
+        // Characters that could break or inject lines in `modloader.ini`.
+        assert!(!valid_modloader_folder(""));
+        assert!(!valid_modloader_folder("."));
+        assert!(!valid_modloader_folder(".."));
+        assert!(!valid_modloader_folder("a/b"));
+        assert!(!valid_modloader_folder("a:b"));
+        assert!(!valid_modloader_folder("a,b"));
+        assert!(!valid_modloader_folder("a=b"));
+        assert!(!valid_modloader_folder("a\n[Profiles.Evil]\nevil=100"));
+        assert!(!valid_modloader_folder("a\tb"));
+        assert!(!valid_modloader_folder(" leading"));
+        assert!(!valid_modloader_folder("trailing "));
     }
 }
