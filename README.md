@@ -295,11 +295,11 @@ group = "proper-fixes"
 name = "RoSA"
 
 # Mods incompatibles (por id o carpeta); no se pueden activar juntos.
-conflicts = ["mixmods:proper-fixes-vanilla"]
+conflicts = ["mixmods:proper-fixes"]
 
 # Al menos UNO de estos debe estar activo (alternativas, p. ej. variantes o
 # "Proper Shaders" o "SkyGfx"). No auto-activa ni afecta al orden: se valida.
-requires_any = ["mixmods:rosa-evolved-4k", "mixmods:rosa-evolved-lite"]
+requires_any = ["mixmods:proper-shaders", "aap:sa-skygfx-extended"]
 
 # Opciones seleccionables por perfil (una entrada con variantes/configs). El
 # valor elegido monta options/<grupo>/<valor>/ ENCIMA de mount. Sin [[options]],
