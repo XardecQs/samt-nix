@@ -28,11 +28,15 @@ fn steamrt_dir() -> Option<PathBuf> {
 /// per launch lives in the profile's `logs/` dir; the newest 20 are kept.
 pub struct LaunchLog {
     path: PathBuf,
+    /// When set, occurrences of this path (the user's home) are masked as
+    /// `/home/****` so the log is safe to share.
+    redact: Option<String>,
 }
 
 impl LaunchLog {
-    /// Creates `launch-<unix-seconds>.log` under `dir` and prunes old ones.
-    pub fn create(dir: &Path) -> anyhow::Result<Self> {
+    /// Creates `launch-<unix-seconds>.log` under `dir`, writes the header
+    /// (launcher version, start time, environment) and prunes old ones.
+    pub fn create(dir: &Path, redact: Option<String>) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -42,10 +46,20 @@ impl LaunchLog {
         {
             let mut f = std::fs::File::create(&path)?;
             writeln!(f, "=== gta-mo — registro de lanzamiento ===")?;
-            writeln!(f, "inicio (unix): {secs}")?;
+            writeln!(f, "gta-mo: {}", env!("CARGO_PKG_VERSION"))?;
+            let when =
+                format_local_time(secs, "%Y-%m-%d %H:%M:%S %z").unwrap_or_else(|| secs.to_string());
+            writeln!(f, "inicio: {when} (unix {secs})")?;
+            let env = environment_lines();
+            if !env.is_empty() {
+                writeln!(f)?;
+                for line in env {
+                    writeln!(f, "{line}")?;
+                }
+            }
         }
         prune_launch_logs(dir, 20);
-        Ok(Self { path })
+        Ok(Self { path, redact })
     }
 
     pub fn path(&self) -> &Path {
@@ -54,6 +68,7 @@ impl LaunchLog {
 
     /// Appends one line to the log file (best-effort; never fails a launch).
     pub fn write(&self, msg: &str) {
+        let msg = mask_home(msg, self.redact.as_deref());
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -62,6 +77,150 @@ impl LaunchLog {
             let _ = writeln!(f, "{msg}");
         }
     }
+}
+
+/// The home directory to mask when redaction is requested.
+fn redact_target(redact: bool) -> Option<String> {
+    if !redact {
+        return None;
+    }
+    std::env::var("HOME").ok().filter(|h| !h.is_empty())
+}
+
+/// Replaces every occurrence of the user's home (`home`) with `/home/****`.
+fn mask_home(msg: &str, home: Option<&str>) -> String {
+    match home {
+        Some(h) if !h.is_empty() => msg.replace(h, "/home/****"),
+        _ => msg.to_string(),
+    }
+}
+
+/// Formats a unix timestamp in the local timezone with `fmt` (strftime syntax),
+/// e.g. `%Y-%m-%d %H:%M:%S %z`. Returns `None` if formatting fails.
+fn format_local_time(secs: u64, fmt: &str) -> Option<String> {
+    let t = secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return None;
+    }
+    let fmt = std::ffi::CString::new(fmt).ok()?;
+    let mut buf: [libc::c_char; 64] = [0; 64];
+    let n = unsafe { libc::strftime(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &tm) };
+    if n == 0 {
+        return None;
+    }
+    let bytes: Vec<u8> = buf[..n].iter().map(|&c| c as u8).collect();
+    String::from_utf8(bytes).ok()
+}
+
+/// `HH:MM:SS.mmm` in local time (for the per-line timeline).
+fn clock_hms_millis() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let hms = format_local_time(now.as_secs(), "%H:%M:%S").unwrap_or_default();
+    format!("{hms}.{:03}", now.subsec_millis())
+}
+
+/// Environment lines for the log header (best-effort; missing data is omitted).
+/// Mirrors the launcher/what-can-I-say-my-machine block PrismLauncher prints.
+fn environment_lines() -> Vec<String> {
+    let mut out = Vec::new();
+    match (os_pretty_name(), kernel_release()) {
+        (Some(os), Some(k)) => out.push(format!("SO: {os} | linux | {k}")),
+        (Some(os), None) => out.push(format!("SO: {os} | linux")),
+        (None, Some(k)) => out.push(format!("SO: linux | {k}")),
+        (None, None) => {}
+    }
+    if let Some(cpu) = cpu_model() {
+        out.push(format!("CPU: {cpu}"));
+    }
+    if let Some((total, avail)) = mem_info_mib() {
+        out.push(format!("RAM: {total} MiB (available: {avail} MiB)"));
+    }
+    if let Some(gpu) = gpu_info() {
+        out.push(format!("GPU: {gpu}"));
+    }
+    out
+}
+
+fn os_pretty_name() -> Option<String> {
+    let content = std::fs::read_to_string("/etc/os-release").ok()?;
+    content.lines().find_map(|l| {
+        l.strip_prefix("PRETTY_NAME=")
+            .map(|v| v.trim().trim_matches('"').to_string())
+    })
+}
+
+fn kernel_release() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn cpu_model() -> Option<String> {
+    let content = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+    content
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("model name")
+                .and_then(|r| r.split_once(':'))
+                .map(|(_, v)| v.trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+}
+
+fn mem_info_mib() -> Option<(u64, u64)> {
+    let content = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let read = |key: &str| -> Option<u64> {
+        content.lines().find_map(|l| {
+            l.strip_prefix(key)
+                .and_then(|r| r.split_whitespace().next())
+                .and_then(|n| n.parse::<u64>().ok())
+        })
+    };
+    Some((read("MemTotal:")? / 1024, read("MemAvailable:")? / 1024))
+}
+
+/// Best-effort GPU line from `/sys/class/drm/<card>/device/uevent`
+/// (`<driver> (<PCI_ID>)`); `lspci`/`glxinfo` are not assumed to exist.
+fn gpu_info() -> Option<String> {
+    let entries = std::fs::read_dir("/sys/class/drm").ok()?;
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        let Ok(uevent) = std::fs::read_to_string(e.path().join("device/uevent")) else {
+            continue;
+        };
+        let mut driver = None;
+        let mut pci = None;
+        for line in uevent.lines() {
+            if let Some(v) = line.strip_prefix("DRIVER=") {
+                driver = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("PCI_ID=") {
+                pci = Some(v.trim().to_string());
+            }
+        }
+        if let Some(d) = driver {
+            return Some(match pci {
+                Some(p) if !p.is_empty() => format!("{d} ({p})"),
+                _ => d,
+            });
+        }
+    }
+    None
+}
+
+/// Current unix timestamp in seconds.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Keeps only the newest `keep` `launch-*.log` files in `dir`.
@@ -88,14 +247,47 @@ fn prune_launch_logs(dir: &Path, keep: usize) {
     }
 }
 
+/// Startup phases of `umu` reported by the watcher: `comm` substring → label.
+const UMU_PHASES: &[(&str, &str)] = &[
+    ("bwrap", "bwrap"),
+    ("python", "python"),
+    ("wine", "wine"),
+    ("pressure-vessel", "pressure"),
+    ("proton", "proton"),
+];
+
+/// Lowercased `comm` names of all running processes (best-effort), for the
+/// umu startup phase tracer.
+fn running_comms() -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) {
+            out.push(comm.trim().to_ascii_lowercase());
+        }
+    }
+    out
+}
+
 /// Forwards every line of `reader` to stdout (or stderr) and appends it to
 /// `log_path` when given. `on_first_line` (shared by the stdout and stderr
-/// tees) runs exactly once, before the first line is written.
+/// tees) runs exactly once, before the first line is written. Each line is
+/// prefixed with `[HH:MM:SS.mmm +X.XXs]` (wall clock + time since `umu` spawn)
+/// and, when `redact` is set, the user's home is masked.
 fn tee_output<R: std::io::Read + Send + 'static>(
     reader: R,
     log_path: &Path,
     to_stderr: bool,
     on_first_line: Option<Arc<dyn Fn() + Send + Sync>>,
+    spawn_at: Option<Instant>,
+    redact: Option<String>,
 ) -> std::thread::JoinHandle<()> {
     let path = log_path.to_path_buf();
     std::thread::spawn(move || {
@@ -112,6 +304,15 @@ fn tee_output<R: std::io::Read + Send + 'static>(
             if let Some(cb) = on_first_line.take() {
                 cb();
             }
+            let line = mask_home(&line, redact.as_deref());
+            let line = match spawn_at {
+                Some(t) => format!(
+                    "[{} +{:.2}s] {line}",
+                    clock_hms_millis(),
+                    t.elapsed().as_secs_f64()
+                ),
+                None => line,
+            };
             if to_stderr {
                 eprintln!("{line}");
             } else {
@@ -144,6 +345,8 @@ struct Prepared {
     violations: Vec<crate::constraints::Violation>,
     /// Per-folder option selections for the enabled mods (folder -> {group: value}).
     options_by_folder: HashMap<String, HashMap<String, String>>,
+    /// All known mods of the profile for the log: `(folder, enabled, hidden)`.
+    mods_log: Vec<(String, bool, bool)>,
 }
 
 /// Result of [`LaunchEngine::mount`].
@@ -185,6 +388,9 @@ pub struct LaunchOptions {
     pub preload_proton: Option<bool>,
     /// CLI override: prefetch umu's steamrt runtime.
     pub preload_steamrt: Option<bool>,
+    /// Mask the user's home directory (`/home/<user>` → `/home/****`) in the
+    /// launch log and in the teed `umu`/Proton output (safe to share).
+    pub redact: bool,
 }
 
 impl Default for LaunchOptions {
@@ -204,6 +410,7 @@ impl Default for LaunchOptions {
             prefix_ram_proton: None,
             preload_proton: None,
             preload_steamrt: None,
+            redact: false,
         }
     }
 }
@@ -450,6 +657,7 @@ impl LaunchEngine {
         launch_log: Option<&LaunchLog>,
         timing: &UmuTiming,
         report: bool,
+        redact: Option<&str>,
     ) -> anyhow::Result<()> {
         let log_path = launch_log.map(|l| l.path().to_path_buf());
         let drop_uid = std::env::var("GTA_MO_DROP_UID")
@@ -476,6 +684,7 @@ impl LaunchEngine {
                     log_path.as_deref(),
                     timing,
                     report,
+                    redact,
                 ),
                 None => anyhow::bail!(
                     "gta-mo se ejecuta como root. Define GTA_MO_DROP_UID (y opcionalmente GTA_MO_DROP_GID) para lanzar el juego como usuario."
@@ -483,7 +692,14 @@ impl LaunchEngine {
             };
         }
 
-        Self::launch_game_direct(exe_path, working_dir, log_path.as_deref(), timing, report)
+        Self::launch_game_direct(
+            exe_path,
+            working_dir,
+            log_path.as_deref(),
+            timing,
+            report,
+            redact,
+        )
     }
 
     /// Runs `umu-run` for `exe`, teeing its stdout/stderr to our own streams and
@@ -495,6 +711,7 @@ impl LaunchEngine {
         log_path: Option<&Path>,
         timing: &UmuTiming,
         report: bool,
+        redact: Option<&str>,
     ) -> std::io::Result<std::process::ExitStatus> {
         let mut cmd = std::process::Command::new("umu-run");
         cmd.arg(exe_path).current_dir(working_dir);
@@ -508,6 +725,7 @@ impl LaunchEngine {
         let spawn_at = Instant::now();
         let mut child = cmd.spawn()?;
         timing.set_spawn(spawn_at);
+        Self::append_log(path, &format!("PID de umu: {}", child.id()));
 
         // Emit "umu responde" once, on the first line from either stream.
         let first_emitted = Arc::new(AtomicBool::new(false));
@@ -531,13 +749,28 @@ impl LaunchEngine {
                 }
             })
         };
+        let redact = redact.map(str::to_string);
 
         let mut handles = Vec::new();
         if let Some(out) = child.stdout.take() {
-            handles.push(tee_output(out, path, false, Some(on_first.clone())));
+            handles.push(tee_output(
+                out,
+                path,
+                false,
+                Some(on_first.clone()),
+                Some(spawn_at),
+                redact.clone(),
+            ));
         }
         if let Some(err) = child.stderr.take() {
-            handles.push(tee_output(err, path, true, Some(on_first.clone())));
+            handles.push(tee_output(
+                err,
+                path,
+                true,
+                Some(on_first.clone()),
+                Some(spawn_at),
+                redact,
+            ));
         }
         let status = child.wait()?;
         for h in handles {
@@ -593,8 +826,9 @@ impl LaunchEngine {
         log_path: Option<&Path>,
         timing: &UmuTiming,
         report: bool,
+        redact: Option<&str>,
     ) -> anyhow::Result<()> {
-        let status = Self::run_umu(exe_path, working_dir, log_path, timing, report)
+        let status = Self::run_umu(exe_path, working_dir, log_path, timing, report, redact)
             .map_err(|e| anyhow::anyhow!("Error al ejecutar umu-run: {e}"))?;
 
         if !status.success() {
@@ -608,6 +842,7 @@ impl LaunchEngine {
     // el wrapper de Steam), umu-run se niega a arrancar con euid 0. Este hijo
     // entra en un user namespace anidado que mapea el uid original y luego
     // ejecuta el juego como usuario, sin perder el montaje del overlay.
+    #[allow(clippy::too_many_arguments)]
     fn launch_game_dropped(
         exe_path: &Path,
         working_dir: &Path,
@@ -616,6 +851,7 @@ impl LaunchEngine {
         log_path: Option<&Path>,
         timing: &UmuTiming,
         report: bool,
+        redact: Option<&str>,
     ) -> anyhow::Result<()> {
         // uid/GID del usuario real. El gid por defecto NO es el uid: usa el
         // grupo primario del usuario cuando se puede resolver.
@@ -630,8 +866,16 @@ impl LaunchEngine {
             anyhow::bail!("fork falló: {}", std::io::Error::last_os_error());
         }
         if pid == 0 {
-            let code =
-                Self::drop_and_run_game(exe_path, working_dir, uid, gid, log_path, timing, report);
+            let code = Self::drop_and_run_game(
+                exe_path,
+                working_dir,
+                uid,
+                gid,
+                log_path,
+                timing,
+                report,
+                redact,
+            );
             std::process::exit(code);
         }
 
@@ -661,6 +905,7 @@ impl LaunchEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn drop_and_run_game(
         exe_path: &Path,
         working_dir: &Path,
@@ -669,6 +914,7 @@ impl LaunchEngine {
         log_path: Option<&Path>,
         timing: &UmuTiming,
         report: bool,
+        redact: Option<&str>,
     ) -> i32 {
         if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
             eprintln!(
@@ -696,7 +942,7 @@ impl LaunchEngine {
             eprintln!("gta-mo: setuid falló: {}", std::io::Error::last_os_error());
             return 1;
         }
-        match Self::run_umu(exe_path, working_dir, log_path, timing, report) {
+        match Self::run_umu(exe_path, working_dir, log_path, timing, report, redact) {
             Ok(s) if s.success() => 0,
             Ok(s) => s.code().unwrap_or(1),
             Err(e) => {
@@ -708,6 +954,33 @@ impl LaunchEngine {
 
     fn resolve_preload_mode(cfg: &config::Config, opts: &LaunchOptions) -> PreloadMode {
         opts.preload.unwrap_or_else(|| cfg.preload_mode())
+    }
+
+    /// Compact one-line summary of the effective launch configuration.
+    fn config_summary(cfg: &config::Config, opts: &LaunchOptions) -> String {
+        let onoff = |b: bool| if b { "on" } else { "off" };
+        format!(
+            "preload={} prefix_ram={} prefix_ram_proton={} preload_proton={} \
+             preload_steamrt={} timings={} wined3d={} ntsync={} upscalers={} \
+             umu_runtime_update={} debug={}",
+            Self::resolve_preload_mode(cfg, opts).as_str(),
+            onoff(opts.prefix_ram.unwrap_or_else(|| cfg.prefix_ram())),
+            onoff(
+                opts.prefix_ram_proton
+                    .unwrap_or_else(|| cfg.prefix_ram_proton())
+            ),
+            onoff(opts.preload_proton.unwrap_or_else(|| cfg.preload_proton())),
+            onoff(
+                opts.preload_steamrt
+                    .unwrap_or_else(|| cfg.preload_steamrt())
+            ),
+            onoff(cfg.timings()),
+            onoff(cfg.proton_use_wined3d()),
+            onoff(!cfg.proton_disable_ntsync()),
+            onoff(!cfg.proton_disable_upscalers()),
+            onoff(cfg.umu_runtime_update()),
+            onoff(opts.debug),
+        )
     }
 
     /// Prints the `full` preload warning and, on an interactive terminal,
@@ -799,9 +1072,23 @@ impl LaunchEngine {
                 };
                 let deadline = started + Duration::from_secs(900);
                 let mut proc_done = false;
+                let mut seen_phases: Vec<&str> = Vec::new();
                 loop {
                     if watcher_stop.load(Ordering::Relaxed) {
                         break;
+                    }
+                    // Startup phases of umu (bwrap → python → wine → proton),
+                    // timed since the umu spawn.
+                    if let Some(d) = umu_timing.since_spawn() {
+                        let comms = running_comms();
+                        for (label, needle) in UMU_PHASES {
+                            if !seen_phases.contains(label)
+                                && comms.iter().any(|c| c.contains(needle))
+                            {
+                                seen_phases.push(label);
+                                emit(format!("⏱ umu: {label} +{:.2}s", d.as_secs_f64()));
+                            }
+                        }
                     }
                     if !proc_done && Self::game_process_running(&game_exe) {
                         proc_done = true;
@@ -985,12 +1272,14 @@ impl LaunchEngine {
         }
 
         let started = Instant::now();
+        let redact = redact_target(opts.redact);
         let result = Self::launch_game(
             game_exe,
             working_dir,
             launch_log,
             &umu_timing,
             boot.cfg.timings(),
+            redact.as_deref(),
         );
         let session = started.elapsed();
         timer.mark("sesión");
@@ -1037,6 +1326,15 @@ impl LaunchEngine {
                 l.write(&final_report);
             }
         }
+        let outcome = match &result {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("error: {e:#}"),
+        };
+        Self::emit(launch_log, log, &format!("resultado: {outcome}"));
+        let fin = format_local_time(now_unix(), "%Y-%m-%d %H:%M:%S %z").unwrap_or_default();
+        if let Some(l) = launch_log {
+            l.write(&format!("fin: {fin}"));
+        }
 
         result
     }
@@ -1070,14 +1368,25 @@ impl LaunchEngine {
         let launch_log = if opts.dry_run {
             None
         } else {
-            match LaunchLog::create(&prepared.ppaths.log_dir) {
+            match LaunchLog::create(&prepared.ppaths.log_dir, redact_target(opts.redact)) {
                 Ok(l) => {
                     l.write(&format!(
                         "perfil: {} (slug: {})",
                         prepared.profile.name, prepared.profile.slug
                     ));
                     l.write(&format!("game_root: {}", boot.cfg.game_root));
+                    l.write(&format!("game_exe: {}", boot.cfg.game_exe()));
+                    let proton = Path::new(&boot.cfg.proton_path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&boot.cfg.proton_path);
+                    l.write(&format!("proton: {proton}"));
                     l.write(&format!("proton_path: {}", boot.cfg.proton_path));
+                    l.write("");
+                    l.write(&format!(
+                        "config: {}",
+                        Self::config_summary(&boot.cfg, opts)
+                    ));
                     Some(l)
                 }
                 Err(e) => {
@@ -1118,9 +1427,20 @@ impl LaunchEngine {
         }
 
         let mut log_output = String::new();
-        log_output.push_str("Mods en orden de prioridad:\n");
+        log_output.push_str(&format!(
+            "mods ({}, {} activados):\n",
+            prepared.mods_log.len(),
+            prepared.resolved.len()
+        ));
         for folder in &prepared.resolved {
-            log_output.push_str(&format!("  - {}\n", folder));
+            log_output.push_str(&format!("  [✔] {folder}\n"));
+        }
+        for (folder, enabled, hidden) in &prepared.mods_log {
+            if *enabled {
+                continue;
+            }
+            let tag = if *hidden { "oculto" } else { "desactivado" };
+            log_output.push_str(&format!("  [✘] {folder} ({tag})\n"));
         }
 
         if opts.dry_run {
@@ -1478,6 +1798,13 @@ impl LaunchEngine {
             }
         }
 
+        let mut mods_log: Vec<(String, bool, bool)> = graph
+            .mods
+            .values()
+            .map(|m| (m.folder_name.clone(), m.enabled, m.hidden()))
+            .collect();
+        mods_log.sort_by(|a, b| a.0.cmp(&b.0));
+
         Ok(Prepared {
             profile,
             ppaths,
@@ -1485,6 +1812,7 @@ impl LaunchEngine {
             modloader_entries,
             violations,
             options_by_folder,
+            mods_log,
         })
     }
 
@@ -2026,10 +2354,12 @@ mod tests {
             std::fs::write(dir.join(format!("launch-{i:010}.log")), "viejo").unwrap();
         }
 
-        let log = LaunchLog::create(&dir).unwrap();
+        let log = LaunchLog::create(&dir, None).unwrap();
         log.write("hola mundo");
         let content = std::fs::read_to_string(log.path()).unwrap();
         assert!(content.contains("hola mundo"));
+        assert!(content.contains(env!("CARGO_PKG_VERSION")));
+        assert!(content.contains("gta-mo:"));
 
         let count = std::fs::read_dir(&dir)
             .unwrap()
@@ -2041,6 +2371,29 @@ mod tests {
             "se conservan los 20 más nuevos + el actual: {count}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mask_home_redacts_the_home_dir() {
+        assert_eq!(
+            mask_home("/home/xardec/Games/game", Some("/home/xardec")),
+            "/home/****/Games/game"
+        );
+        assert_eq!(
+            mask_home("/home/xardec", Some("/home/xardec")),
+            "/home/****"
+        );
+        // No redaction target: unchanged.
+        assert_eq!(mask_home("/home/xardec", None), "/home/xardec");
+    }
+
+    #[test]
+    fn header_has_version_and_a_formatted_time() {
+        let t = format_local_time(1_791_692_225, "%Y-%m-%d %H:%M:%S").unwrap();
+        assert!(t.starts_with("202"), "unexpected date: {t}");
+        // The environment block should at least report the OS on Linux.
+        let env = environment_lines();
+        assert!(env.iter().any(|l| l.starts_with("SO:")), "{env:?}");
     }
 
     #[test]

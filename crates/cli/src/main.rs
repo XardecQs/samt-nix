@@ -19,6 +19,13 @@ struct Cli {
     #[arg(long, global = true, help = "Profile to use (name, slug or id)")]
     profile: Option<String>,
 
+    #[arg(
+        long,
+        global = true,
+        help = "Mask the home directory (/home/<user>) in the launch log (safe to share)"
+    )]
+    redact: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -709,6 +716,7 @@ fn main() {
     let cli = Cli::parse();
 
     let profile = cli.profile.clone();
+    let redact = cli.redact || std::env::var_os("GTA_MO_REDACT").is_some();
 
     let command = cli.command.unwrap_or(Command::Launch(LaunchArgs {
         dry_run: false,
@@ -752,9 +760,9 @@ fn main() {
                 ))
             }
         }
-        Command::Launch(args) => cmd_launch(args, profile.as_deref()),
+        Command::Launch(args) => cmd_launch(args, profile.as_deref(), redact),
         Command::Preload(args) => cmd_preload(args, profile.as_deref()),
-        Command::Steam(args) => cmd_steam(args, profile.as_deref()),
+        Command::Steam(args) => cmd_steam(args, profile.as_deref(), redact),
         Command::Mount(args) => cmd_mount(args, profile.as_deref()),
         Command::Unmount(args) => cmd_unmount(args),
         Command::Status { json } => cmd_status(json),
@@ -780,7 +788,7 @@ fn main() {
     }
 }
 
-fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
+fn cmd_launch(args: LaunchArgs, profile: Option<&str>, redact: bool) -> anyhow::Result<()> {
     if !args.dry_run {
         println!("=== GTA SA Mod Organizer ===");
     }
@@ -803,6 +811,7 @@ fn cmd_launch(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
         prefix_ram_proton: args.optimize.prefix_ram_proton(),
         preload_proton: args.optimize.preload_proton(),
         preload_steamrt: args.optimize.preload_steamrt(),
+        redact,
     };
 
     let result = LaunchEngine::run(&opts, |msg| println!("{msg}"))?;
@@ -831,6 +840,7 @@ fn cmd_preload(args: PreloadArgs, profile: Option<&str>) -> anyhow::Result<()> {
         prefix_ram_proton: args.optimize.prefix_ram_proton(),
         preload_proton: args.optimize.preload_proton(),
         preload_steamrt: args.optimize.preload_steamrt(),
+        redact: false,
     };
     LaunchEngine::preload(&opts, |msg| println!("{msg}"))?;
     Ok(())
@@ -852,6 +862,7 @@ fn cmd_mount(args: MountArgs, profile: Option<&str>) -> anyhow::Result<()> {
         prefix_ram_proton: None,
         preload_proton: None,
         preload_steamrt: None,
+        redact: false,
     };
     let outcome = LaunchEngine::mount(&opts, args.temp)?;
     if let Some(report) = outcome.dry_run {
@@ -1000,9 +1011,9 @@ fn confirm(prompt: &str) -> bool {
     )
 }
 
-fn cmd_steam(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
+fn cmd_steam(args: LaunchArgs, profile: Option<&str>, redact: bool) -> anyhow::Result<()> {
     if std::env::var_os("GTA_MO_STEAM_NS").is_some() {
-        return cmd_launch(args, profile);
+        return cmd_launch(args, profile, redact);
     }
 
     let unshare = std::env::var("GTA_MO_UNSHARE")
@@ -1075,6 +1086,9 @@ fn cmd_steam(args: LaunchArgs, profile: Option<&str>) -> anyhow::Result<()> {
     if let Some(p) = profile {
         steam_args.push("--profile".into());
         steam_args.push(p.into());
+    }
+    if redact {
+        steam_args.push("--redact".into());
     }
 
     let self_exe = std::env::current_exe()
