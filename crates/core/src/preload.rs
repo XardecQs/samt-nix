@@ -297,7 +297,7 @@ fn warm_tree(root: &Path, filter: Filter, stop: Option<&AtomicBool>, stats: &mut
 
 /// Startup-relevant extensions for the mod layers.
 const STARTUP_EXTS: &[&str] = &[
-    "asi", "dll", "cleo", "cs", "ini", "cfg", "dat", "json", "xml", "txt",
+    "asi", "dll", "cleo", "cs", "fxt", "ini", "cfg", "dat", "json", "xml", "txt",
 ];
 
 /// Mod loader files, loaded early by the ASI/CLEO loaders.
@@ -312,14 +312,11 @@ fn is_loader_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Startup configs/scripts, by extension. `modloader/` is deliberately **not**
+/// special-cased: its assets (`.dff/.txd/.wav/.mp3`…) are read on demand by Mod
+/// Loader, not at startup, so warming them only wastes I/O. The `.asi/.dll/
+/// .cleo` loaders are handled separately by [`is_loader_file`].
 fn is_startup_file(path: &Path) -> bool {
-    if path.components().any(|c| {
-        c.as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case("modloader")
-    }) {
-        return true;
-    }
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| STARTUP_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
@@ -373,7 +370,12 @@ mod tests {
     fn startup_filter_matches_extensions_and_modloader() {
         assert!(is_startup_file(Path::new("/x/foo.asi")));
         assert!(is_startup_file(Path::new("/x/foo.DLL")));
-        assert!(is_startup_file(Path::new("/x/modloader/data/thing.bin")));
+        assert!(is_startup_file(Path::new("/x/foo.fxt")));
+        assert!(is_startup_file(Path::new("/x/modloader/data/thing.ini")));
+        // Mod Loader reads its assets on demand, so they are not startup files.
+        assert!(!is_startup_file(Path::new("/x/modloader/car.dff")));
+        assert!(!is_startup_file(Path::new("/x/modloader/car.txd")));
+        assert!(!is_startup_file(Path::new("/x/modloader/data/thing.bin")));
         assert!(!is_startup_file(Path::new("/x/models/gta3.img")));
         assert!(is_loader_file(Path::new("/x/foo.cleo")));
         assert!(!is_loader_file(Path::new("/x/foo.ini")));

@@ -194,9 +194,10 @@ auto_discover = true
 > the Wine prefix and the game's startup files on demand. `gta-mo` warms them in
 > two steps: a **critical** one (the Wine prefix, the game executable and the mod
 > loaders) runs synchronously at normal I/O priority *before* `umu`, so Wine
-> never hits the loader stall; the **extra** startup files (configs and the
-> `modloader/` tree) are warmed in the background and stop once the game process
-> appears. `preload = "full"` also reads the whole base game and every enabled
+> never hits the loader stall; the **extra** startup files (the mods' startup
+> configs/scripts —including those under `modloader/`, but not its on-demand
+> assets like `.dff/.txd`) are warmed in the background and stop once the game
+> process appears. `preload = "full"` also reads the whole base game and every enabled
 > mod file (can be tens of GB); it prints a detailed warning and asks for
 > confirmation on an interactive terminal, and is better used ahead of time with
 > `gta-mo preload`. `preload = "off"` disables it.
@@ -345,7 +346,7 @@ path = "content/modloader/_ESSENTIALS/SilentPatch"
   may point to a directory (`guides = ["guides"]`) — `ctl info` expands it to
   its files.
 - `screenshots` accepts a directory or a list of paths; directories are
-  expanded to their images (png/jpg/jpeg/webp/bmp/gif), shown as a gallery in
+  expanded to their images (png/jpg/jpeg/webp/bmp/gif/avif), shown as a gallery in
   the GUI detail panel (and listed by `ctl info -v`/`--json`).
 - `cover`, `guides`, `screenshots` and `components[].path` are read from inside
   the mod folder only: they must be **relative** paths and cannot contain `..`
@@ -802,7 +803,8 @@ image viewer** with previous/next arrows, a counter and page dots (also `←`/`�
 and `Esc`, or click the backdrop). The viewer and its controls scale to fit the
 window on both axes, and the image animates from its thumbnail (shared-element
 "hero" transition). Animated **GIF** files play in the viewer (via the
-`egui_extras` gif loader); `bmp` and `gif` also get static thumbnails.
+`egui_extras` gif loader); `bmp`, `gif` and `avif` also get static thumbnails.
+AVIF decoding uses the `avif-native` `image` feature (`libdav1d`).
 
 ### Motion
 

@@ -82,6 +82,8 @@
           libxi
           libxkbcommon
           wayland
+          # AVIF decoding (`image`'s avif-native) links libdav1d.
+          dav1d
         ];
       in
       pkgs.rustPlatform.buildRustPackage {
@@ -199,6 +201,8 @@
         libxkbcommon
         libxcb
         wayland
+        # AVIF decoding (`image`'s avif-native) links libdav1d.
+        dav1d
       ];
     in {
       default = pkgs.mkShell {

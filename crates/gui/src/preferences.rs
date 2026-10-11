@@ -156,18 +156,33 @@ fn behavior(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
         "Copia el prefijo a /dev/shm durante la partida para acelerar el \
          arranque en discos lentos; el disco se sincroniza al salir.",
     );
-    changed |= tristate(
-        ui,
-        &mut s.preload_proton,
-        "Precalentar Proton (caché)",
-        "Lee el runtime de Proton a la caché de página en segundo plano (~1,5 GB).",
-    );
-    changed |= tristate(
-        ui,
-        &mut s.preload_steamrt,
-        "Precalentar steamrt de umu (caché)",
-        "Lee el runtime steamrt4 de umu a la caché de página en segundo plano.",
-    );
+
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new("Avanzado (solo discos lentos)")
+        .id_salt("prefs_behavior_adv")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "No aceleran el tramo previo a umu: arrancan justo antes de \
+                     lanzar y compiten por el I/O. Útiles solo en discos lentos.",
+                )
+                .small()
+                .weak(),
+            );
+            changed |= tristate(
+                ui,
+                &mut s.preload_proton,
+                "Precalentar Proton (caché)",
+                "Lee el runtime de Proton a la caché de página en segundo plano (~1,5 GB).",
+            );
+            changed |= tristate(
+                ui,
+                &mut s.preload_steamrt,
+                "Precalentar steamrt de umu (caché)",
+                "Lee el runtime steamrt4 de umu a la caché de página en segundo plano.",
+            );
+        });
     changed
 }
 

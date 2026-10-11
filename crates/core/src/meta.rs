@@ -194,7 +194,7 @@ pub fn is_image_file(path: &Path) -> bool {
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_lowercase())
             .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif")
+        Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "avif")
     )
 }
 

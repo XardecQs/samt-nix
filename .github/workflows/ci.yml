@@ -20,6 +20,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdav1d-dev pkg-config
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
