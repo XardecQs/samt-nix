@@ -23,9 +23,10 @@ fn steamrt_dir() -> Option<PathBuf> {
     p.is_dir().then_some(p)
 }
 
-/// Per-launch log file. It holds the high-level launcher messages and, through
-/// the tee in [`LaunchEngine::run_umu`], the raw `umu`/Proton output. One file
-/// per launch lives in the profile's `logs/` dir; the newest 20 are kept.
+/// Per-launch (or per-preload) log file. It holds the high-level launcher
+/// messages and, for launches, through the tee in [`LaunchEngine::run_umu`], the
+/// raw `umu`/Proton output. One file per run lives in the profile's `logs/`
+/// dir; the newest 20 of each kind are kept.
 pub struct LaunchLog {
     path: PathBuf,
     /// When set, occurrences of this path (the user's home) are masked as
@@ -37,15 +38,26 @@ impl LaunchLog {
     /// Creates `launch-<unix-seconds>.log` under `dir`, writes the header
     /// (launcher version, start time, environment) and prunes old ones.
     pub fn create(dir: &Path, redact: Option<String>) -> anyhow::Result<Self> {
+        Self::create_kind(dir, "launch", "registro de lanzamiento", redact)
+    }
+
+    /// Like [`LaunchLog::create`] but with a custom file prefix and header
+    /// title (`preload` logs use `preload-<ts>.log`).
+    pub fn create_kind(
+        dir: &Path,
+        kind: &str,
+        title: &str,
+        redact: Option<String>,
+    ) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let path = dir.join(format!("launch-{secs}.log"));
+        let path = dir.join(format!("{kind}-{secs}.log"));
         {
             let mut f = std::fs::File::create(&path)?;
-            writeln!(f, "=== gta-mo — registro de lanzamiento ===")?;
+            writeln!(f, "=== gta-mo — {title} ===")?;
             writeln!(f, "gta-mo: {}", env!("CARGO_PKG_VERSION"))?;
             let when =
                 format_local_time(secs, "%Y-%m-%d %H:%M:%S %z").unwrap_or_else(|| secs.to_string());
@@ -58,7 +70,7 @@ impl LaunchLog {
                 }
             }
         }
-        prune_launch_logs(dir, 20);
+        prune_logs(dir, kind, 20);
         Ok(Self { path, redact })
     }
 
@@ -223,8 +235,8 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Keeps only the newest `keep` `launch-*.log` files in `dir`.
-fn prune_launch_logs(dir: &Path, keep: usize) {
+/// Keeps only the newest `keep` `<prefix>-*.log` files in `dir`.
+fn prune_logs(dir: &Path, prefix: &str, keep: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -234,7 +246,7 @@ fn prune_launch_logs(dir: &Path, keep: usize) {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("launch-") && n.ends_with(".log"))
+                .map(|n| n.starts_with(prefix) && n.ends_with(".log"))
                 .unwrap_or(false)
         })
         .collect();
@@ -1502,8 +1514,41 @@ impl LaunchEngine {
         Self::validate_paths(&boot.cfg)?;
         let prepared = Self::plan(&boot, opts, false)?;
 
+        // Persist the prewarm output to `preload-<ts>.log` under the profile's
+        // logs dir (it used to be shown only in the GUI/terminal).
+        let plog = match LaunchLog::create_kind(
+            &prepared.ppaths.log_dir,
+            "preload",
+            "precarga",
+            redact_target(opts.redact),
+        ) {
+            Ok(l) => {
+                l.write(&format!(
+                    "perfil: {} (slug: {})",
+                    prepared.profile.name, prepared.profile.slug
+                ));
+                l.write(&format!("game_root: {}", boot.cfg.game_root));
+                l.write(&format!(
+                    "config: {}",
+                    Self::config_summary(&boot.cfg, opts)
+                ));
+                Some(l)
+            }
+            Err(e) => {
+                crate::log::warn(format!("No se pudo crear el log de precarga: {e}"));
+                None
+            }
+        };
+        // Every message goes to the console/GUI and to the log file.
+        let mut emit = |msg: &str| {
+            log(msg);
+            if let Some(l) = &plog {
+                l.write(msg);
+            }
+        };
+
         let mut mode = Self::resolve_preload_mode(&boot.cfg, opts);
-        Self::confirm_full_preload(&mut mode, opts, None);
+        Self::confirm_full_preload(&mut mode, opts, plog.as_ref());
         let prefix_ram = opts.prefix_ram.unwrap_or_else(|| boot.cfg.prefix_ram());
         let materialize = opts
             .prefix_ram_proton
@@ -1515,7 +1560,7 @@ impl LaunchEngine {
             .preload_steamrt
             .unwrap_or_else(|| boot.cfg.preload_steamrt());
         if mode.is_off() && !prefix_ram && !do_proton && !do_steamrt {
-            log("Precarga desactivada (preload = \"off\" y prefix_ram = false).");
+            emit("Precarga desactivada (preload = \"off\" y prefix_ram = false).");
             return Ok(String::new());
         }
 
@@ -1539,13 +1584,13 @@ impl LaunchEngine {
             let r = pf.report();
             let ram = crate::prefix_ram::prepared_bytes() as f64 / 1_048_576.0;
             if r.copied {
-                log(&format!(
+                emit(&format!(
                     "Prefijo → tmpfs en {:.1}s (RAM {ram:.0} MiB, materializado {:.0} MiB).",
                     r.elapsed.as_secs_f64(),
                     r.materialized as f64 / 1_048_576.0
                 ));
             } else if r.reused {
-                log(&format!("Prefijo ya en tmpfs (RAM {ram:.0} MiB)."));
+                emit(&format!("Prefijo ya en tmpfs (RAM {ram:.0} MiB)."));
             }
             tmpfs_ready = pf.using_tmpfs();
         }
@@ -1553,7 +1598,7 @@ impl LaunchEngine {
         let started = Instant::now();
         let stop = AtomicBool::new(false);
         if !mode.is_off() {
-            log(&format!(
+            emit(&format!(
                 "Precargando perfil '{}' (modo {}): {} mod(s).",
                 prepared.profile.name,
                 mode.as_str(),
@@ -1572,7 +1617,7 @@ impl LaunchEngine {
                 &layers,
                 &stop,
             );
-            log(&format!(
+            emit(&format!(
                 "Precargado(s) {} archivo(s), {:.1} MiB.",
                 stats.files,
                 stats.bytes as f64 / 1_048_576.0
@@ -1587,7 +1632,7 @@ impl LaunchEngine {
                 PathBuf::from(&boot.cfg.proton_path)
             };
             let s = preload::warm_root(&root, &stop);
-            log(&format!(
+            emit(&format!(
                 "Proton prefetch: {} archivo(s), {:.0} MiB.",
                 s.files,
                 s.bytes as f64 / 1_048_576.0
@@ -1596,7 +1641,7 @@ impl LaunchEngine {
         if do_steamrt {
             if let Some(root) = steamrt_dir() {
                 let s = preload::warm_root(&root, &stop);
-                log(&format!(
+                emit(&format!(
                     "steamrt prefetch: {} archivo(s), {:.0} MiB.",
                     s.files,
                     s.bytes as f64 / 1_048_576.0
@@ -1608,7 +1653,7 @@ impl LaunchEngine {
             "Precarga completada en {:.1}s.",
             started.elapsed().as_secs_f64()
         );
-        log(&msg);
+        emit(&msg);
         Ok(msg)
     }
 
@@ -2370,6 +2415,38 @@ mod tests {
             count <= 21,
             "se conservan los 20 más nuevos + el actual: {count}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preload_log_kind_is_independent_and_pruned() {
+        let dir = std::env::temp_dir().join(format!("gta-mo-preloadlog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..25 {
+            std::fs::write(dir.join(format!("launch-{i:010}.log")), "viejo").unwrap();
+            std::fs::write(dir.join(format!("preload-{i:010}.log")), "viejo").unwrap();
+        }
+        let log = LaunchLog::create_kind(&dir, "preload", "precarga", None).unwrap();
+        log.write("precarga x");
+        let count = |pref: &str| {
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with(pref))
+                .count()
+        };
+        // The new preload log prunes only preload logs (<= 20)…
+        assert!(
+            count("preload-") <= 21,
+            "preload logs: {}",
+            count("preload-")
+        );
+        // …and leaves the launch logs untouched.
+        assert_eq!(count("launch-"), 25);
+        let content = std::fs::read_to_string(log.path()).unwrap();
+        assert!(content.contains("precarga x"));
+        assert!(content.contains("=== gta-mo — precarga ==="));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

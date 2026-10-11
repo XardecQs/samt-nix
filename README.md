@@ -265,7 +265,9 @@ auto_discover = true
 > `wine`, `proton`) and the total boot. `PROTON_LOG_DIR` and `DXVK_LOG_PATH` point
 > there too, and `UMU_LOG` keeps umu's output (`debug` with `--debug`). Proton's
 > verbose `steam-<appid>.log` is only written with `--debug` (or
-> `proton_log = true`). The newest 20 launch logs per profile are kept. Pass
+> `proton_log = true`). Standalone preload runs (`gta-mo preload`, which the GUI
+> uses as its *prewarm*) write their own `preload-<ts>.log` in the same folder.
+> The newest 20 `launch-*.log` and 20 `preload-*.log` per profile are kept. Pass
 > `--redact` (or `GTA_MO_REDACT=1`) to mask `/home/<user>` as `/home/****` so the
 > log is safe to share. The GUI's Log tab and ⋮ menu have an **Abrir carpeta de
 > logs** action.
