@@ -26,41 +26,54 @@
       ];
     };
 
+    # winit/eframe load these at runtime via dlopen (not linked), so they must
+    # also be reachable through LD_LIBRARY_PATH, not just at build time.
+    guiRuntimeLibs = pkgs: with pkgs; [
+      libGL
+      mesa
+      libx11
+      libxcursor
+      libxrandr
+      libxi
+      libxkbcommon
+      wayland
+      # AVIF decoding (`image`'s avif-native) links libdav1d.
+      dav1d
+    ];
+
+    # Wrapping + shell completions for the CLI binary.
+    cliPostInstall = pkgs: ''
+      wrapProgram "$out/bin/gta-mo" \
+        --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
+        --prefix PATH : ${pkgs.umu-launcher}/bin \
+        --prefix PATH : ${pkgs.rsync}/bin \
+        --prefix PATH : ${pkgs.xdg-utils}/bin
+
+      # NOTE: do not add `fuse3` to PATH here. Its bin/ contains a
+      # non-setuid fusermount3 that shadows the setuid wrapper in
+      # /run/wrappers/bin (or /usr/bin), breaking both fuse-overlayfs
+      # mounts and unmounts with "Permission denied".
+
+      mkdir -p "$out/share/bash-completion/completions" \
+               "$out/share/zsh/site-functions" \
+               "$out/share/fish/vendor_completions.d"
+      "$out/bin/gta-mo" completions bash > "$out/share/bash-completion/completions/gta-mo"
+      "$out/bin/gta-mo" completions zsh  > "$out/share/zsh/site-functions/_gta-mo"
+      "$out/bin/gta-mo" completions fish > "$out/share/fish/vendor_completions.d/gta-mo.fish"
+    '';
+
+    # CLI-only package: `enableGui = false` never compiles the GUI crates.
     mkCliPackage = { pkgs, doCheck ? false }:
       pkgs.rustPlatform.buildRustPackage {
         pname = "gta-mod-organizer";
         inherit version;
-
         src = source;
-
         cargoLock = {
           lockFile = ./Cargo.lock;
         };
-
         inherit doCheck;
-
         nativeBuildInputs = with pkgs; [ makeWrapper ];
-
-        postInstall = ''
-          wrapProgram "$out/bin/gta-mo" \
-            --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
-            --prefix PATH : ${pkgs.umu-launcher}/bin \
-            --prefix PATH : ${pkgs.rsync}/bin \
-            --prefix PATH : ${pkgs.xdg-utils}/bin
-
-          # NOTE: do not add `fuse3` to PATH here. Its bin/ contains a
-          # non-setuid fusermount3 that shadows the setuid wrapper in
-          # /run/wrappers/bin (or /usr/bin), breaking both fuse-overlayfs
-          # mounts and unmounts with "Permission denied".
-
-          mkdir -p "$out/share/bash-completion/completions" \
-                   "$out/share/zsh/site-functions" \
-                   "$out/share/fish/vendor_completions.d"
-          "$out/bin/gta-mo" completions bash > "$out/share/bash-completion/completions/gta-mo"
-          "$out/bin/gta-mo" completions zsh  > "$out/share/zsh/site-functions/_gta-mo"
-          "$out/bin/gta-mo" completions fish > "$out/share/fish/vendor_completions.d/gta-mo.fish"
-        '';
-
+        postInstall = cliPostInstall pkgs;
         meta = {
           description = "GTA San Andreas mod organizer with fuse-overlayfs";
           mainProgram = "gta-mo";
@@ -69,22 +82,15 @@
         };
       };
 
+    # GUI-enabled package: builds the CLI and the GUI in a **single** cargo
+    # invocation, so the dependency tree shared by both (gta-mo-core + rusqlite/
+    # serde/toml/…) is compiled only once instead of once per package. It
+    # provides both binaries (`gta-mo` and `gta-mo-gui`); when the GUI is enabled
+    # the modules install this for the CLI too, so nothing is built twice.
+    # `enableGui = false` uses `gta-mod-organizer` above (no GUI crates at all).
     mkGuiPackage = { pkgs }:
       let
-        # winit/eframe load these at runtime via dlopen (not linked), so they must
-        # also be reachable through LD_LIBRARY_PATH, not just at build time.
-        guiRuntimeLibs = with pkgs; [
-          libGL
-          mesa
-          libx11
-          libxcursor
-          libxrandr
-          libxi
-          libxkbcommon
-          wayland
-          # AVIF decoding (`image`'s avif-native) links libdav1d.
-          dav1d
-        ];
+        guiLibs = guiRuntimeLibs pkgs;
       in
       pkgs.rustPlatform.buildRustPackage {
         pname = "gta-mo-gui";
@@ -96,19 +102,19 @@
           lockFile = ./Cargo.lock;
         };
 
-        cargoBuildFlags = [ "-p" "gta-mo-gui" ];
+        cargoBuildFlags = [ "-p" "gta-mod-organizer" "-p" "gta-mo-gui" ];
 
         doCheck = false;
 
         nativeBuildInputs = with pkgs; [ pkg-config makeWrapper autoPatchelfHook ];
 
-        buildInputs = guiRuntimeLibs;
+        buildInputs = guiLibs;
 
-        postInstall = ''
+        postInstall = cliPostInstall pkgs + ''
           wrapProgram "$out/bin/gta-mo-gui" \
-            --prefix PATH : ${self.packages.${pkgs.stdenv.hostPlatform.system}.gta-mod-organizer}/bin \
+            --prefix PATH : "$out/bin" \
             --prefix PATH : ${pkgs.fontconfig}/bin \
-            --suffix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiRuntimeLibs}"
+            --suffix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath guiLibs}"
 
           install -Dm644 data/gta-mo-gui.desktop \
             "$out/share/applications/gta-mo-gui.desktop"

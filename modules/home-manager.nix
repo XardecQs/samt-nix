@@ -26,8 +26,16 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.gta-mod-organizer;
-      defaultText = lib.literalExpression "pkgs.gta-mod-organizer";
+      # With the GUI enabled, use the combined package (it builds the CLI and the
+      # GUI in one cargo invocation, so the shared dependencies compile once).
+      # The CLI-only package would otherwise recompile the same crates.
+      default =
+        if cfg.enableGui then pkgs.gta-mo-gui else pkgs.gta-mod-organizer;
+      defaultText = lib.literalExpression ''
+        if config.programs.gta-mo.enableGui
+        then pkgs.gta-mo-gui
+        else pkgs.gta-mod-organizer
+      '';
       description = "The gta-mod-organizer CLI package to use.";
     };
 
