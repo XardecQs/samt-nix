@@ -57,17 +57,13 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      # With the GUI enabled, use the combined package (it builds the CLI and the
-      # GUI in one cargo invocation, so the shared dependencies compile once).
-      # The CLI-only package would otherwise recompile the same crates.
-      default =
-        if cfg.enableGui then pkgs.gta-mo-gui else pkgs.gta-mod-organizer;
-      defaultText = lib.literalExpression ''
-        if config.programs.gta-mo.enableGui
-        then pkgs.gta-mo-gui
-        else pkgs.gta-mod-organizer
+      default = pkgs.gta-mod-organizer;
+      defaultText = lib.literalExpression "pkgs.gta-mod-organizer";
+      description = ''
+        The gta-mod-organizer CLI package. Only installed when
+        `enableGui = false`; with the GUI enabled, `guiPackage` (which also
+        provides the `gta-mo` binary) is installed for both.
       '';
-      description = "The gta-mod-organizer CLI package to use.";
     };
 
     enableGui = lib.mkEnableOption "the gta-mo-gui (egui) frontend";
@@ -76,7 +72,10 @@ in {
       type = lib.types.package;
       default = pkgs.gta-mo-gui;
       defaultText = lib.literalExpression "pkgs.gta-mo-gui";
-      description = "The gta-mo-gui (egui frontend) package to use.";
+      description = ''
+        The gta-mo-gui (egui frontend) package. It also provides the `gta-mo`
+        CLI binary, so a single package serves both when the GUI is enabled.
+      '';
     };
 
     gameDesktopEntry = lib.mkOption {
@@ -101,8 +100,12 @@ in {
 
           exec = lib.mkOption {
             type = lib.types.str;
-            default = "${cfg.package}/bin/gta-mo launch";
-            defaultText = lib.literalExpression ''"''${cfg.package}/bin/gta-mo launch"'';
+            default = "${if cfg.enableGui then cfg.guiPackage else cfg.package}/bin/gta-mo launch";
+            defaultText = lib.literalExpression ''
+              "''${if config.programs.gta-mo.enableGui
+                  then config.programs.gta-mo.guiPackage
+                  else config.programs.gta-mo.package}/bin/gta-mo launch"
+            '';
             description = "Command run when the entry is clicked.";
           };
 
@@ -133,9 +136,12 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ cfg.package ] ++ lib.optionals cfg.enableGui [
-      cfg.guiPackage
-    ] ++ lib.optional cfg.gameDesktopEntry.enable gameDesktopEntry;
+    # With the GUI enabled, `guiPackage` already provides the `gta-mo` CLI too,
+    # so installing `package` as well would collide (both ship
+    # `bin/.gta-mo-wrapped`) and recompile the shared crates.
+    environment.systemPackages =
+      (if cfg.enableGui then [ cfg.guiPackage ] else [ cfg.package ])
+      ++ lib.optional cfg.gameDesktopEntry.enable gameDesktopEntry;
 
     environment.etc."gta-mo/config.toml.example" = {
       text = exampleConfig;
