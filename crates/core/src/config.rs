@@ -114,9 +114,10 @@ impl Config {
     }
 
     /// Whether to materialize Proton symlinks into the tmpfs prefix. Defaults
-    /// to `true`.
+    /// to `false`: with the prefix already on tmpfs, copying the DLLs only
+    /// duplicates hundreds of MB.
     pub fn prefix_ram_proton(&self) -> bool {
-        self.prefix_ram_proton.unwrap_or(true)
+        self.prefix_ram_proton.unwrap_or(false)
     }
 
     /// Whether to prefetch the Proton runtime. Defaults to `false`.

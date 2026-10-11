@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use crate::{config, db, mount_state, overlay, preload, preload::PreloadMode, resolver, upper};
 
@@ -89,11 +89,13 @@ fn prune_launch_logs(dir: &Path, keep: usize) {
 }
 
 /// Forwards every line of `reader` to stdout (or stderr) and appends it to
-/// `log_path` when given.
+/// `log_path` when given. `on_first_line` (shared by the stdout and stderr
+/// tees) runs exactly once, before the first line is written.
 fn tee_output<R: std::io::Read + Send + 'static>(
     reader: R,
     log_path: &Path,
     to_stderr: bool,
+    on_first_line: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> std::thread::JoinHandle<()> {
     let path = log_path.to_path_buf();
     std::thread::spawn(move || {
@@ -102,10 +104,14 @@ fn tee_output<R: std::io::Read + Send + 'static>(
             .append(true)
             .open(&path)
             .ok();
+        let mut on_first_line = on_first_line;
         for line in std::io::BufReader::new(reader)
             .lines()
             .map_while(Result::ok)
         {
+            if let Some(cb) = on_first_line.take() {
+                cb();
+            }
             if to_stderr {
                 eprintln!("{line}");
             } else {
@@ -254,6 +260,30 @@ impl PhaseTimer {
             parts.join(" "),
             self.start.elapsed().as_secs_f64()
         )
+    }
+}
+
+/// Timing state shared between the `umu` runner and the watcher, so the
+/// "arranque total" (umu spawn → game process) metric uses the same origin as
+/// the "umu responde" (umu spawn → first output) one.
+#[derive(Default)]
+struct UmuTiming {
+    spawn: std::sync::Mutex<Option<Instant>>,
+}
+
+impl UmuTiming {
+    /// Records when `umu-run` was spawned (first writer wins).
+    fn set_spawn(&self, at: Instant) {
+        if let Ok(mut s) = self.spawn.lock() {
+            if s.is_none() {
+                *s = Some(at);
+            }
+        }
+    }
+
+    /// Elapsed time since `umu-run` was spawned, if it has been.
+    fn since_spawn(&self) -> Option<Duration> {
+        self.spawn.lock().ok().and_then(|s| s.map(|t| t.elapsed()))
     }
 }
 
@@ -414,10 +444,12 @@ impl LaunchEngine {
         }
     }
 
-    pub fn launch_game(
+    fn launch_game(
         exe_path: &Path,
         working_dir: &Path,
         launch_log: Option<&LaunchLog>,
+        timing: &UmuTiming,
+        report: bool,
     ) -> anyhow::Result<()> {
         let log_path = launch_log.map(|l| l.path().to_path_buf());
         let drop_uid = std::env::var("GTA_MO_DROP_UID")
@@ -436,40 +468,76 @@ impl LaunchEngine {
                 ));
             }
             return match drop_uid {
-                Some(uid) => {
-                    Self::launch_game_dropped(exe_path, working_dir, uid, drop_gid, log_path.as_deref())
-                }
+                Some(uid) => Self::launch_game_dropped(
+                    exe_path,
+                    working_dir,
+                    uid,
+                    drop_gid,
+                    log_path.as_deref(),
+                    timing,
+                    report,
+                ),
                 None => anyhow::bail!(
                     "gta-mo se ejecuta como root. Define GTA_MO_DROP_UID (y opcionalmente GTA_MO_DROP_GID) para lanzar el juego como usuario."
                 ),
             };
         }
 
-        Self::launch_game_direct(exe_path, working_dir, log_path.as_deref())
+        Self::launch_game_direct(exe_path, working_dir, log_path.as_deref(), timing, report)
     }
 
     /// Runs `umu-run` for `exe`, teeing its stdout/stderr to our own streams and
-    /// (when `log_path` is set) to the launch log file.
+    /// (when `log_path` is set) to the launch log file. Reports `⏱ umu responde`
+    /// when the first output line appears.
     fn run_umu(
         exe_path: &Path,
         working_dir: &Path,
         log_path: Option<&Path>,
+        timing: &UmuTiming,
+        report: bool,
     ) -> std::io::Result<std::process::ExitStatus> {
         let mut cmd = std::process::Command::new("umu-run");
         cmd.arg(exe_path).current_dir(working_dir);
 
         let Some(path) = log_path else {
+            timing.set_spawn(Instant::now());
             return cmd.status();
         };
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let spawn_at = Instant::now();
         let mut child = cmd.spawn()?;
+        timing.set_spawn(spawn_at);
+
+        // Emit "umu responde" once, on the first line from either stream.
+        let first_emitted = Arc::new(AtomicBool::new(false));
+        let on_first: Arc<dyn Fn() + Send + Sync> = {
+            let first_emitted = first_emitted.clone();
+            let log_path = path.to_path_buf();
+            Arc::new(move || {
+                if first_emitted.swap(true, Ordering::Relaxed) {
+                    return;
+                }
+                let msg = format!("⏱ umu responde: {:.2}s", spawn_at.elapsed().as_secs_f64());
+                if report {
+                    crate::log::info(&msg);
+                }
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                {
+                    let _ = writeln!(f, "{msg}");
+                }
+            })
+        };
+
         let mut handles = Vec::new();
         if let Some(out) = child.stdout.take() {
-            handles.push(tee_output(out, path, false));
+            handles.push(tee_output(out, path, false, Some(on_first.clone())));
         }
         if let Some(err) = child.stderr.take() {
-            handles.push(tee_output(err, path, true));
+            handles.push(tee_output(err, path, true, Some(on_first.clone())));
         }
         let status = child.wait()?;
         for h in handles {
@@ -523,8 +591,10 @@ impl LaunchEngine {
         exe_path: &Path,
         working_dir: &Path,
         log_path: Option<&Path>,
+        timing: &UmuTiming,
+        report: bool,
     ) -> anyhow::Result<()> {
-        let status = Self::run_umu(exe_path, working_dir, log_path)
+        let status = Self::run_umu(exe_path, working_dir, log_path, timing, report)
             .map_err(|e| anyhow::anyhow!("Error al ejecutar umu-run: {e}"))?;
 
         if !status.success() {
@@ -544,18 +614,24 @@ impl LaunchEngine {
         uid: u32,
         gid: Option<u32>,
         log_path: Option<&Path>,
+        timing: &UmuTiming,
+        report: bool,
     ) -> anyhow::Result<()> {
         // uid/GID del usuario real. El gid por defecto NO es el uid: usa el
         // grupo primario del usuario cuando se puede resolver.
         let gid = gid
             .or_else(|| Self::primary_gid_for_uid(uid))
             .unwrap_or(uid);
+        // The child forks before spawning umu, so record the start in the parent
+        // (the watcher lives here); the child's own timing is not visible to it.
+        timing.set_spawn(Instant::now());
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             anyhow::bail!("fork falló: {}", std::io::Error::last_os_error());
         }
         if pid == 0 {
-            let code = Self::drop_and_run_game(exe_path, working_dir, uid, gid, log_path);
+            let code =
+                Self::drop_and_run_game(exe_path, working_dir, uid, gid, log_path, timing, report);
             std::process::exit(code);
         }
 
@@ -591,6 +667,8 @@ impl LaunchEngine {
         uid: u32,
         gid: u32,
         log_path: Option<&Path>,
+        timing: &UmuTiming,
+        report: bool,
     ) -> i32 {
         if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
             eprintln!(
@@ -618,7 +696,7 @@ impl LaunchEngine {
             eprintln!("gta-mo: setuid falló: {}", std::io::Error::last_os_error());
             return 1;
         }
-        match Self::run_umu(exe_path, working_dir, log_path) {
+        match Self::run_umu(exe_path, working_dir, log_path, timing, report) {
             Ok(s) if s.success() => 0,
             Ok(s) => s.code().unwrap_or(1),
             Err(e) => {
@@ -696,42 +774,14 @@ impl LaunchEngine {
         false
     }
 
-    /// Path of DXVK's d3d9 log for `game_exe`.
-    fn dxvk_log_path(log_dir: &Path, game_exe: &str) -> PathBuf {
-        let stem = Path::new(game_exe)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(game_exe);
-        log_dir.join(format!("{stem}_d3d9.log"))
-    }
-
-    /// True once DXVK's d3d9 log shows it created the device (a good proxy for
-    /// "the game window is up"). The log must be newer than `since`, otherwise
-    /// a stale file from a previous launch would report success immediately.
-    fn dxvk_ready(log_dir: &Path, game_exe: &str, since: SystemTime) -> bool {
-        let path = Self::dxvk_log_path(log_dir, game_exe);
-        let Ok(md) = std::fs::metadata(&path) else {
-            return false;
-        };
-        // Allow a small tolerance for coarse filesystem timestamp granularity.
-        let since = since - Duration::from_secs(2);
-        if md.modified().map(|m| m < since).unwrap_or(true) {
-            return false;
-        }
-        std::fs::read_to_string(path)
-            .map(|s| s.contains("DXVK:") && s.contains("Creating device"))
-            .unwrap_or(false)
-    }
-
-    /// Background thread that reports "time to game process" and "time to DXVK
-    /// device" (window proxy) while `umu`/Proton runs.
+    /// Background thread that reports "time to game process" while
+    /// `umu`/Proton runs.
     #[allow(clippy::too_many_arguments)]
     fn spawn_watcher(
         game_exe: String,
-        log_dir: PathBuf,
         started: Instant,
-        started_wall: SystemTime,
         report: bool,
+        umu_timing: Arc<UmuTiming>,
         watcher_stop: Arc<AtomicBool>,
         preload_stop: Arc<AtomicBool>,
         launch_log: Option<PathBuf>,
@@ -749,7 +799,6 @@ impl LaunchEngine {
                 };
                 let deadline = started + Duration::from_secs(900);
                 let mut proc_done = false;
-                let mut dxvk_done = false;
                 loop {
                     if watcher_stop.load(Ordering::Relaxed) {
                         break;
@@ -761,15 +810,11 @@ impl LaunchEngine {
                             "⏱ proceso del juego: {:.2}s",
                             started.elapsed().as_secs_f64()
                         ));
+                        if let Some(d) = umu_timing.since_spawn() {
+                            emit(format!("⏱ arranque total: {:.2}s", d.as_secs_f64()));
+                        }
                     }
-                    if !dxvk_done && Self::dxvk_ready(&log_dir, &game_exe, started_wall) {
-                        dxvk_done = true;
-                        emit(format!(
-                            "⏱ DXVK listo (≈ ventana): {:.2}s",
-                            started.elapsed().as_secs_f64()
-                        ));
-                    }
-                    if (proc_done && dxvk_done) || Instant::now() >= deadline {
+                    if proc_done || Instant::now() >= deadline {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(100));
@@ -901,14 +946,7 @@ impl LaunchEngine {
             }
         }
 
-        // Drop DXVK's d3d9 log from the previous launch so the watcher cannot
-        // mistake it for this session's "device created" signal.
-        let _ = std::fs::remove_file(Self::dxvk_log_path(
-            &prepared.ppaths.log_dir,
-            boot.cfg.game_exe(),
-        ));
-        let launch_wall = SystemTime::now();
-
+        let umu_timing = Arc::new(UmuTiming::default());
         let watcher_stop = Arc::new(AtomicBool::new(false));
         let watcher_log = launch_log.map(|l| l.path().to_path_buf());
         // The watcher also stops the preloader once the game starts, so it runs
@@ -916,10 +954,9 @@ impl LaunchEngine {
         let watcher = if boot.cfg.timings() || preloader.is_some() || !prefetchers.is_empty() {
             Self::spawn_watcher(
                 boot.cfg.game_exe().to_string(),
-                prepared.ppaths.log_dir.clone(),
                 timer.start_instant(),
-                launch_wall,
                 boot.cfg.timings(),
+                umu_timing.clone(),
                 watcher_stop.clone(),
                 preload_stop.clone(),
                 watcher_log,
@@ -948,7 +985,13 @@ impl LaunchEngine {
         }
 
         let started = Instant::now();
-        let result = Self::launch_game(game_exe, working_dir, launch_log);
+        let result = Self::launch_game(
+            game_exe,
+            working_dir,
+            launch_log,
+            &umu_timing,
+            boot.cfg.timings(),
+        );
         let session = started.elapsed();
         timer.mark("sesión");
 
@@ -1350,13 +1393,16 @@ impl LaunchEngine {
         let resolved = graph.resolve();
 
         // Option selections per folder (for the enabled/known mods), used both
-        // by the constraint check and to build the overlay layers.
+        // by the constraint check and to build the overlay layers. Groups the
+        // profile has not chosen fall back to the manifest `default`.
+        let empty_selection: HashMap<String, String> = HashMap::new();
         let mut options_by_folder: HashMap<String, HashMap<String, String>> = HashMap::new();
         for m in graph.mods.values() {
-            if let Some(sel) = mod_options.get(&m.id) {
-                if !sel.is_empty() {
-                    options_by_folder.insert(m.folder_name.clone(), sel.clone());
-                }
+            let selected = mod_options.get(&m.id).unwrap_or(&empty_selection);
+            let effective =
+                crate::meta::fill_option_defaults(&paths.mods_dir, &m.folder_name, selected);
+            if !effective.is_empty() {
+                options_by_folder.insert(m.folder_name.clone(), effective);
             }
         }
 

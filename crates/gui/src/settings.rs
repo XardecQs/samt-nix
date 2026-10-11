@@ -22,42 +22,6 @@ impl Density {
     }
 }
 
-/// Default layout of the dependency graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum GraphLayout {
-    #[default]
-    Force,
-    Hierarchical,
-}
-
-impl GraphLayout {
-    pub fn label(self) -> &'static str {
-        match self {
-            GraphLayout::Force => "Fuerza",
-            GraphLayout::Hierarchical => "Jerárquico",
-        }
-    }
-}
-
-/// Orientation of the hierarchical layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HierOrientation {
-    #[default]
-    TopDown,
-    LeftRight,
-}
-
-impl HierOrientation {
-    pub fn label(self) -> &'static str {
-        match self {
-            HierOrientation::TopDown => "Arriba → abajo",
-            HierOrientation::LeftRight => "Izquierda → derecha",
-        }
-    }
-}
-
 /// Force-directed layout parameters (advanced).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForcePrefs {
@@ -120,39 +84,9 @@ fn f_gravity() -> f32 {
     0.8
 }
 
-/// Hierarchical layout parameters (advanced).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HierarchicalPrefs {
-    #[serde(default = "h_dist")]
-    pub row_dist: f32,
-    #[serde(default = "h_dist")]
-    pub col_dist: f32,
-    #[serde(default)]
-    pub center_parent: bool,
-    #[serde(default)]
-    pub orientation: HierOrientation,
-}
-
-impl Default for HierarchicalPrefs {
-    fn default() -> Self {
-        Self {
-            row_dist: h_dist(),
-            col_dist: h_dist(),
-            center_parent: false,
-            orientation: HierOrientation::default(),
-        }
-    }
-}
-
-fn h_dist() -> f32 {
-    50.0
-}
-
 /// Dependency graph preferences (persisted under `[graph]` in `gui.toml`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphSettings {
-    #[serde(default)]
-    pub layout: GraphLayout,
     #[serde(default = "default_true")]
     pub show_optional: bool,
     #[serde(default = "default_true")]
@@ -193,14 +127,11 @@ pub struct GraphSettings {
     pub auto_settle: bool,
     #[serde(default)]
     pub force: ForcePrefs,
-    #[serde(default)]
-    pub hierarchical: HierarchicalPrefs,
 }
 
 impl Default for GraphSettings {
     fn default() -> Self {
         Self {
-            layout: GraphLayout::default(),
             show_optional: true,
             show_conflicts: true,
             show_variants: true,
@@ -219,7 +150,6 @@ impl Default for GraphSettings {
             only_enabled: false,
             auto_settle: true,
             force: ForcePrefs::default(),
-            hierarchical: HierarchicalPrefs::default(),
         }
     }
 }
@@ -273,18 +203,18 @@ pub struct GuiSettings {
     #[serde(default = "default_true")]
     pub confirm_deletes: bool,
     /// Run the game against a tmpfs copy of the Wine prefix (faster startup on
-    /// slow disks). Passed to `gta-mo` as `--prefix-ram`/`--no-prefix-ram`.
-    #[serde(default = "default_true")]
-    pub prefix_ram: bool,
-    /// Materialize the Proton DLL symlinks into the tmpfs prefix.
-    #[serde(default = "default_true")]
-    pub prefix_ram_proton: bool,
-    /// Prefetch the Proton runtime into the page cache.
-    #[serde(default)]
-    pub preload_proton: bool,
-    /// Prefetch umu's steamrt runtime into the page cache.
-    #[serde(default)]
-    pub preload_steamrt: bool,
+    /// slow disks). `None` inherits from `config.toml` (no flag is passed);
+    /// `Some(true/false)` forces `--prefix-ram`/`--no-prefix-ram`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_ram: Option<bool>,
+    /// Prefetch the Proton runtime into the page cache. `None` inherits from
+    /// `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preload_proton: Option<bool>,
+    /// Prefetch umu's steamrt runtime into the page cache. `None` inherits from
+    /// `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preload_steamrt: Option<bool>,
     #[serde(default)]
     pub graph: GraphSettings,
     /// Per-browser UI preferences (`[browsers.<id>]`).
@@ -304,10 +234,9 @@ impl Default for GuiSettings {
             density: Density::default(),
             show_covers: true,
             confirm_deletes: true,
-            prefix_ram: true,
-            prefix_ram_proton: true,
-            preload_proton: false,
-            preload_steamrt: false,
+            prefix_ram: None,
+            preload_proton: None,
+            preload_steamrt: None,
             graph: GraphSettings::default(),
             browsers: HashMap::new(),
         }
@@ -428,14 +357,26 @@ mod tests {
     }
 
     #[test]
+    fn optimize_flags_are_tristate_and_backward_compatible() {
+        // An old gui.toml with plain bools still loads (Some), and the removed
+        // `prefix_ram_proton` key is ignored.
+        let s: GuiSettings =
+            toml::from_str("prefix_ram = true\nprefix_ram_proton = true\n").unwrap();
+        assert_eq!(s.prefix_ram, Some(true));
+        assert_eq!(s.preload_proton, None);
+        // Inherit (`None`) is not serialized.
+        let text = toml::to_string(&GuiSettings::default()).unwrap();
+        assert!(!text.contains("prefix_ram"));
+        assert!(!text.contains("preload_proton"));
+    }
+
+    #[test]
     fn graph_settings_defaults_and_roundtrip() {
         // A file without a [graph] table gets the defaults.
         let s: GuiSettings = toml::from_str("ui_scale = 1.0\n").unwrap();
-        assert_eq!(s.graph.layout, GraphLayout::Force);
         assert!(s.graph.show_optional && s.graph.show_conflicts && s.graph.show_variants);
         assert!(s.graph.auto_settle);
         assert_eq!(s.graph.force.k_scale, 0.6);
-        assert_eq!(s.graph.hierarchical.orientation, HierOrientation::TopDown);
         assert_eq!(s.graph.edge_width, 2.0);
         assert_eq!(s.graph.arrow_size, 15.0);
         assert!(s.graph.show_arrows);
@@ -446,16 +387,10 @@ mod tests {
 
         let s = GuiSettings {
             graph: GraphSettings {
-                layout: GraphLayout::Hierarchical,
                 show_conflicts: false,
                 zoom_speed: 0.25,
                 force: ForcePrefs {
                     gravity: 1.2,
-                    ..Default::default()
-                },
-                hierarchical: HierarchicalPrefs {
-                    center_parent: true,
-                    orientation: HierOrientation::LeftRight,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -465,14 +400,9 @@ mod tests {
         let text = toml::to_string(&s).unwrap();
         assert!(text.contains("[graph]"));
         let back: GuiSettings = toml::from_str(&text).unwrap();
-        assert_eq!(back.graph.layout, GraphLayout::Hierarchical);
         assert!(!back.graph.show_conflicts);
         assert_eq!(back.graph.zoom_speed, 0.25);
         assert_eq!(back.graph.force.gravity, 1.2);
-        assert_eq!(
-            back.graph.hierarchical.orientation,
-            HierOrientation::LeftRight
-        );
     }
 
     #[test]

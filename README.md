@@ -214,22 +214,25 @@ auto_discover = true
 > if `/dev/shm` is unavailable. Disable with `--no-prefix-ram` or
 > `prefix_ram = false`.
 >
-> When `prefix_ram` is on, `prefix_ram_proton` (default on) also **materializes**
-> into the tmpfs prefix the file symlinks that point into the Proton install
+> When `prefix_ram` is on, `prefix_ram_proton` (default off) can also
+> **materialize** into the tmpfs prefix the file symlinks that point into the
+> Proton install
 > (`drive_c/windows/{system32,syswow64}` → `GE-Proton/files/lib/wine/*`), so Wine
-> reads its system DLLs from RAM instead of disk. `preload_proton` and
+> reads its system DLLs from RAM instead of disk. It is off by default because,
+> with the prefix already on tmpfs, it only duplicates hundreds of MB.
+> `preload_proton` and
 > `preload_steamrt` (both **off** by default) additionally prefetch the Proton
 > runtime and umu's `steamrt4` into the page cache in the background. The RAM
 > used by the tmpfs prefix is reported in the launch log and by
-> `gta-mo prefix status`. All of these are toggleable in the GUI's Preferences
-> (Comportamiento).
+> `gta-mo prefix status`.
 >
 > `timings = true` (default) prints per-phase timings (`config/db`, `plan`,
 > `mount`, `prefix-ram`, `preload`, `sesión`, `prefix-sync`) and, while the game
-> boots, the time to the game process and to DXVK's device creation (a good proxy
-> for "the window is up"). The GUI's Log tab follows the newest lines unless you
-> scroll up (there is an **Ir al final** button), and the status bar shows the
-> running/queued jobs with a popover to cancel them.
+> boots, the time until `umu` produces its first output (`⏱ umu responde`), the
+> time to the game process (`⏱ proceso del juego`) and the total from the `umu`
+> spawn to the process (`⏱ arranque total`). The GUI's Log tab follows the newest
+> lines unless you scroll up (there is an **Ir al final** button), and the status
+> bar shows the running/queued jobs with a popover to cancel them.
 
 
 > **Proton upscalers**: GE and CachyOS Proton run `protonfixes.setup_upscalers()`
@@ -723,13 +726,13 @@ edges: required dependencies, optional ones, conflicts, `requires_any`
 alternatives and `[variant]` families. Edges can be filtered with the
 *Opcionales*, *Conflictos* and *Variantes* toggles. It supports free zoom/pan
 (the mouse wheel zooms towards the cursor and drag pans, even outside the
-viewport) plus **＋/－/⤢ Ajustar** buttons, node dragging, and a **Fuerza**
-layout (default; it settles and pauses on its own) with a **Jerárquico**
-alternative and a **Reorganizar** button. A single click selects a node (shown
+viewport) plus **＋/－/⤢ Ajustar** buttons, node dragging, a **Fuerza**
+layout (it settles and pauses on its own) and a **Reorganizar** button. A single
+click selects a node (shown
 in an info line) and a double click opens its detail; labels have a background
 and stay at a constant screen size, and edges/arrows do not grow with the zoom.
 Positions are kept when only the enabled state changes. All of this (plus the
-advanced force/hierarchical parameters) is configurable in
+advanced force parameters) is configurable in
 **Preferencias → Grafo** and persisted in `gui.toml`.
 
 **Datos** and **Overwrite** share one explorer widget: a folder-tree sidebar and
@@ -752,13 +755,13 @@ The GUI follows the system **light/dark** theme by default and can be forced in
 - **Accent color** (8 presets — blue, purple, magenta, red, amber, yellow,
   green, gray — plus a custom color picker), high-contrast mode,
   UI density, interface scale, "reduce motion" and whether to show covers.
-- A **Grafo** section configures the dependency graph: default layout (Fuerza/
-  Jerárquico), which edge kinds to show and "only enabled", edge width/arrow
+- A **Grafo** section configures the dependency graph: which edge kinds to show
+  and "only enabled", edge width/arrow
   size and arrows on/off (kept at a constant screen size across zoom), node
   radius, label font/background, highlight the selected node, labels/dragging/
   selection, zoom speed and fit padding, "settle and pause" for the force
-  layout, and advanced **Fuerza**/**Jerárquico** parameters (center gravity,
-  attraction, repulsion, damping, spacing, orientation…).
+  layout, and advanced **Fuerza** parameters (center gravity,
+  attraction, repulsion, damping, spacing…).
 - A semantic color palette (`crates/gui/src/theme.rs`) whose text/background
   pairs are verified to meet **WCAG AA** contrast in both themes by unit tests.
 

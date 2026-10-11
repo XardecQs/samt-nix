@@ -3391,10 +3391,21 @@ fn options_by_folder(
     profile_id: i64,
 ) -> anyhow::Result<HashMap<String, HashMap<String, String>>> {
     let by_id = db::all_profile_options(conn, profile_id)?;
+    // Best-effort: apply manifest `default`s for groups the profile has not
+    // chosen so `ctl conflicts`/`which` match what `launch` actually mounts.
+    let mods_dir = gta_mo_core::config::load_config()
+        .ok()
+        .map(|cfg| gta_mo_core::config::RuntimePaths::from_config(&cfg).mods_dir);
     let mut out = HashMap::new();
     for m in db::load_all_mods_for_profile(conn, profile_id)? {
-        if let Some(sel) = by_id.get(&m.id) {
-            out.insert(m.folder_name, sel.clone());
+        let empty = HashMap::new();
+        let selected = by_id.get(&m.id).unwrap_or(&empty);
+        let effective = match &mods_dir {
+            Some(dir) => gta_mo_core::meta::fill_option_defaults(dir, &m.folder_name, selected),
+            None => selected.clone(),
+        };
+        if !effective.is_empty() {
+            out.insert(m.folder_name, effective);
         }
     }
     Ok(out)

@@ -50,7 +50,9 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 # Also copy into the tmpfs prefix the Wine DLLs that the prefix symlinks from
 # the Proton install (they otherwise stay on disk and cause cold-load stalls).
 # This only affects the tmpfs copy: the on-disk prefix keeps its symlinks.
-# prefix_ram_proton = true
+# Off by default (with the prefix already on tmpfs, copying the DLLs only
+# duplicates hundreds of MB).
+# prefix_ram_proton = false
 #
 # Prefetch the Proton runtime and umu's steamrt4 into the page cache in the
 # background (opt-in; useful on slow disks).

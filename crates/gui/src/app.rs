@@ -9,7 +9,7 @@ use eframe::egui;
 use crate::backend::{Backend, GuiEvent};
 use crate::file_browser::{self, BrowserAction, FileBrowserState, FileEntry};
 use crate::model::{filter_and_sort, Filters, Snapshot, SortField, StatusFilter};
-use crate::settings::{Density, GraphLayout, GuiSettings};
+use crate::settings::{Density, GuiSettings};
 use crate::theme::{self, ThemePref};
 use crate::thumbs::{ThumbSize, ThumbState};
 
@@ -40,18 +40,6 @@ type DepGraph = egui_graphs::Graph<
     petgraph::graph::DefaultIx,
     crate::graph_node::ModNodeShape,
     egui_graphs::DefaultEdgeShape,
->;
-
-type HierGraphView<'a> = egui_graphs::GraphView<
-    'a,
-    i64,
-    crate::model::GEdgeKind,
-    petgraph::Directed,
-    petgraph::graph::DefaultIx,
-    crate::graph_node::ModNodeShape,
-    egui_graphs::DefaultEdgeShape,
-    egui_graphs::LayoutStateHierarchical,
-    egui_graphs::LayoutHierarchical,
 >;
 
 type ForceGraphView<'a> = egui_graphs::GraphView<
@@ -399,18 +387,18 @@ impl GtaMoApp {
         self.pump();
     }
 
-    /// Appends the RAM/optimization flags from preferences.
+    /// Appends the RAM/optimization flags from preferences. `None` (inherit)
+    /// passes nothing, so `config.toml` wins.
     fn push_optimize_args(&self, args: &mut Vec<String>) {
-        for (on, flag) in [
+        for (value, flag) in [
             (self.settings.prefix_ram, "--prefix-ram"),
-            (self.settings.prefix_ram_proton, "--prefix-ram-proton"),
             (self.settings.preload_proton, "--preload-proton"),
             (self.settings.preload_steamrt, "--preload-steamrt"),
         ] {
-            if on {
-                args.push(flag.into());
-            } else {
-                args.push(format!("--no-{}", &flag[2..]));
+            match value {
+                Some(true) => args.push(flag.into()),
+                Some(false) => args.push(format!("--no-{}", &flag[2..])),
+                None => {}
             }
         }
     }
@@ -689,6 +677,13 @@ impl GtaMoApp {
         for ev in events {
             match ev {
                 GuiEvent::LogLine(l) => {
+                    // `ctl enable` disables the other members of a variant family
+                    // silently in the log; surface it as a toast so the change is
+                    // not a surprise.
+                    if l.contains("desactivada automáticamente") {
+                        let text = l.strip_prefix("[!] ").unwrap_or(&l).to_string();
+                        self.toasts.push(ctx, crate::toasts::ToastKind::Info, text);
+                    }
                     self.log.push(l);
                     if self.log.len() > 2000 {
                         self.log.drain(..self.log.len() - 2000);
@@ -2948,33 +2943,6 @@ impl GtaMoApp {
             ui.selectable_value(&mut self.deps_view, DepsView::List, "Lista");
             ui.selectable_value(&mut self.deps_view, DepsView::Graph, "Grafo");
             if self.deps_view == DepsView::Graph {
-                ui.separator();
-                if ui
-                    .selectable_value(
-                        &mut self.settings.graph.layout,
-                        GraphLayout::Hierarchical,
-                        "Jerárquico",
-                    )
-                    .clicked()
-                {
-                    self.graph_stale = true;
-                    self.graph_reset_layout = true;
-                    self.graph_fit_pending = true;
-                    prefs_changed = true;
-                }
-                if ui
-                    .selectable_value(
-                        &mut self.settings.graph.layout,
-                        GraphLayout::Force,
-                        "Fuerza",
-                    )
-                    .clicked()
-                {
-                    self.graph_stale = true;
-                    self.graph_reset_layout = true;
-                    self.graph_fit_pending = true;
-                    prefs_changed = true;
-                }
                 if ui.button("Reorganizar").clicked() {
                     self.graph = None;
                     self.graph_stale = true;
@@ -3254,44 +3222,23 @@ impl GtaMoApp {
         g
     }
 
-    /// Resets the active layout so a rebuilt graph is positioned again (the
-    /// hierarchical layout only runs once; the force one restarts), applying the
-    /// configured parameters.
+    /// Resets the force layout so a rebuilt graph is positioned again, applying
+    /// the configured parameters.
     fn reset_graph_layout(&self, ui: &mut egui::Ui) {
         let g = &self.settings.graph;
-        match g.layout {
-            GraphLayout::Hierarchical => {
-                HierGraphView::reset_layout(ui);
-                let mut state = HierGraphView::get_layout_state(ui);
-                state.row_dist = g.hierarchical.row_dist;
-                state.col_dist = g.hierarchical.col_dist;
-                state.center_parent = g.hierarchical.center_parent;
-                state.orientation = match g.hierarchical.orientation {
-                    crate::settings::HierOrientation::TopDown => {
-                        egui_graphs::LayoutHierarchicalOrientation::TopDown
-                    }
-                    crate::settings::HierOrientation::LeftRight => {
-                        egui_graphs::LayoutHierarchicalOrientation::LeftRight
-                    }
-                };
-                HierGraphView::set_layout_state(ui, state);
-            }
-            GraphLayout::Force => {
-                ForceGraphView::reset_layout(ui);
-                let mut state = ForceGraphView::get_layout_state(ui);
-                state.base.is_running = true;
-                state.base.step_count = 0;
-                state.base.dt = g.force.dt;
-                state.base.epsilon = g.force.epsilon;
-                state.base.damping = g.force.damping;
-                state.base.max_step = g.force.max_step;
-                state.base.k_scale = g.force.k_scale;
-                state.base.c_attract = g.force.c_attract;
-                state.base.c_repulse = g.force.c_repulse;
-                state.extras.0.params.c = g.force.gravity;
-                ForceGraphView::set_layout_state(ui, state);
-            }
-        }
+        ForceGraphView::reset_layout(ui);
+        let mut state = ForceGraphView::get_layout_state(ui);
+        state.base.is_running = true;
+        state.base.step_count = 0;
+        state.base.dt = g.force.dt;
+        state.base.epsilon = g.force.epsilon;
+        state.base.damping = g.force.damping;
+        state.base.max_step = g.force.max_step;
+        state.base.k_scale = g.force.k_scale;
+        state.base.c_attract = g.force.c_attract;
+        state.base.c_repulse = g.force.c_repulse;
+        state.extras.0.params.c = g.force.gravity;
+        ForceGraphView::set_layout_state(ui, state);
     }
 
     /// Zooms the graph by `factor`, keeping the canvas point under `anchor` (a
@@ -3353,10 +3300,7 @@ impl GtaMoApp {
 
         // Fit once on build/reorganize/reset (free zoom/pan otherwise).
         if self.graph_fit_pending {
-            match self.settings.graph.layout {
-                GraphLayout::Hierarchical => HierGraphView::reset_metadata(ui),
-                GraphLayout::Force => ForceGraphView::reset_metadata(ui),
-            }
+            ForceGraphView::reset_metadata(ui);
             self.graph_fit_pending = false;
         }
 
@@ -3406,26 +3350,17 @@ impl GtaMoApp {
         };
         self.apply_graph_edge_style(&mut graph, ui);
         self.apply_graph_node_style(&mut graph, theme::active(ui.ctx()).accent);
-        let resp = match self.settings.graph.layout {
-            GraphLayout::Hierarchical => {
-                let mut view = HierGraphView::new(&mut graph)
-                    .with_interactions(&interactions)
-                    .with_navigations(&navigation)
-                    .with_styles(&style);
-                ui.add(&mut view)
-            }
-            GraphLayout::Force => {
-                let mut view = ForceGraphView::new(&mut graph)
-                    .with_interactions(&interactions)
-                    .with_navigations(&navigation)
-                    .with_styles(&style);
-                ui.add(&mut view)
-            }
+        let resp = {
+            let mut view = ForceGraphView::new(&mut graph)
+                .with_interactions(&interactions)
+                .with_navigations(&navigation)
+                .with_styles(&style);
+            ui.add(&mut view)
         };
         let rect = resp.rect;
 
         // Auto-pause the force simulation once it has settled.
-        if self.settings.graph.layout == GraphLayout::Force && self.settings.graph.auto_settle {
+        if self.settings.graph.auto_settle {
             let mut state = ForceGraphView::get_layout_state(ui);
             if state.base.is_running
                 && state.base.step_count > 400

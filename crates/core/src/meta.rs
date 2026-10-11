@@ -454,6 +454,28 @@ pub fn mod_option_groups(mods_dir: &Path, folder: &str) -> Vec<ModOption> {
     groups
 }
 
+/// Returns `selected` with the manifest `default` filled in for every group the
+/// profile has not chosen. A default that does not name a declared choice is
+/// ignored, so it can never mount a non-existent folder.
+pub fn fill_option_defaults(
+    mods_dir: &Path,
+    folder: &str,
+    selected: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut out = selected.clone();
+    for group in mod_option_groups(mods_dir, folder) {
+        if out.contains_key(&group.group) {
+            continue;
+        }
+        if let Some(default) = &group.default {
+            if group.choices.iter().any(|c| &c.key == default) {
+                out.insert(group.group.clone(), default.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Resolves the overlay layer(s) contributed by a mod's **selected** options.
 /// One layer per selected group (in group order), above the base mount.
 pub fn mod_option_layers(
@@ -1003,6 +1025,41 @@ default = "4k"
             mod_layers_with_options(&dir, "M", &unknown),
             vec![dir.join("M/content")]
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn option_default_fills_when_unselected() {
+        let dir = tmp_mods_dir("optdefault");
+        fs::create_dir_all(dir.join("M/content")).unwrap();
+        fs::create_dir_all(dir.join("M/options/variant/4k")).unwrap();
+        fs::create_dir_all(dir.join("M/options/variant/lite")).unwrap();
+        fs::write(
+            dir.join("M/mod.toml"),
+            "mount = [\"content\"]\n[[options]]\ngroup = \"variant\"\ndefault = \"4k\"\nchoices = [\"4k\", \"lite\"]\n",
+        )
+        .unwrap();
+
+        // No selection -> the declared default is filled and mounted.
+        let effective = fill_option_defaults(&dir, "M", &HashMap::new());
+        assert_eq!(effective.get("variant").map(String::as_str), Some("4k"));
+        assert_eq!(
+            mod_layers_with_options(&dir, "M", &effective),
+            vec![dir.join("M/options/variant/4k"), dir.join("M/content")]
+        );
+
+        // An explicit choice wins over the default.
+        let chosen: HashMap<String, String> = [("variant".to_string(), "lite".to_string())].into();
+        let effective = fill_option_defaults(&dir, "M", &chosen);
+        assert_eq!(effective.get("variant").map(String::as_str), Some("lite"));
+
+        // An invalid default is ignored (never mounts a missing folder).
+        fs::write(
+            dir.join("M/mod.toml"),
+            "mount = [\"content\"]\n[[options]]\ngroup = \"variant\"\ndefault = \"ghost\"\nchoices = [\"4k\"]\n",
+        )
+        .unwrap();
+        assert!(fill_option_defaults(&dir, "M", &HashMap::new()).is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 

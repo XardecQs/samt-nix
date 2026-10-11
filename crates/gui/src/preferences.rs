@@ -1,6 +1,6 @@
 //! Preferences dialog (appearance, behavior and advanced info).
 
-use crate::settings::{Density, GraphLayout, GraphSettings, GuiSettings, HierOrientation};
+use crate::settings::{Density, GraphSettings, GuiSettings};
 use crate::theme::{Accent, ThemePref};
 use eframe::egui;
 
@@ -139,33 +139,52 @@ fn behavior(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
     changed |= ui
         .checkbox(&mut s.confirm_deletes, "Pedir confirmación al eliminar")
         .changed();
-    changed |= ui
-        .checkbox(&mut s.prefix_ram, "Prefijo Wine en RAM (tmpfs)")
-        .on_hover_text(
-            "Copia el prefijo a /dev/shm durante la partida para acelerar el \
-             arranque en discos lentos; el disco se sincroniza al salir.",
+
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(
+            "Opciones de rendimiento: «Heredar» usa lo definido en config.toml; \
+             «Sí»/«No» lo fuerzan solo en la GUI.",
         )
-        .changed();
-    ui.add_enabled_ui(s.prefix_ram, |ui| {
-        changed |= ui
-            .checkbox(
-                &mut s.prefix_ram_proton,
-                "Materializar DLL de Proton en el tmpfs",
-            )
-            .on_hover_text(
-                "Copia al tmpfs las DLL de Wine que el prefijo enlaza desde Proton, \
-                 para que se lean de RAM en vez del disco.",
-            )
-            .changed();
+        .small()
+        .weak(),
+    );
+    changed |= tristate(
+        ui,
+        &mut s.prefix_ram,
+        "Prefijo Wine en RAM (tmpfs)",
+        "Copia el prefijo a /dev/shm durante la partida para acelerar el \
+         arranque en discos lentos; el disco se sincroniza al salir.",
+    );
+    changed |= tristate(
+        ui,
+        &mut s.preload_proton,
+        "Precalentar Proton (caché)",
+        "Lee el runtime de Proton a la caché de página en segundo plano (~1,5 GB).",
+    );
+    changed |= tristate(
+        ui,
+        &mut s.preload_steamrt,
+        "Precalentar steamrt de umu (caché)",
+        "Lee el runtime steamrt4 de umu a la caché de página en segundo plano.",
+    );
+    changed
+}
+
+/// Tri-state selector: `None` inherits from `config.toml` (no flag), while
+/// `Some(true/false)` forces the corresponding `--x`/`--no-x` flag.
+fn tristate(ui: &mut egui::Ui, value: &mut Option<bool>, label: &str, hover: &str) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label).on_hover_text(hover);
+        let mut v = *value;
+        changed |= ui.selectable_value(&mut v, None, "Heredar").changed();
+        changed |= ui.selectable_value(&mut v, Some(true), "Sí").changed();
+        changed |= ui.selectable_value(&mut v, Some(false), "No").changed();
+        if changed {
+            *value = v;
+        }
     });
-    changed |= ui
-        .checkbox(&mut s.preload_proton, "Precalentar Proton (caché)")
-        .on_hover_text("Lee el runtime de Proton a la caché de página en segundo plano (~1,5 GB).")
-        .changed();
-    changed |= ui
-        .checkbox(&mut s.preload_steamrt, "Precalentar steamrt de umu (caché)")
-        .on_hover_text("Lee el runtime steamrt4 de umu a la caché de página en segundo plano.")
-        .changed();
     changed
 }
 
@@ -177,16 +196,6 @@ fn graph(ui: &mut egui::Ui, g: &mut GraphSettings) -> bool {
         .num_columns(2)
         .spacing([18.0, 10.0])
         .show(ui, |ui| {
-            ui.label("Layout por defecto");
-            egui::ComboBox::from_id_salt("prefs_graph_layout")
-                .selected_text(g.layout.label())
-                .show_ui(ui, |ui| {
-                    for l in [GraphLayout::Force, GraphLayout::Hierarchical] {
-                        changed |= ui.selectable_value(&mut g.layout, l, l.label()).changed();
-                    }
-                });
-            ui.end_row();
-
             ui.label("Velocidad de zoom");
             changed |= ui
                 .add(egui::Slider::new(&mut g.zoom_speed, 0.02..=0.5).fixed_decimals(2))
@@ -341,53 +350,6 @@ fn graph(ui: &mut egui::Ui, g: &mut GraphSettings) -> bool {
                         .changed();
                     ui.end_row();
                 });
-        });
-
-    ui.add_space(4.0);
-    egui::CollapsingHeader::new("Jerárquico (avanzado)")
-        .id_salt("prefs_graph_hier")
-        .default_open(false)
-        .show(ui, |ui| {
-            egui::Grid::new("prefs_graph_hier_grid")
-                .num_columns(2)
-                .spacing([18.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("Separación de filas");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut g.hierarchical.row_dist, 10.0..=200.0)
-                                .fixed_decimals(0),
-                        )
-                        .changed();
-                    ui.end_row();
-
-                    ui.label("Separación de columnas");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut g.hierarchical.col_dist, 10.0..=200.0)
-                                .fixed_decimals(0),
-                        )
-                        .changed();
-                    ui.end_row();
-
-                    ui.label("Orientación");
-                    egui::ComboBox::from_id_salt("prefs_graph_orientation")
-                        .selected_text(g.hierarchical.orientation.label())
-                        .show_ui(ui, |ui| {
-                            for o in [HierOrientation::TopDown, HierOrientation::LeftRight] {
-                                changed |= ui
-                                    .selectable_value(&mut g.hierarchical.orientation, o, o.label())
-                                    .changed();
-                            }
-                        });
-                    ui.end_row();
-                });
-            changed |= ui
-                .checkbox(
-                    &mut g.hierarchical.center_parent,
-                    "Centrar los padres sobre sus hijos",
-                )
-                .changed();
         });
 
     changed
