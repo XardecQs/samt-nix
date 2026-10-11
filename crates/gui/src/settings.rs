@@ -215,6 +215,10 @@ pub struct GuiSettings {
     /// `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preload_steamrt: Option<bool>,
+    /// Warm umu's Python environment during the prewarm. `None` inherits from
+    /// `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preload_umu: Option<bool>,
     #[serde(default)]
     pub graph: GraphSettings,
     /// Per-browser UI preferences (`[browsers.<id>]`).
@@ -237,6 +241,7 @@ impl Default for GuiSettings {
             prefix_ram: None,
             preload_proton: None,
             preload_steamrt: None,
+            preload_umu: None,
             graph: GraphSettings::default(),
             browsers: HashMap::new(),
         }

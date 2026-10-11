@@ -58,3 +58,8 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 # background (opt-in; useful on slow disks).
 # preload_proton = false
 # preload_steamrt = false
+#
+# Warm umu's Python environment (interpreter, stdlib and site-packages) during
+# `gta-mo preload`/the GUI prewarm, so the next launch does not read it cold
+# (this is the `⏱ umu responde` gap). On by default; only while preload != off.
+# preload_umu = true

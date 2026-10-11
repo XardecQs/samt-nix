@@ -14,6 +14,7 @@
 //!   `full` mode). It runs on a background thread and stops once the game
 //!   process appears.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -182,6 +183,143 @@ pub fn warm_root(root: &Path, stop: &AtomicBool) -> WarmStats {
     let mut stats = WarmStats::default();
     warm_tree(root, Filter::All, Some(stop), &mut stats);
     stats
+}
+
+/// umu's Python environment, resolved from the `umu-run` wrapper.
+struct UmuEnv {
+    /// `/nix/store/<hash>-umu-launcher-*` package dir, if the wrapper lives in
+    /// the store (the wrapper is usually a symlink to the `-bwrap` script).
+    pkg_dir: Option<PathBuf>,
+    /// `.../umu-launcher-*-fhsenv-rootfs` FHS environment.
+    rootfs: PathBuf,
+    /// `.../python3-*` interpreter + stdlib dir.
+    python_dir: PathBuf,
+}
+
+/// Warms umu's Python/umu environment (interpreter, stdlib and site-packages) so
+/// the next launch does not read it cold. That cold read is the `⏱ umu responde`
+/// gap (measured ~20-47 s cold vs ~0.3 s warm; it is I/O, not CPU). Best-effort:
+/// returns `None` when umu cannot be located.
+pub fn warm_umu(stop: &AtomicBool) -> Option<WarmStats> {
+    let env = umu_environment()?;
+    let mut stats = WarmStats::default();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    // Python interpreter + stdlib (the bulk, ~125 MiB).
+    warm_store_dir(&env.python_dir, stop, &mut seen, &mut stats);
+    // umu's Python dependencies (site-packages: real dirs + symlinks to store).
+    for sp in [
+        env.rootfs.join("usr/lib64/python3.13/site-packages"),
+        env.rootfs.join("usr/lib/python3.13/site-packages"),
+    ] {
+        warm_site_packages(&sp, stop, &mut seen, &mut stats);
+    }
+    // The umu-launcher package (the wrapper itself), when it is a store dir.
+    if let Some(pkg) = &env.pkg_dir {
+        warm_store_dir(pkg, stop, &mut seen, &mut stats);
+    }
+    Some(stats)
+}
+
+/// Resolves umu's environment from `umu-run` (or `$GTA_MO_UMU_RUN`).
+fn umu_environment() -> Option<UmuEnv> {
+    let wrapper = std::env::var_os("GTA_MO_UMU_RUN")
+        .map(PathBuf::from)
+        .or_else(|| which::which("umu-run").ok())?;
+    // NB: do not canonicalize the wrapper: `bin/umu-run` is often a symlink to
+    // `...-umu-launcher-*-bwrap` (a single file directly under `/nix/store`),
+    // which would make the "package dir" resolve to `/nix`.
+    let pkg_dir = store_dir_of(&wrapper);
+    let rootfs = std::env::var_os("GTA_MO_UMU_ROOTFS")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(|| fhsenv_rootfs_from(&wrapper))?;
+    let python = rootfs.join("usr/bin/python3.13").canonicalize().ok()?;
+    let python_dir = python.parent()?.parent()?.to_path_buf();
+    Some(UmuEnv {
+        pkg_dir,
+        rootfs,
+        python_dir,
+    })
+}
+
+/// Finds the `...-umu-launcher-*-fhsenv-rootfs` store path referenced by the
+/// `umu-run` wrapper script.
+fn fhsenv_rootfs_from(wrapper: &Path) -> Option<PathBuf> {
+    let script = std::fs::read_to_string(wrapper).ok()?;
+    const MARK: &str = "-fhsenv-rootfs";
+    for tok in script.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ';')) {
+        // The path may be a prefix of a longer token (e.g. `...-fhsenv-rootfs/etc`).
+        let Some(rel) = tok.find(MARK) else { continue };
+        let end = rel + MARK.len();
+        let Some(start) = tok[..end].rfind("/nix/store/") else {
+            continue;
+        };
+        let p = PathBuf::from(&tok[start..end]);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// `warm_tree` over a store dir, once (deduped via `seen`).
+fn warm_store_dir(
+    dir: &Path,
+    stop: &AtomicBool,
+    seen: &mut HashSet<PathBuf>,
+    stats: &mut WarmStats,
+) {
+    if !dir.is_dir() {
+        return;
+    }
+    let dir = dir.to_path_buf();
+    if !seen.insert(dir.clone()) {
+        return;
+    }
+    warm_tree(&dir, Filter::All, Some(stop), stats);
+}
+
+/// Warms a `site-packages` dir: its real files plus the store dirs its
+/// top-level symlinks (the compiled `.so`s) point into.
+fn warm_site_packages(
+    dir: &Path,
+    stop: &AtomicBool,
+    seen: &mut HashSet<PathBuf>,
+    stats: &mut WarmStats,
+) {
+    if !dir.is_dir() {
+        return;
+    }
+    warm_tree(dir, Filter::All, Some(stop), stats);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if let Ok(target) = std::fs::read_link(entry.path()) {
+            if let Some(store) = store_dir_of(&target) {
+                warm_store_dir(&store, stop, seen, stats);
+            }
+        }
+    }
+}
+
+/// The `/nix/store/<hash>-<name>` dir a path lives in, if it is under the store.
+fn store_dir_of(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut comps = path.components();
+    match (comps.next(), comps.next(), comps.next()) {
+        (
+            Some(Component::RootDir),
+            Some(Component::Normal(nix)),
+            Some(Component::Normal(store)),
+        ) if nix == "nix" && store == "store" => {
+            let pkg = comps.next()?;
+            let mut out = PathBuf::from("/nix/store");
+            out.push(pkg);
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
 /// Warms the **critical** path synchronously: the Wine prefix (unless
@@ -364,6 +502,46 @@ mod tests {
         assert_eq!(PreloadMode::parse(Some("prefix")), PreloadMode::Prefix);
         assert_eq!(PreloadMode::parse(Some("true")), PreloadMode::Prefix);
         assert_eq!(PreloadMode::parse(Some("nonsense")), PreloadMode::Prefix);
+    }
+
+    #[test]
+    fn store_dir_of_extracts_the_store_prefix() {
+        assert_eq!(
+            store_dir_of(Path::new("/nix/store/abc-pkg/lib/x.so")),
+            Some(PathBuf::from("/nix/store/abc-pkg"))
+        );
+        assert_eq!(store_dir_of(Path::new("/home/user/x")), None);
+        assert_eq!(store_dir_of(Path::new("/nix/store")), None);
+    }
+
+    #[test]
+    fn umu_environment_from_env_overrides() {
+        let dir = std::env::temp_dir().join(format!("gta-mo-umuenv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pkg = dir.join("umu-launcher-1.0");
+        let rootfs = dir.join("umu-launcher-1.0-fhsenv-rootfs");
+        let pybin = dir.join("python3-3.13.15/bin");
+        std::fs::create_dir_all(pkg.join("bin")).unwrap();
+        std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
+        std::fs::create_dir_all(&pybin).unwrap();
+        std::fs::write(pkg.join("bin/umu-run"), "#!/bin/sh\n").unwrap();
+        std::fs::write(pybin.join("python3.13"), b"").unwrap();
+        std::os::unix::fs::symlink(pybin.join("python3.13"), rootfs.join("usr/bin/python3.13"))
+            .unwrap();
+
+        std::env::set_var("GTA_MO_UMU_RUN", pkg.join("bin/umu-run"));
+        std::env::set_var("GTA_MO_UMU_ROOTFS", &rootfs);
+        let env = umu_environment().expect("env");
+        // The wrapper is under /tmp (not /nix/store), so there is no package dir.
+        assert!(env.pkg_dir.is_none());
+        assert_eq!(
+            env.rootfs.file_name().unwrap(),
+            "umu-launcher-1.0-fhsenv-rootfs"
+        );
+        assert_eq!(env.python_dir.file_name().unwrap(), "python3-3.13.15");
+        std::env::remove_var("GTA_MO_UMU_RUN");
+        std::env::remove_var("GTA_MO_UMU_ROOTFS");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

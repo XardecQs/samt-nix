@@ -232,6 +232,16 @@ struct OptimizeArgs {
         help = "Do not prefetch umu's steamrt runtime"
     )]
     no_preload_steamrt: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "no_preload_umu",
+        help = "Warm umu's Python environment during the prewarm"
+    )]
+    preload_umu: bool,
+
+    #[arg(long = "no-preload-umu", help = "Do not warm umu's Python environment")]
+    no_preload_umu: bool,
 }
 
 impl OptimizeArgs {
@@ -246,6 +256,9 @@ impl OptimizeArgs {
     }
     fn preload_steamrt(&self) -> Option<bool> {
         tri(self.preload_steamrt, self.no_preload_steamrt)
+    }
+    fn preload_umu(&self) -> Option<bool> {
+        tri(self.preload_umu, self.no_preload_umu)
     }
 }
 
@@ -811,6 +824,7 @@ fn cmd_launch(args: LaunchArgs, profile: Option<&str>, redact: bool) -> anyhow::
         prefix_ram_proton: args.optimize.prefix_ram_proton(),
         preload_proton: args.optimize.preload_proton(),
         preload_steamrt: args.optimize.preload_steamrt(),
+        preload_umu: args.optimize.preload_umu(),
         redact,
     };
 
@@ -840,6 +854,7 @@ fn cmd_preload(args: PreloadArgs, profile: Option<&str>) -> anyhow::Result<()> {
         prefix_ram_proton: args.optimize.prefix_ram_proton(),
         preload_proton: args.optimize.preload_proton(),
         preload_steamrt: args.optimize.preload_steamrt(),
+        preload_umu: args.optimize.preload_umu(),
         redact: false,
     };
     LaunchEngine::preload(&opts, |msg| println!("{msg}"))?;
@@ -862,6 +877,7 @@ fn cmd_mount(args: MountArgs, profile: Option<&str>) -> anyhow::Result<()> {
         prefix_ram_proton: None,
         preload_proton: None,
         preload_steamrt: None,
+        preload_umu: None,
         redact: false,
     };
     let outcome = LaunchEngine::mount(&opts, args.temp)?;
@@ -1075,6 +1091,11 @@ fn cmd_steam(args: LaunchArgs, profile: Option<&str>, redact: bool) -> anyhow::R
             args.optimize.preload_steamrt,
             args.optimize.no_preload_steamrt,
             "--preload-steamrt",
+        ),
+        (
+            args.optimize.preload_umu,
+            args.optimize.no_preload_umu,
+            "--preload-umu",
         ),
     ] {
         if on {

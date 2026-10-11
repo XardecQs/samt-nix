@@ -400,6 +400,8 @@ pub struct LaunchOptions {
     pub preload_proton: Option<bool>,
     /// CLI override: prefetch umu's steamrt runtime.
     pub preload_steamrt: Option<bool>,
+    /// CLI override: warm umu's Python environment during the prewarm.
+    pub preload_umu: Option<bool>,
     /// Mask the user's home directory (`/home/<user>` → `/home/****`) in the
     /// launch log and in the teed `umu`/Proton output (safe to share).
     pub redact: bool,
@@ -422,6 +424,7 @@ impl Default for LaunchOptions {
             prefix_ram_proton: None,
             preload_proton: None,
             preload_steamrt: None,
+            preload_umu: None,
             redact: false,
         }
     }
@@ -1559,7 +1562,9 @@ impl LaunchEngine {
         let do_steamrt = opts
             .preload_steamrt
             .unwrap_or_else(|| boot.cfg.preload_steamrt());
-        if mode.is_off() && !prefix_ram && !do_proton && !do_steamrt {
+        // Warm umu's Python environment (only meaningful while preloading is on).
+        let do_umu = !mode.is_off() && opts.preload_umu.unwrap_or_else(|| boot.cfg.preload_umu());
+        if mode.is_off() && !prefix_ram && !do_proton && !do_steamrt && !do_umu {
             emit("Precarga desactivada (preload = \"off\" y prefix_ram = false).");
             return Ok(String::new());
         }
@@ -1646,6 +1651,16 @@ impl LaunchEngine {
                     s.files,
                     s.bytes as f64 / 1_048_576.0
                 ));
+            }
+        }
+        if do_umu {
+            match preload::warm_umu(&stop) {
+                Some(s) => emit(&format!(
+                    "Preload umu: {} archivo(s), {:.0} MiB.",
+                    s.files,
+                    s.bytes as f64 / 1_048_576.0
+                )),
+                None => emit("Preload umu: no se encontró el entorno de umu; se omite."),
             }
         }
 
@@ -2302,6 +2317,7 @@ mod tests {
             prefix_ram_proton: None,
             preload_proton: None,
             preload_steamrt: None,
+            preload_umu: None,
         }
     }
 

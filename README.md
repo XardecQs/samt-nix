@@ -227,6 +227,12 @@ auto_discover = true
 > used by the tmpfs prefix is reported in the launch log and by
 > `gta-mo prefix status`.
 >
+> `preload_umu` (on by default) warms umu's Python environment (interpreter,
+> stdlib and site-packages) during the prewarm (`gta-mo preload`, which the GUI
+> runs on startup and after each game), so the **next launch** does not read it
+> cold. That cold read is the `⏱ umu responde` gap (measured ~20–47 s cold vs
+> ~0.3 s warm). Only takes effect while `preload` is not `"off"`.
+>
 > `timings = true` (default) prints per-phase timings (`config/db`, `plan`,
 > `mount`, `prefix-ram`, `preload`, `sesión`, `prefix-sync`) and, while the game
 > boots, the time until `umu` produces its first output (`⏱ umu responde`), the
@@ -692,6 +698,7 @@ Steam overlay will not attach to the game window.
 | `--prefix-ram-proton` / `--no-prefix-ram-proton` | Materialize the Proton DLL symlinks into the tmpfs prefix |
 | `--preload-proton` / `--no-preload-proton` | Prefetch the Proton runtime into the page cache |
 | `--preload-steamrt` / `--no-preload-steamrt` | Prefetch umu's steamrt runtime into the page cache |
+| `--preload-umu` / `--no-preload-umu` | Warm umu's Python environment during the prewarm |
 
 ## GUI
 

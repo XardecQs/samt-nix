@@ -182,6 +182,13 @@ fn behavior(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
                 "Precalentar steamrt de umu (caché)",
                 "Lee el runtime steamrt4 de umu a la caché de página en segundo plano.",
             );
+            changed |= tristate(
+                ui,
+                &mut s.preload_umu,
+                "Precalentar entorno umu/Python",
+                "Calienta el intérprete Python y las deps de umu en el prewarm, para \
+                 que el siguiente arranque no los lea en frío.",
+            );
         });
     changed
 }

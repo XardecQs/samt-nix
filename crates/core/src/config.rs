@@ -43,6 +43,10 @@ pub struct Config {
     /// Prefetch umu's `steamrt4` runtime into the page cache in the background.
     /// Defaults to `false` (opt-in).
     pub preload_steamrt: Option<bool>,
+    /// Warm umu's Python/umu environment (interpreter, stdlib, site-packages)
+    /// during the prewarm, so the next launch does not read it cold. Defaults to
+    /// `true`; only takes effect while preloading is not `"off"`.
+    pub preload_umu: Option<bool>,
 }
 
 impl Config {
@@ -128,6 +132,12 @@ impl Config {
     /// Whether to prefetch umu's steamrt runtime. Defaults to `false`.
     pub fn preload_steamrt(&self) -> bool {
         self.preload_steamrt.unwrap_or(false)
+    }
+
+    /// Whether to warm umu's Python environment during the prewarm. Defaults to
+    /// `true`.
+    pub fn preload_umu(&self) -> bool {
+        self.preload_umu.unwrap_or(true)
     }
 }
 

@@ -394,6 +394,7 @@ impl GtaMoApp {
             (self.settings.prefix_ram, "--prefix-ram"),
             (self.settings.preload_proton, "--preload-proton"),
             (self.settings.preload_steamrt, "--preload-steamrt"),
+            (self.settings.preload_umu, "--preload-umu"),
         ] {
             match value {
                 Some(true) => args.push(flag.into()),
