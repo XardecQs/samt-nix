@@ -18,6 +18,6 @@ result-*
 # Local config (personal paths) — use config.toml.example as a template
 config.toml
 
-# Notas personales de trabajo
-PENDIENTES.md
+# Notas personales de trabajo (y sus backups)
+PENDIENTES*.md
 .~lock.PENDIENTES.md#
