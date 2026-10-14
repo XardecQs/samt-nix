@@ -78,13 +78,19 @@
 
     # Prebuilt dependencies. Its hash is keyed on Cargo.toml/Cargo.lock (and the
     # build inputs), so a source-only change does not rebuild it.
-    depsFor = pkgs: (crane.mkLib pkgs).buildDepsOnly (commonArgs pkgs // {
-      pname = "gta-mo";
-      # `default-members = crates/cli`, so without `--workspace` only the CLI
-      # (and its deps) would be prepared; the GUI deps must be cached too.
-      cargoBuildExtraArgs = "--workspace";
-      cargoCheckExtraArgs = "--workspace --all-targets";
-    });
+    depsFor = pkgs:
+      ((crane.mkLib pkgs).buildDepsOnly (commonArgs pkgs // {
+        pname = "gta-mo";
+        # `default-members = crates/cli`, so without `--workspace` only the CLI
+        # (and its deps) would be prepared; the GUI deps must be cached too.
+        cargoBuildExtraArgs = "--workspace";
+        cargoCheckExtraArgs = "--workspace --all-targets";
+      })).overrideAttrs (_: {
+        # The manifest version is a constant 0.0.0 (see Cargo.toml); drop it from
+        # the derivation name so it reads `gta-mo-deps` instead of
+        # `gta-mo-deps-0.0.0`. Constant, so it never invalidates the cache.
+        name = "gta-mo-deps";
+      });
 
     # CLI-only package: `enableGui = false` never compiles the GUI crates.
     mkCliPackage = { pkgs, doCheck ? false }:
