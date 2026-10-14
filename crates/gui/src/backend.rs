@@ -347,8 +347,16 @@ impl Backend {
 
         let mut options_by_folder: HashMap<String, HashMap<String, String>> = HashMap::new();
         for m in &mods {
-            if !m.selected_options.is_empty() {
-                options_by_folder.insert(m.folder.clone(), m.selected_options.clone());
+            // Fill the manifest `default` for groups the profile has not chosen,
+            // so the graph/constraints shown by the GUI match what the launcher
+            // actually mounts (which also resolves defaults).
+            let effective = gta_mo_core::meta::fill_option_defaults(
+                &paths.mods_dir,
+                &m.folder,
+                &m.selected_options,
+            );
+            if !effective.is_empty() {
+                options_by_folder.insert(m.folder.clone(), effective);
             }
         }
 

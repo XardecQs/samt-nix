@@ -3600,18 +3600,26 @@ fn cmd_option(
                 return Ok(());
             }
             for g in &groups {
-                let chosen = selected
+                // Effective value: explicit choice when valid, else the manifest
+                // `default` (the launcher resolves it when the profile is unset).
+                let explicit = selected
                     .get(&g.group)
-                    .cloned()
-                    .unwrap_or_else(|| "(ninguna)".to_string());
+                    .filter(|v| g.choices.iter().any(|c| &c.key == *v));
+                let default_key = g
+                    .default
+                    .as_ref()
+                    .filter(|d| g.choices.iter().any(|c| &c.key == *d));
+                let effective = explicit.or(default_key);
+                let is_default = explicit.is_none() && default_key.is_some();
+                let chosen = match effective {
+                    Some(k) if is_default => format!("{k} (por defecto)"),
+                    Some(k) => k.clone(),
+                    None => "Base".to_string(),
+                };
                 let label = g.name.clone().unwrap_or_else(|| g.group.clone());
                 println!("{label} [{chosen}]");
                 for c in &g.choices {
-                    let mark = if selected.get(&g.group).map(|v| v == &c.key).unwrap_or(false) {
-                        "*"
-                    } else {
-                        " "
-                    };
+                    let mark = if effective == Some(&c.key) { "*" } else { " " };
                     let cname = c.name.clone().unwrap_or_else(|| c.key.clone());
                     println!("  {mark} {} = {cname}", c.key);
                 }

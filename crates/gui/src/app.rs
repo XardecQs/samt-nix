@@ -2169,12 +2169,31 @@ impl GtaMoApp {
                         for g in &m.option_groups {
                             let label = g.name.clone().unwrap_or_else(|| g.group.clone());
                             ui.label(format!("{label}:"));
-                            let current = m
+                            // Effective value: the profile's explicit choice when
+                            // valid, else the manifest `default` (the launcher
+                            // mounts the default when the profile has not chosen).
+                            let explicit = m
                                 .selected_options
                                 .get(&g.group)
-                                .and_then(|v| g.choices.iter().find(|c| &c.key == v))
-                                .map(|c| c.name.clone().unwrap_or_else(|| c.key.clone()))
-                                .unwrap_or_else(|| "Ninguna".to_string());
+                                .filter(|v| g.choices.iter().any(|c| &c.key == *v));
+                            let default_key = g
+                                .default
+                                .as_ref()
+                                .filter(|d| g.choices.iter().any(|c| &c.key == *d));
+                            let effective = explicit.or(default_key);
+                            let is_default = explicit.is_none() && default_key.is_some();
+                            let name_of = |key: &str| {
+                                g.choices
+                                    .iter()
+                                    .find(|c| c.key == key)
+                                    .and_then(|c| c.name.clone())
+                                    .unwrap_or_else(|| key.to_string())
+                            };
+                            let current = match effective {
+                                Some(k) if is_default => format!("{} (por defecto)", name_of(k)),
+                                Some(k) => name_of(k),
+                                None => "Base".to_string(),
+                            };
                             // Some(None) = clear the group, Some(Some(v)) = set v.
                             let mut pick: Option<Option<String>> = None;
                             egui::ComboBox::from_id_salt(format!(
@@ -2183,15 +2202,20 @@ impl GtaMoApp {
                             ))
                             .selected_text(current)
                             .show_ui(ui, |ui| {
-                                let none_selected = !m.selected_options.contains_key(&g.group);
-                                if ui.selectable_label(none_selected, "Ninguna").clicked()
-                                    && !none_selected
-                                {
-                                    pick = Some(None);
+                                // Only offer an explicit "Base" (no layer) entry
+                                // when the group declares no default; otherwise
+                                // the default is always mounted.
+                                if default_key.is_none() {
+                                    let base_selected = explicit.is_none();
+                                    if ui.selectable_label(base_selected, "Base").clicked()
+                                        && !base_selected
+                                    {
+                                        pick = Some(None);
+                                    }
                                 }
                                 for c in &g.choices {
                                     let cname = c.name.clone().unwrap_or_else(|| c.key.clone());
-                                    let selected = m.selected_options.get(&g.group) == Some(&c.key);
+                                    let selected = effective == Some(&c.key);
                                     if ui.selectable_label(selected, cname).clicked() && !selected {
                                         pick = Some(Some(c.key.clone()));
                                     }

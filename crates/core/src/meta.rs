@@ -1064,6 +1064,36 @@ default = "4k"
     }
 
     #[test]
+    fn option_default_mixed_groups() {
+        // A group with a declared default fills it when unset; a group without
+        // one stays absent (the GUI shows "Base" and the launcher mounts only
+        // the base content).
+        let dir = tmp_mods_dir("optmixed");
+        fs::create_dir_all(dir.join("M/content")).unwrap();
+        fs::create_dir_all(dir.join("M/options/timecycle/24h")).unwrap();
+        fs::create_dir_all(dir.join("M/options/timecycle/8h")).unwrap();
+        fs::create_dir_all(dir.join("M/options/extras/x")).unwrap();
+        fs::write(
+            dir.join("M/mod.toml"),
+            "mount = [\"content\"]\n\
+             [[options]]\ngroup = \"timecycle\"\ndefault = \"24h\"\nchoices = [\"24h\", \"8h\"]\n\
+             [[options]]\ngroup = \"extras\"\nchoices = [\"x\"]\n",
+        )
+        .unwrap();
+
+        let effective = fill_option_defaults(&dir, "M", &HashMap::new());
+        assert_eq!(effective.get("timecycle").map(String::as_str), Some("24h"));
+        assert!(!effective.contains_key("extras"));
+
+        // Only the defaulted group contributes a layer above the base mount.
+        assert_eq!(
+            mod_layers_with_options(&dir, "M", &effective),
+            vec![dir.join("M/options/timecycle/24h"), dir.join("M/content")]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn modloader_folder_rejects_ini_injection() {
         assert!(valid_modloader_folder("MyFolder"));
         assert!(valid_modloader_folder("my-folder_1"));
