@@ -283,8 +283,8 @@ impl Backend {
                     groups,
                     screenshots,
                     has_manifest,
-                    variant_group: meta.variant_group.clone(),
-                    variant_name: meta.variant_name.clone(),
+                    family_id: meta.family_id.clone(),
+                    family_name: meta.family_name.clone(),
                     conflicts: meta.conflicts.clone(),
                     modloader_priority: meta.modloader_priority,
                     hidden: m.hidden(),
@@ -296,14 +296,15 @@ impl Backend {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Variant families: group -> members (folder, name).
-        let mut variant_members: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        // Families: id -> members (mod id, folder, name), for navigation.
+        let mut family_members: HashMap<String, Vec<(i64, String, String)>> = HashMap::new();
         for m in &mods {
-            if let Some(group) = &m.variant_group {
-                variant_members
-                    .entry(group.clone())
-                    .or_default()
-                    .push((m.folder.clone(), m.name.clone()));
+            if let Some(group) = &m.family_id {
+                family_members.entry(group.clone()).or_default().push((
+                    m.id,
+                    m.folder.clone(),
+                    m.name.clone(),
+                ));
             }
         }
 
@@ -361,7 +362,7 @@ impl Backend {
         }
 
         // Dependency graph edges: required/optional deps (live manifests) +
-        // conflicts and variant families.
+        // conflicts and families of alternatives.
         let mut edges: Vec<GEdge> = Vec::new();
         for (mid, refs) in &deps {
             for r in refs {
@@ -416,18 +417,18 @@ impl Backend {
                 }
             }
         }
-        let mut variant_groups: HashMap<String, Vec<i64>> = HashMap::new();
+        let mut family_groups: HashMap<String, Vec<i64>> = HashMap::new();
         for m in &mods {
-            if let Some(g) = &m.variant_group {
-                variant_groups.entry(g.clone()).or_default().push(m.id);
+            if let Some(g) = &m.family_id {
+                family_groups.entry(g.clone()).or_default().push(m.id);
             }
         }
-        for members in variant_groups.values() {
+        for members in family_groups.values() {
             for w in members.windows(2) {
                 edges.push(GEdge {
                     from: w[0],
                     to: w[1],
-                    kind: GEdgeKind::Variant,
+                    kind: GEdgeKind::Family,
                 });
             }
         }
@@ -442,7 +443,7 @@ impl Backend {
             group_counts,
             dep_status,
             dep_cycles,
-            variant_members,
+            family_members,
             options_by_folder,
             edges,
         })
@@ -738,8 +739,8 @@ fn merge_meta_caches(cached: db::ModMetaCache, live: db::ModMetaCache) -> db::Mo
         } else {
             live.components
         },
-        variant_group: live.variant_group.or(cached.variant_group),
-        variant_name: live.variant_name.or(cached.variant_name),
+        family_id: live.family_id.or(cached.family_id),
+        family_name: live.family_name.or(cached.family_name),
         conflicts: if live.conflicts.is_empty() {
             cached.conflicts
         } else {
@@ -813,8 +814,8 @@ mod tests {
             screenshots: vec![],
             tags: vec![],
             components: vec![],
-            variant_group: None,
-            variant_name: None,
+            family_id: None,
+            family_name: None,
             conflicts: vec![],
             modloader_priority: None,
             modloader_folders: vec![],

@@ -240,7 +240,7 @@ fn fresh_database_bootstraps_to_latest_schema() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     let profile: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM profiles WHERE slug = 'default'",
@@ -299,7 +299,7 @@ fn init_skeleton_creates_content_dirs() {
     // The template now documents the newer manifest fields.
     let tpl = std::fs::read_to_string(game_root.join("mods/pack/mod.toml")).unwrap();
     for field in [
-        "[variant]",
+        "[family]",
         "conflicts",
         "requires_any",
         "[modloader]",
@@ -917,19 +917,19 @@ fn data_rejects_traversal() {
 }
 
 #[test]
-fn variant_enable_disables_siblings() {
-    let t = TempDb::new("variant");
+fn family_enable_disables_siblings() {
+    let t = TempDb::new("family");
     let game_root = t.dir.join("game");
     std::fs::create_dir_all(game_root.join("mods/v4k")).unwrap();
     std::fs::write(
         game_root.join("mods/v4k/mod.toml"),
-        "id = \"x:v4k\"\n[variant]\ngroup = \"fam\"\nname = \"4K\"\n",
+        "id = \"x:v4k\"\n[family]\nid = \"fam\"\nname = \"4K\"\n",
     )
     .unwrap();
     std::fs::create_dir_all(game_root.join("mods/lite")).unwrap();
     std::fs::write(
         game_root.join("mods/lite/mod.toml"),
-        "id = \"x:lite\"\n[variant]\ngroup = \"fam\"\nname = \"LITE\"\n",
+        "id = \"x:lite\"\n[family]\nid = \"fam\"\nname = \"LITE\"\n",
     )
     .unwrap();
     let t = t.with_config(&game_root);

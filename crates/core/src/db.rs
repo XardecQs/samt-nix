@@ -52,9 +52,9 @@ pub struct ModMetaCache {
     pub tags: Vec<String>,
     /// Bundled components of a composite pack.
     pub components: Vec<crate::meta::MetaComponent>,
-    /// Mutually exclusive variant family (`[variant]`).
-    pub variant_group: Option<String>,
-    pub variant_name: Option<String>,
+    /// Mutually exclusive family of alternatives (`[family]`).
+    pub family_id: Option<String>,
+    pub family_name: Option<String>,
     /// Incompatible mods (by `author:slug` or folder).
     pub conflicts: Vec<String>,
     /// Mod Loader priority and folders (`[modloader]`).
@@ -479,7 +479,7 @@ pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> a
     conn.execute(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
          license = ?6, cover = ?7, mount = ?8, guides = ?9, tags = ?10, components = ?11,
-         screenshots = ?12, variant_group = ?13, variant_name = ?14, conflicts = ?15,
+         screenshots = ?12, family_id = ?13, family_name = ?14, conflicts = ?15,
          modloader_priority = ?16, modloader_folders = ?17
          WHERE id = ?18",
         params![
@@ -495,8 +495,8 @@ pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> a
             json_vec(&cache.tags),
             json_components(&cache.components),
             json_vec(&cache.screenshots),
-            cache.variant_group,
-            cache.variant_name,
+            cache.family_id,
+            cache.family_name,
             json_vec(&cache.conflicts),
             cache.modloader_priority,
             json_vec(&cache.modloader_folders),
@@ -770,7 +770,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 /// Applies any pending schema migration. The whole chain runs inside a single
 /// transaction: a failure rolls everything back and `user_version` is only
@@ -816,6 +816,9 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         }
         if version < 11 {
             migrate_to_v11(conn)?;
+        }
+        if version < 12 {
+            migrate_to_v12(conn)?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
@@ -912,6 +915,31 @@ fn migrate_to_v11(conn: &Connection) -> anyhow::Result<()> {
     if !cols.iter().any(|c| c.as_str() == "options") {
         log::info("Migrando schema: ALTER TABLE profile_mods ADD COLUMN options TEXT");
         conn.execute("ALTER TABLE profile_mods ADD COLUMN options TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// Renames the variant cache columns to the `family_*` naming (the `[variant]`
+/// manifest block became `[family]`). Introspection based and idempotent.
+fn migrate_to_v12(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let has = |c: &str| cols.iter().any(|x| x.as_str() == c);
+    if has("variant_group") && !has("family_id") {
+        log::info("Migrando schema: ALTER TABLE mods RENAME COLUMN variant_group TO family_id");
+        conn.execute(
+            "ALTER TABLE mods RENAME COLUMN variant_group TO family_id",
+            [],
+        )?;
+    }
+    if has("variant_name") && !has("family_name") {
+        log::info("Migrando schema: ALTER TABLE mods RENAME COLUMN variant_name TO family_name");
+        conn.execute(
+            "ALTER TABLE mods RENAME COLUMN variant_name TO family_name",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -1695,8 +1723,8 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
         screenshots: meta.screenshots.clone().unwrap_or_default(),
         tags: meta.tags.clone().unwrap_or_default(),
         components: meta.components.clone().unwrap_or_default(),
-        variant_group: meta.variant.as_ref().map(|v| v.group.clone()),
-        variant_name: meta.variant.as_ref().and_then(|v| v.name.clone()),
+        family_id: meta.family.as_ref().map(|f| f.id.clone()),
+        family_name: meta.family.as_ref().and_then(|f| f.name.clone()),
         conflicts: meta.conflicts.clone(),
         modloader_priority: meta.modloader.as_ref().and_then(|m| m.priority),
         modloader_folders: meta
@@ -1711,7 +1739,7 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
 pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache> {
     let mut stmt = conn.prepare(
         "SELECT mod_id, version, author, url, description, license, cover, mount, guides, tags,
-                components, screenshots, variant_group, variant_name, conflicts,
+                components, screenshots, family_id, family_name, conflicts,
                 modloader_priority, modloader_folders
          FROM mods WHERE id = ?1",
     )?;
@@ -1729,8 +1757,8 @@ pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache>
             tags: parse_json_list(row.get(9)?),
             components: parse_components(row.get(10)?),
             screenshots: parse_json_list(row.get(11)?),
-            variant_group: row.get(12)?,
-            variant_name: row.get(13)?,
+            family_id: row.get(12)?,
+            family_name: row.get(13)?,
             conflicts: parse_json_list(row.get(14)?),
             modloader_priority: row.get(15)?,
             modloader_folders: parse_json_list(row.get(16)?),
@@ -1748,7 +1776,7 @@ pub fn update_mod_meta(
     conn.execute(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
          license = ?6, cover = ?7, mount = ?8, guides = ?9, tags = ?10, components = ?11,
-         screenshots = ?12, variant_group = ?13, variant_name = ?14, conflicts = ?15,
+         screenshots = ?12, family_id = ?13, family_name = ?14, conflicts = ?15,
          modloader_priority = ?16, modloader_folders = ?17
          WHERE id = ?18",
         params![
@@ -1766,11 +1794,11 @@ pub fn update_mod_meta(
                 .and_then(|m| json_components(m.components.as_deref().unwrap_or(&[]))),
             json_list(&meta.as_ref().and_then(|m| m.screenshots.clone())),
             meta.as_ref()
-                .and_then(|m| m.variant.as_ref())
-                .map(|v| v.group.clone()),
+                .and_then(|m| m.family.as_ref())
+                .map(|f| f.id.clone()),
             meta.as_ref()
-                .and_then(|m| m.variant.as_ref())
-                .and_then(|v| v.name.clone()),
+                .and_then(|m| m.family.as_ref())
+                .and_then(|f| f.name.clone()),
             json_list(&meta.as_ref().map(|m| m.conflicts.clone())),
             meta.as_ref()
                 .and_then(|m| m.modloader.as_ref())
@@ -2429,8 +2457,8 @@ mod tests {
             "tags",
             "components",
             "screenshots",
-            "variant_group",
-            "variant_name",
+            "family_id",
+            "family_name",
             "conflicts",
             "modloader_priority",
             "modloader_folders",
@@ -2447,6 +2475,33 @@ mod tests {
         // idempotente
         run_migrations(&conn).unwrap();
         run_migrations(&conn).unwrap();
+    }
+
+    #[test]
+    fn v12_renames_variant_columns_to_family() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+        // Simulate a v11 database that still used the variant_* column names.
+        conn.execute_batch(
+            "ALTER TABLE mods RENAME COLUMN family_id TO variant_group;
+             ALTER TABLE mods RENAME COLUMN family_name TO variant_name;
+             PRAGMA user_version = 11;",
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('mods')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(cols.contains(&"family_id".to_string()));
+        assert!(cols.contains(&"family_name".to_string()));
+        assert!(!cols.contains(&"variant_group".to_string()));
+        assert!(!cols.contains(&"variant_name".to_string()));
     }
 
     #[test]

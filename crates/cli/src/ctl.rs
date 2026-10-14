@@ -77,17 +77,17 @@ impl DepJson {
 }
 
 #[derive(Serialize)]
-struct VariantJson {
-    group: String,
+struct FamilyJson {
+    id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
 }
 
-impl VariantJson {
+impl FamilyJson {
     fn from_cache(cache: &db::ModMetaCache) -> Option<Self> {
-        cache.variant_group.as_ref().map(|g| Self {
-            group: g.clone(),
-            name: cache.variant_name.clone(),
+        cache.family_id.as_ref().map(|g| Self {
+            id: g.clone(),
+            name: cache.family_name.clone(),
         })
     }
 }
@@ -126,7 +126,7 @@ struct ModJson {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     dependents: Vec<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    variant: Option<VariantJson>,
+    family: Option<FamilyJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     conflicts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -501,11 +501,11 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # required = ["otro:mod"]      # sin esto el mod no funciona
 # optional = []
 
-# Variante de una familia mutuamente excluyente (4K/LITE, RoSA/vanilla…):
-# solo una variante del mismo `group` puede estar activa a la vez.
-# [variant]
-# group = "proper-fixes"
-# name = "RoSA"
+# Miembro de una familia de alternativas mutuamente excluyentes (Reload Mod /
+# ReloadSA…): solo un miembro del mismo `id` puede estar activo a la vez.
+# [family]
+# id = "reload"
+# name = "Reload Mod"
 
 # Mods incompatibles (por id o carpeta); no se pueden activar juntos.
 # conflicts = ["mixmods:proper-fixes-vanilla"]
@@ -1227,7 +1227,7 @@ fn cmd_list(
                 .into_iter()
                 .map(|d| d.id)
                 .collect::<Vec<_>>();
-            let variant = VariantJson::from_cache(&meta);
+            let family = FamilyJson::from_cache(&meta);
             out.push(ModJson {
                 id: m.id,
                 folder: m.folder_name.clone(),
@@ -1247,7 +1247,7 @@ fn cmd_list(
                 tags: meta.tags,
                 deps,
                 dependents,
-                variant,
+                family,
                 conflicts: meta.conflicts,
                 modloader_priority: meta.modloader_priority,
                 hidden: m.hidden(),
@@ -1388,10 +1388,10 @@ fn resolve_conflict_ref(
     folders.contains(&trimmed).then_some(trimmed)
 }
 
-/// Enforces variant exclusivity and declared conflicts before enabling `target`.
+/// Enforces family exclusivity and declared conflicts before enabling `target`.
 ///
 /// Aborts when a declared conflict with an already-enabled mod would result,
-/// then disables the other enabled variants of `target`'s family (returning
+/// then disables the other enabled members of `target`'s family (returning
 /// them) so only one member of a family stays active.
 fn enforce_enable_constraints(
     conn: &Connection,
@@ -1458,16 +1458,16 @@ fn enforce_enable_constraints(
         }
     }
 
-    // Variant exclusivity: disable the other enabled members of the family.
+    // Family exclusivity: disable the other enabled members of the family.
     let mut disabled = Vec::new();
-    if let Some(variant) = &target_meta.variant {
+    if let Some(family) = &target_meta.family {
         for other in all.iter().filter(|m| m.enabled && m.id != target.id) {
             let om =
                 gta_mo_core::meta::read_mod_meta(mods_dir, &other.folder_name)?.unwrap_or_default();
             if om
-                .variant
+                .family
                 .as_ref()
-                .map(|v| v.group == variant.group)
+                .map(|f| f.id == family.id)
                 .unwrap_or(false)
             {
                 db::set_mod_enabled(conn, profile.id, other.id, false)?;
@@ -1482,12 +1482,12 @@ fn cmd_enable(conn: &Connection, profile: &db::Profile, ident: &str) -> anyhow::
     let m = resolve_mod(conn, ident)?;
     let id = m.id;
 
-    // Variant exclusivity + declared conflicts (via the live manifests).
+    // Family exclusivity + declared conflicts (via the live manifests).
     if let Some(mods_dir) = mods_dir_from_config() {
         let disabled = enforce_enable_constraints(conn, profile, &m, &mods_dir)?;
         for folder in disabled {
             log::warn(format!(
-                "Variante '{}' desactivada automáticamente (familia de '{}').",
+                "Alternativa '{}' desactivada automáticamente (familia '{}').",
                 folder, m.folder_name
             ));
         }
@@ -1791,7 +1791,7 @@ fn cmd_info(
             dependencies: Vec<DepJson>,
             dependents: Vec<DepJson>,
             profiles: Vec<ProfileStateJson>,
-            variant: Option<VariantJson>,
+            family: Option<FamilyJson>,
             conflicts: Vec<String>,
             modloader_priority: Option<i64>,
             hidden: bool,
@@ -1877,7 +1877,7 @@ fn cmd_info(
             })
             .collect();
 
-        let variant = VariantJson::from_cache(&meta);
+        let family = FamilyJson::from_cache(&meta);
         let option_selected = db::profile_mod_options(conn, profile.id, id)?;
         let option_groups = match mods_dir.as_deref() {
             Some(dir) => gta_mo_core::meta::mod_option_groups(dir, &m.folder_name),
@@ -1929,7 +1929,7 @@ fn cmd_info(
                 .map(|d| DepJson::from_entry(d, true))
                 .collect(),
             profiles: profiles_json,
-            variant,
+            family,
             conflicts: meta.conflicts,
             modloader_priority: meta.modloader_priority,
             hidden,
@@ -3070,7 +3070,7 @@ struct ExportMod {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     components: Vec<gta_mo_core::meta::MetaComponent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    variant: Option<gta_mo_core::meta::ModVariant>,
+    family: Option<gta_mo_core::meta::ModFamily>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     conflicts: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3094,12 +3094,12 @@ impl ExportMod {
             screenshots: cache.screenshots.clone(),
             tags: cache.tags.clone(),
             components: cache.components.clone(),
-            variant: cache
-                .variant_group
+            family: cache
+                .family_id
                 .as_ref()
-                .map(|g| gta_mo_core::meta::ModVariant {
-                    group: g.clone(),
-                    name: cache.variant_name.clone(),
+                .map(|g| gta_mo_core::meta::ModFamily {
+                    id: g.clone(),
+                    name: cache.family_name.clone(),
                 }),
             conflicts: cache.conflicts.clone(),
             modloader: if cache.modloader_priority.is_some() || !cache.modloader_folders.is_empty()
@@ -3129,8 +3129,8 @@ impl ExportMod {
             screenshots: self.screenshots.clone(),
             tags: self.tags.clone(),
             components: self.components.clone(),
-            variant_group: self.variant.as_ref().map(|v| v.group.clone()),
-            variant_name: self.variant.as_ref().and_then(|v| v.name.clone()),
+            family_id: self.family.as_ref().map(|f| f.id.clone()),
+            family_name: self.family.as_ref().and_then(|f| f.name.clone()),
             conflicts: self.conflicts.clone(),
             modloader_priority: self.modloader.as_ref().and_then(|m| m.priority),
             modloader_folders: self
@@ -3732,7 +3732,7 @@ fn cmd_health(
         }
     }
 
-    // Variant/conflict constraints (live manifests) and ModLoader priorities.
+    // Family/conflict constraints (live manifests) and ModLoader priorities.
     let all_folders: Vec<String> = folders.values().cloned().collect();
     let enabled_folders: Vec<String> = db::load_all_mods_for_profile(conn, profile.id)?
         .into_iter()

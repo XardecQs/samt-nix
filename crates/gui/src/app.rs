@@ -678,9 +678,9 @@ impl GtaMoApp {
         for ev in events {
             match ev {
                 GuiEvent::LogLine(l) => {
-                    // `ctl enable` disables the other members of a variant family
-                    // silently in the log; surface it as a toast so the change is
-                    // not a surprise.
+                    // `ctl enable` disables the other members of a family of
+                    // alternatives silently in the log; surface it as a toast so
+                    // the change is not a surprise.
                     if l.contains("desactivada automáticamente") {
                         let text = l.strip_prefix("[!] ").unwrap_or(&l).to_string();
                         self.toasts.push(ctx, crate::toasts::ToastKind::Info, text);
@@ -991,14 +991,12 @@ impl GtaMoApp {
                                 .on_hover_text(&line);
                         }
 
-                        if m.variant_group.is_some()
-                            || !m.meta.tags.is_empty()
-                            || !m.groups.is_empty()
+                        if m.family_id.is_some() || !m.meta.tags.is_empty() || !m.groups.is_empty()
                         {
                             ui.horizontal_wrapped(|ui| {
-                                if let Some(group) = &m.variant_group {
+                                if let Some(group) = &m.family_id {
                                     let label =
-                                        m.variant_name.clone().unwrap_or_else(|| group.clone());
+                                        m.family_name.clone().unwrap_or_else(|| group.clone());
                                     ui.label(
                                         egui::RichText::new(format!(
                                             "{} {label}",
@@ -1007,7 +1005,8 @@ impl GtaMoApp {
                                         .small()
                                         .strong()
                                         .color(palette.accent),
-                                    );
+                                    )
+                                    .on_hover_text(format!("Familia «{group}»"));
                                 }
                                 for t in &m.meta.tags {
                                     ui.label(
@@ -2126,43 +2125,42 @@ impl GtaMoApp {
                             ui.label(m.groups.join(", "));
                             ui.end_row();
                         }
-                        if let Some(group) = &m.variant_group {
-                            ui.label("Variante:");
+                        if let Some(group) = &m.family_id {
+                            ui.label("Familia:");
                             let members = self
                                 .snapshot
-                                .variant_members
+                                .family_members
                                 .get(group)
                                 .cloned()
                                 .unwrap_or_default();
-                            let current = members
-                                .iter()
-                                .find(|(f, _)| f == &m.folder)
-                                .map(|(_, n)| n.clone())
-                                .unwrap_or_else(|| group.clone());
-                            let mut pick: Option<String> = None;
-                            egui::ComboBox::from_id_salt("detail_variant")
-                                .selected_text(current)
-                                .show_ui(ui, |ui| {
-                                    for (folder, name) in &members {
-                                        if ui.selectable_label(folder == &m.folder, name).clicked()
-                                            && folder != &m.folder
-                                        {
-                                            pick = Some(folder.clone());
-                                        }
-                                    }
-                                });
-                            if let Some(folder) = pick {
-                                let slug = self.snapshot.active_slug.clone();
-                                self.exec(
-                                    vec![
-                                        "ctl".into(),
-                                        "enable".into(),
-                                        folder,
-                                        "--profile".into(),
-                                        slug,
-                                    ],
-                                    false,
+                            let current = m.family_name.clone().unwrap_or_else(|| m.name.clone());
+                            let mut go: Option<i64> = None;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} {current}",
+                                        crate::icons::SWAP_H
+                                    ))
+                                    .strong(),
+                                )
+                                .on_hover_text(
+                                    "Solo una alternativa de la familia puede estar activa; \
+                                     activar otra desactiva esta.",
                                 );
+                                for (id, folder, name) in &members {
+                                    if folder == &m.folder {
+                                        continue;
+                                    }
+                                    if ui
+                                        .link(egui::RichText::new(format!("Ver «{name}»")).small())
+                                        .clicked()
+                                    {
+                                        go = Some(*id);
+                                    }
+                                }
+                            });
+                            if let Some(id) = go {
+                                self.selected_mod = Some(id);
                             }
                             ui.end_row();
                         }
@@ -2989,7 +2987,7 @@ impl GtaMoApp {
                     prefs_changed = true;
                 }
                 if ui
-                    .checkbox(&mut self.settings.graph.show_variants, "Variantes")
+                    .checkbox(&mut self.settings.graph.show_families, "Familias")
                     .changed()
                 {
                     self.graph_stale = true;
@@ -3148,7 +3146,7 @@ impl GtaMoApp {
                     e.kind,
                     self.settings.graph.show_optional,
                     self.settings.graph.show_conflicts,
-                    self.settings.graph.show_variants,
+                    self.settings.graph.show_families,
                 )
             })
             .map(|e| (e.from, e.to, e.kind))
@@ -3163,13 +3161,13 @@ impl GtaMoApp {
         kind: crate::model::GEdgeKind,
         show_optional: bool,
         show_conflicts: bool,
-        show_variants: bool,
+        show_families: bool,
     ) -> bool {
         use crate::model::GEdgeKind;
         match kind {
             GEdgeKind::Optional => show_optional,
             GEdgeKind::Conflict => show_conflicts,
-            GEdgeKind::Variant => show_variants,
+            GEdgeKind::Family => show_families,
             GEdgeKind::Required | GEdgeKind::RequiresAny => true,
         }
     }
@@ -3236,7 +3234,7 @@ impl GtaMoApp {
                 e.kind,
                 self.settings.graph.show_optional,
                 self.settings.graph.show_conflicts,
-                self.settings.graph.show_variants,
+                self.settings.graph.show_families,
             ) {
                 continue;
             }
@@ -5197,7 +5195,7 @@ mod tests {
             true
         ));
         assert!(super::GtaMoApp::edge_visible(
-            GEdgeKind::Variant,
+            GEdgeKind::Family,
             false,
             false,
             true

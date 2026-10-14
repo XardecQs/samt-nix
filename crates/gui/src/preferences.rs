@@ -264,7 +264,7 @@ fn graph(ui: &mut egui::Ui, g: &mut GraphSettings) -> bool {
         .checkbox(&mut g.show_conflicts, "Mostrar conflictos")
         .changed();
     changed |= ui
-        .checkbox(&mut g.show_variants, "Mostrar familias de variantes")
+        .checkbox(&mut g.show_families, "Mostrar familias")
         .changed();
     changed |= ui
         .checkbox(&mut g.only_enabled, "Mostrar solo los mods activados")

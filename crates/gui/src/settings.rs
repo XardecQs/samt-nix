@@ -92,7 +92,7 @@ pub struct GraphSettings {
     #[serde(default = "default_true")]
     pub show_conflicts: bool,
     #[serde(default = "default_true")]
-    pub show_variants: bool,
+    pub show_families: bool,
     #[serde(default = "default_true")]
     pub labels_always: bool,
     #[serde(default = "default_true")]
@@ -134,7 +134,7 @@ impl Default for GraphSettings {
         Self {
             show_optional: true,
             show_conflicts: true,
-            show_variants: true,
+            show_families: true,
             labels_always: true,
             dragging: true,
             node_selection: true,
@@ -379,7 +379,7 @@ mod tests {
     fn graph_settings_defaults_and_roundtrip() {
         // A file without a [graph] table gets the defaults.
         let s: GuiSettings = toml::from_str("ui_scale = 1.0\n").unwrap();
-        assert!(s.graph.show_optional && s.graph.show_conflicts && s.graph.show_variants);
+        assert!(s.graph.show_optional && s.graph.show_conflicts && s.graph.show_families);
         assert!(s.graph.auto_settle);
         assert_eq!(s.graph.force.k_scale, 0.6);
         assert_eq!(s.graph.edge_width, 2.0);

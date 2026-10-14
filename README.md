@@ -308,16 +308,17 @@ mount = ["content"]
 required = ["xardec:asi-loader"]  # sin esto el mod no funciona
 optional = []
 
-# Variante de una familia mutuamente excluyente (4K/LITE, RoSA/vanilla…):
-# solo una variante del mismo `group` puede estar activa a la vez.
-[variant]
-group = "proper-fixes"
-name = "RoSA"
+# Miembro de una familia de alternativas mutuamente excluyentes (Reload Mod /
+# ReloadSA, Project2DFX / Distant Car Upgrade…): solo un miembro del mismo `id`
+# puede estar activo a la vez.
+[family]
+id = "reload"
+name = "Reload Mod"
 
 # Mods incompatibles (por id o carpeta); no se pueden activar juntos.
 conflicts = ["mixmods:proper-fixes"]
 
-# Al menos UNO de estos debe estar activo (alternativas, p. ej. variantes o
+# Al menos UNO de estos debe estar activo (alternativas, p. ej. familias o
 # "Proper Shaders" o "SkyGfx"). No auto-activa ni afecta al orden: se valida.
 requires_any = ["mixmods:proper-shaders", "aap:sa-skygfx-extended"]
 
@@ -379,18 +380,19 @@ path = "content/modloader/_ESSENTIALS/SilentPatch"
   Mod folder names must also avoid `,`/`:`; such folders are skipped by
   `discover` with a warning.
 
-### Variants, conflicts and Mod Loader
+### Families, conflicts and Mod Loader
 
-Some mods ship **variants** (RoSA 4K vs LITE, Proper Fixes "normal" vs "for
-RoSA Evolved"). Model them as separate folders that share a `[variant] group`:
-enabling one variant automatically disables the other members of the family
-(both from `ctl enable` and the GUI's variant selector). Per-variant
-requirements/conflicts are declared in each folder's own `[dependencies]` and
-`conflicts`.
+Some mods are **alternatives within a family** (Reload Mod / Reload Mod (Fixed) /
+ReloadSA, Project2DFX / Distant Car Upgrade). Model them as separate folders that
+share a `[family] id`: enabling one member automatically disables the other
+members of the family (from `ctl enable`, which surfaces a toast in the GUI).
+Per-member requirements/conflicts are declared in each folder's own
+`[dependencies]` and `conflicts`. The detail panel shows the family and its
+siblings (with **Ver** links to navigate between them), it does not switch them.
 
 - `conflicts = [...]` lists incompatible mods (by `author:slug` or folder).
   Enabling one of a conflicting pair is refused, and `ctl health`/`launch`
-  report the pair. A real launch **aborts** on a variant/conflict violation
+  report the pair. A real launch **aborts** on a family/conflict violation
   (`--dry-run` prints them without launching).
 - `requires_any = [...]` lists alternatives of which **at least one** must be
   enabled. Unlike `[dependencies].required` (an edge that auto-enables and
@@ -722,7 +724,7 @@ detail panel (author, Mod ID, URL, tags, groups, mount, description, cover,
 screenshot gallery, components, a one-click **Crear mod.toml** for mods
 without a manifest, a **tag editor** and a raw **mod.toml editor**, per-profile
 **notes** and **hide** toggles (per profile and global, with a "Mostrar ocultos"
-filter)), a **variant** badge/selector and declared **conflicts** in the detail panel,
+filter)), a **family** badge and declared **conflicts** in the detail panel,
 profiles tab with create/use/rename/copy/delete
 (renaming also moves `run/profiles/<slug>`), a **Datos** tab listing the active
 profile's saves, settings, User Tracks and screenshots written under
@@ -742,8 +744,8 @@ The **Dependencies** tab has a **Lista / Grafo** toggle. The graph view (built
 with [`egui_graphs`](https://crates.io/crates/egui_graphs)) renders the mods as
 nodes (green = enabled, gray = disabled, dark = hidden) and the relations as
 edges: required dependencies, optional ones, conflicts, `requires_any`
-alternatives and `[variant]` families. Edges can be filtered with the
-*Opcionales*, *Conflictos* and *Variantes* toggles. It supports free zoom/pan
+alternatives and `[family]` families. Edges can be filtered with the
+*Opcionales*, *Conflictos* and *Familias* toggles. It supports free zoom/pan
 (the mouse wheel zooms towards the cursor and drag pans, even outside the
 viewport) plus **＋/－/⤢ Ajustar** buttons, node dragging, a **Fuerza**
 layout (it settles and pauses on its own) and a **Reorganizar** button. A single

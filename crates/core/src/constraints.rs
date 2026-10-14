@@ -1,5 +1,5 @@
 //! Cross-mod constraints that the per-mod dependency graph cannot express:
-//! mutually exclusive variant families and declared incompatibilities.
+//! mutually exclusive families of alternatives and declared incompatibilities.
 //!
 //! The manifest is the source of truth, so this reads `mod.toml` live.
 
@@ -9,8 +9,8 @@ use std::path::Path;
 /// Severity/kind of a constraint violation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// More than one variant of the same family is enabled.
-    Variant,
+    /// More than one member of the same family is enabled.
+    Family,
     /// Two mods declared incompatible are enabled.
     Conflict,
     /// A mod's `requires_any` alternatives are all missing/disabled.
@@ -42,7 +42,7 @@ fn resolve_ref(
     folders.iter().find(|f| f.as_str() == trimmed).cloned()
 }
 
-/// Checks the enabled mods for variant/conflict/requires-any violations.
+/// Checks the enabled mods for family/conflict/requires-any violations.
 ///
 /// `all_folders` is used to resolve references by `author:slug` id; `enabled`
 /// is the set of folders enabled in the profile. `options` holds each mod's
@@ -74,9 +74,9 @@ pub fn check(
         let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, folder) else {
             continue;
         };
-        if let Some(variant) = &meta.variant {
+        if let Some(family) = &meta.family {
             groups
-                .entry(variant.group.clone())
+                .entry(family.id.clone())
                 .or_default()
                 .push(folder.clone());
         }
@@ -149,9 +149,9 @@ pub fn check(
         if members.len() > 1 {
             members.sort();
             violations.push(Violation {
-                kind: Kind::Variant,
+                kind: Kind::Family,
                 message: format!(
-                    "Varias variantes de '{}' activadas a la vez: {}.",
+                    "Varias alternativas de la familia '{}' activadas a la vez: {}.",
                     group,
                     members.join(", ")
                 ),
@@ -236,12 +236,12 @@ mod tests {
         }
         std::fs::write(
             dir.join("A/mod.toml"),
-            "id = \"x:a\"\n[variant]\ngroup = \"fam\"\nname = \"one\"\n",
+            "id = \"x:a\"\n[family]\nid = \"fam\"\nname = \"one\"\n",
         )
         .unwrap();
         std::fs::write(
             dir.join("B/mod.toml"),
-            "id = \"x:b\"\n[variant]\ngroup = \"fam\"\nname = \"two\"\n",
+            "id = \"x:b\"\n[family]\nid = \"fam\"\nname = \"two\"\n",
         )
         .unwrap();
         std::fs::write(
@@ -257,7 +257,7 @@ mod tests {
             &["A".to_string(), "B".to_string()],
             &HashMap::new(),
         );
-        assert_eq!(v.iter().filter(|x| x.kind == Kind::Variant).count(), 1);
+        assert_eq!(v.iter().filter(|x| x.kind == Kind::Family).count(), 1);
 
         let v = check(
             &dir,

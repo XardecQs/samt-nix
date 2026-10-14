@@ -48,11 +48,11 @@
 # required = ["otro:mod"]  # sin esto el mod no funciona
 # optional = []
 
-# Variante de una familia mutuamente excluyente (4K/LITE, RoSA/vanilla…):
-# solo una variante del mismo `group` puede estar activa a la vez.
-# [variant]
-# group = "proper-fixes"
-# name = "RoSA"
+# Miembro de una familia de alternativas mutuamente excluyentes (Reload Mod /
+# ReloadSA…): solo un miembro del mismo `id` puede estar activo a la vez.
+# [family]
+# id = "reload"
+# name = "Reload Mod"
 
 # Mods incompatibles (por id o carpeta); no se pueden activar juntos.
 # conflicts = ["otro:mod"]
