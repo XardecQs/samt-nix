@@ -3,9 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, nixpkgs }: let
+  outputs = { self, nixpkgs, crane }: let
     supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
     forAllSystems = f: nixpkgs.lib.genAttrs supportedSystems (system:
       let pkgs = nixpkgs.legacyPackages.${system};
@@ -62,17 +63,37 @@
       "$out/bin/gta-mo" completions fish > "$out/share/fish/vendor_completions.d/gta-mo.fish"
     '';
 
+    # Shared crane args. Both the dependency prebuild (below) and the final
+    # package use them, so the dependency compilation only depends on
+    # Cargo.toml/Cargo.lock (crane replaces the workspace members with a dummy
+    # source), not on `crates/**`: editing code reuses the cached deps.
+    commonArgs = pkgs: {
+      src = source;
+      strictDeps = true;
+      nativeBuildInputs = with pkgs; [ pkg-config makeWrapper autoPatchelfHook ];
+      buildInputs = guiRuntimeLibs pkgs;
+    };
+
+    # Prebuilt dependencies. Its hash is keyed on Cargo.toml/Cargo.lock (and the
+    # build inputs), so a source-only change does not rebuild it.
+    depsFor = pkgs: (crane.mkLib pkgs).buildDepsOnly (commonArgs pkgs // {
+      pname = "gta-mo-deps";
+      # `default-members = crates/cli`, so without `--workspace` only the CLI
+      # (and its deps) would be prepared; the GUI deps must be cached too.
+      cargoBuildExtraArgs = "--workspace";
+      cargoCheckExtraArgs = "--workspace --all-targets";
+    });
+
     # CLI-only package: `enableGui = false` never compiles the GUI crates.
     mkCliPackage = { pkgs, doCheck ? false }:
-      pkgs.rustPlatform.buildRustPackage {
+      let
+        craneLib = crane.mkLib pkgs;
+      in
+      craneLib.buildPackage (commonArgs pkgs // {
         pname = "gta-mod-organizer";
-        inherit version;
-        src = source;
-        cargoLock = {
-          lockFile = ./Cargo.lock;
-        };
-        inherit doCheck;
-        nativeBuildInputs = with pkgs; [ makeWrapper ];
+        inherit version doCheck;
+        cargoArtifacts = depsFor pkgs;
+        cargoBuildExtraArgs = "-p gta-mod-organizer";
         postInstall = cliPostInstall pkgs;
         meta = {
           description = "GTA San Andreas mod organizer with fuse-overlayfs";
@@ -80,7 +101,7 @@
           license = nixpkgs.lib.licenses.gpl3Plus;
           platforms = supportedSystems;
         };
-      };
+      });
 
     # GUI-enabled package: builds the CLI and the GUI in a **single** cargo
     # invocation, so the dependency tree shared by both (gta-mo-core + rusqlite/
@@ -90,25 +111,18 @@
     # `enableGui = false` uses `gta-mod-organizer` above (no GUI crates at all).
     mkGuiPackage = { pkgs }:
       let
+        craneLib = crane.mkLib pkgs;
         guiLibs = guiRuntimeLibs pkgs;
       in
-      pkgs.rustPlatform.buildRustPackage {
+      craneLib.buildPackage (commonArgs pkgs // {
         pname = "gta-mo-gui";
         inherit version;
 
-        src = source;
+        cargoArtifacts = depsFor pkgs;
 
-        cargoLock = {
-          lockFile = ./Cargo.lock;
-        };
-
-        cargoBuildFlags = [ "-p" "gta-mod-organizer" "-p" "gta-mo-gui" ];
+        cargoBuildExtraArgs = "-p gta-mod-organizer -p gta-mo-gui";
 
         doCheck = false;
-
-        nativeBuildInputs = with pkgs; [ pkg-config makeWrapper autoPatchelfHook ];
-
-        buildInputs = guiLibs;
 
         postInstall = cliPostInstall pkgs + ''
           wrapProgram "$out/bin/gta-mo-gui" \
@@ -132,7 +146,7 @@
           license = nixpkgs.lib.licenses.gpl3Plus;
           platforms = supportedSystems;
         };
-      };
+      });
 
   in {
     packages = forAllSystems (pkgs: rec {
@@ -143,35 +157,19 @@
 
     checks = forAllSystems (pkgs: let
       pkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+      craneLib = crane.mkLib pkgs;
+      cargoArtifacts = depsFor pkgs;
     in {
       build = pkg;
 
-      clippy = pkgs.rustPlatform.buildRustPackage {
-        pname = "gta-mod-organizer-clippy";
-        inherit version;
+      # Lint the whole workspace (including test code), reusing the cached
+      # dependencies. GUI build inputs come from `commonArgs`.
+      clippy = craneLib.cargoClippy (commonArgs pkgs // {
+        inherit cargoArtifacts;
+        cargoClippyExtraArgs = "--workspace --all-targets -- -D warnings";
+      });
 
-        src = source;
-
-        cargoLock = {
-          lockFile = ./Cargo.lock;
-        };
-
-        nativeBuildInputs = with pkgs; [ clippy ];
-
-        # Lint cli+core (including test code). The GUI needs X11/Wayland build
-        # inputs that this derivation does not provide; CI lints it separately.
-        cargoBuildCommand = "cargo clippy -p gta-mod-organizer -p gta-mo-core --all-targets -- -D warnings";
-
-        installPhase = "mkdir $out";
-      };
-
-      fmt = pkgs.stdenv.mkDerivation {
-        name = "gta-mod-organizer-fmt";
-        src = source;
-        nativeBuildInputs = with pkgs; [ rustc cargo rustfmt ];
-        buildPhase = "cargo fmt --all --check";
-        installPhase = "mkdir $out";
-      };
+      fmt = craneLib.cargoFmt { pname = "gta-mo-fmt"; src = source; };
     });
 
     overlay = final: prev: {
