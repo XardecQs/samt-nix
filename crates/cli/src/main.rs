@@ -13,7 +13,7 @@ use std::io::{IsTerminal, Write};
 #[command(
     name = "gta-mo",
     about = "GTA Mod Organizer — GTA SA mod launcher with overlayfs",
-    version
+    version = gta_mo_core::VERSION
 )]
 struct Cli {
     #[arg(long, global = true, help = "Profile to use (name, slug or id)")]

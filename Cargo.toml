@@ -4,6 +4,9 @@ default-members = ["crates/cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.50.3"
+# Kept constant on purpose: the real version lives in ./VERSION and is injected
+# at build time (see crates/core/build.rs). Keeping it out of Cargo.toml/Cargo.lock
+# stops a version bump from invalidating the cached build dependencies.
+version = "0.0.0"
 edition = "2021"
 license = "GPL-3.0-or-later"

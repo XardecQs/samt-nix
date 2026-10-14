@@ -12,8 +12,9 @@
       let pkgs = nixpkgs.legacyPackages.${system};
       in f pkgs);
 
-    version =
-      (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+    # Real version lives outside Cargo.toml on purpose (see Cargo.toml), so a
+    # release bump does not invalidate the cached build dependencies.
+    version = nixpkgs.lib.removeSuffix "\n" (builtins.readFile ./VERSION);
 
     source = nixpkgs.lib.fileset.toSource {
       root = ./.;
@@ -22,6 +23,7 @@
         ./data
         ./Cargo.toml
         ./Cargo.lock
+        ./VERSION
         ./README.md
         ./LICENSE
       ];
@@ -77,7 +79,7 @@
     # Prebuilt dependencies. Its hash is keyed on Cargo.toml/Cargo.lock (and the
     # build inputs), so a source-only change does not rebuild it.
     depsFor = pkgs: (crane.mkLib pkgs).buildDepsOnly (commonArgs pkgs // {
-      pname = "gta-mo-deps";
+      pname = "gta-mo";
       # `default-members = crates/cli`, so without `--workspace` only the CLI
       # (and its deps) would be prepared; the GUI deps must be cached too.
       cargoBuildExtraArgs = "--workspace";

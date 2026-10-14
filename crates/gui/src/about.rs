@@ -15,7 +15,7 @@ pub fn show_about(ctx: &egui::Context, settings: &GuiSettings, open: &mut bool) 
         ui.vertical_centered(|ui| {
             ui.add_space(4.0);
             ui.heading("GTA SA Mod Organizer");
-            ui.label(egui::RichText::new(format!("Versión {}", env!("CARGO_PKG_VERSION"))).weak());
+            ui.label(egui::RichText::new(format!("Versión {}", gta_mo_core::VERSION)).weak());
             ui.add_space(8.0);
         });
         ui.separator();
@@ -63,7 +63,7 @@ fn diagnostics(settings: &GuiSettings) -> String {
          binario gta-mo: {}\n\
          config: {}\n\
          base de datos: {}",
-        env!("CARGO_PKG_VERSION"),
+        gta_mo_core::VERSION,
         settings.theme,
         settings.high_contrast,
         settings.reduce_motion,

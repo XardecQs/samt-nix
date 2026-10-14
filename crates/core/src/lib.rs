@@ -1,3 +1,8 @@
+/// App version from the repo's top-level `VERSION` file, injected at build time
+/// by `build.rs`. The Cargo manifest version stays at `0.0.0` on purpose so a
+/// release bump does not invalidate the cached build dependencies.
+pub const VERSION: &str = env!("GTA_MO_VERSION");
+
 pub mod color;
 pub mod config;
 pub mod conflicts;

@@ -58,7 +58,7 @@ impl LaunchLog {
         {
             let mut f = std::fs::File::create(&path)?;
             writeln!(f, "=== gta-mo — {title} ===")?;
-            writeln!(f, "gta-mo: {}", env!("CARGO_PKG_VERSION"))?;
+            writeln!(f, "gta-mo: {}", crate::VERSION)?;
             let when =
                 format_local_time(secs, "%Y-%m-%d %H:%M:%S %z").unwrap_or_else(|| secs.to_string());
             writeln!(f, "inicio: {when} (unix {secs})")?;
@@ -2419,7 +2419,7 @@ mod tests {
         log.write("hola mundo");
         let content = std::fs::read_to_string(log.path()).unwrap();
         assert!(content.contains("hola mundo"));
-        assert!(content.contains(env!("CARGO_PKG_VERSION")));
+        assert!(content.contains(crate::VERSION));
         assert!(content.contains("gta-mo:"));
 
         let count = std::fs::read_dir(&dir)
