@@ -50,7 +50,8 @@
         --prefix PATH : ${pkgs.fuse-overlayfs}/bin \
         --prefix PATH : ${pkgs.umu-launcher}/bin \
         --prefix PATH : ${pkgs.rsync}/bin \
-        --prefix PATH : ${pkgs.xdg-utils}/bin
+        --prefix PATH : ${pkgs.xdg-utils}/bin \
+        --prefix PATH : ${pkgs.pciutils}/bin
 
       # NOTE: do not add `fuse3` to PATH here. Its bin/ contains a
       # non-setuid fusermount3 that shadows the setuid wrapper in
@@ -227,6 +228,7 @@
           fuse-overlayfs
           umu-launcher
           sqlite
+          pciutils
           gcc
           pkg-config
           glfw3

@@ -4,13 +4,62 @@ use std::io::{BufRead, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::{config, db, mount_state, overlay, preload, preload::PreloadMode, resolver, upper};
 
 pub struct LaunchEngine;
+
+/// Set when the process receives SIGTERM/SIGINT. The handler does **not** kill
+/// the process: it stays alive so the launcher can write its trailer
+/// (`resultado: cancelado` + `fin`) instead of the log being cut mid-run. It
+/// doubles as the cooperative `stop` flag for the page-cache warm.
+static CANCELED: AtomicBool = AtomicBool::new(false);
+/// Number of cancel signals seen; the second one force-quits.
+static CANCEL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+extern "C" fn on_cancel_signal(sig: libc::c_int) {
+    CANCELED.store(true, Ordering::SeqCst);
+    if CANCEL_COUNT.fetch_add(1, Ordering::SeqCst) >= 1 {
+        // Second signal: restore the default action and re-raise so the user
+        // can always force-quit a stuck launch/preload.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+}
+
+/// Installs SIGTERM/SIGINT handlers that mark the run as canceled. Used by the
+/// GUI's **Detener** (SIGTERM to the process group) and terminal Ctrl+C so the
+/// launch/preload log gets a proper `resultado`/`fin` trailer. The child
+/// `umu`/Proton processes still receive the signal (same process group).
+pub fn install_cancel_handler() {
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = on_cancel_signal as *const () as usize;
+        action.sa_flags = 0;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
+}
+
+/// Whether a cancel signal has been received.
+fn canceled() -> bool {
+    CANCELED.load(Ordering::SeqCst)
+}
+
+/// Writes the `fin:` trailer to a run log, if there is one, so its end time is
+/// always recoverable even for preloads and canceled runs.
+fn write_fin(launch_log: Option<&LaunchLog>) {
+    if let Some(l) = launch_log {
+        let fin = format_local_time(now_unix(), "%Y-%m-%d %H:%M:%S %z").unwrap_or_default();
+        l.write(&format!("fin: {fin}"));
+    }
+}
 
 /// umu's `steamrt4` runtime directory (`$XDG_DATA_HOME/umu/steamrt4`),
 /// optionally overridden with `GTA_MO_STEAMRT_DIR` (mainly for tests).
@@ -150,10 +199,48 @@ fn environment_lines() -> Vec<String> {
     if let Some((total, avail)) = mem_info_mib() {
         out.push(format!("RAM: {total} MiB (available: {avail} MiB)"));
     }
+    if let Some(p) = memory_pressure() {
+        out.push(format!("Presión de memoria: {p}"));
+    }
+    if let Some(free) = shm_free_mib() {
+        out.push(format!("/dev/shm: {free} MiB libres"));
+    }
     if let Some(gpu) = gpu_info() {
         out.push(format!("GPU: {gpu}"));
     }
+    // State of the tmpfs Wine prefix copy (fresh/reused), so a launch log makes
+    // it clear whether it was rebuilt this run.
+    match crate::prefix_ram::status() {
+        Some(_) => {
+            let mib = crate::prefix_ram::prepared_bytes() as f64 / 1_048_576.0;
+            out.push(format!("Prefijo tmpfs: preparado ({mib:.0} MiB)"));
+        }
+        None => out.push("Prefijo tmpfs: no preparado".into()),
+    }
+    if let Ok(v) = std::env::var("STEAM_COMPAT_LIBRARY_PATHS") {
+        out.push(format!("env STEAM_COMPAT_LIBRARY_PATHS={v}"));
+    }
     out
+}
+
+/// Memory PSI (`some avg10=…`) from `/proc/pressure/memory`, best-effort.
+fn memory_pressure() -> Option<String> {
+    let content = std::fs::read_to_string("/proc/pressure/memory").ok()?;
+    let some = content.lines().find(|l| l.starts_with("some"))?;
+    let avg10 = some
+        .split_whitespace()
+        .find_map(|t| t.strip_prefix("avg10="))?;
+    Some(format!("some avg10={avg10}"))
+}
+
+/// Free space on `/dev/shm` in MiB (via `statvfs`), best-effort.
+fn shm_free_mib() -> Option<u64> {
+    let path = std::ffi::CString::new("/dev/shm").ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some((st.f_bavail as u64 * st.f_frsize as u64) / 1_048_576)
 }
 
 fn os_pretty_name() -> Option<String> {
@@ -195,9 +282,59 @@ fn mem_info_mib() -> Option<(u64, u64)> {
     Some((read("MemTotal:")? / 1024, read("MemAvailable:")? / 1024))
 }
 
-/// Best-effort GPU line from `/sys/class/drm/<card>/device/uevent`
-/// (`<driver> (<PCI_ID>)`); `lspci`/`glxinfo` are not assumed to exist.
+/// Best-effort GPU line. Prefers `lspci -nn` (a readable name like
+/// `Intel Corporation Skylake GT2 [HD Graphics 520]`) when `pciutils` is on
+/// `PATH`, and falls back to `/sys/class/drm/<card>/device/uevent`
+/// (`<driver> (<PCI_ID>)`).
 fn gpu_info() -> Option<String> {
+    gpu_info_lspci().or_else(gpu_info_sysfs)
+}
+
+/// Readable GPU name parsed from `lspci -nn`. `None` when `lspci` is missing or
+/// no display controller is found.
+fn gpu_info_lspci() -> Option<String> {
+    let out = std::process::Command::new("lspci")
+        .arg("-nn")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_lspci_gpu(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Picks the first display controller line out of `lspci -nn` output and turns
+/// `00:02.0 VGA compatible controller [0300]: Intel Corporation … [8086:5916]`
+/// into `Intel Corporation …`.
+fn parse_lspci_gpu(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let is_gpu = line.contains("VGA compatible controller")
+            || line.contains("3D controller")
+            || line.contains("Display controller");
+        if !is_gpu {
+            continue;
+        }
+        let Some(desc) = line
+            .split_once("]: ")
+            .map(|(_, d)| d)
+            .or_else(|| line.split_once(": ").map(|(_, d)| d))
+        else {
+            continue;
+        };
+        // Drop the trailing `[8086:5916]`.
+        let name = desc.rsplit_once(" [").map(|(n, _)| n).unwrap_or(desc);
+        let name = name.trim();
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// GPU line from `/sys/class/drm/<card>/device/uevent` (`<driver> (<PCI_ID>)`).
+fn gpu_info_sysfs() -> Option<String> {
     let entries = std::fs::read_dir("/sys/class/drm").ok()?;
     for e in entries.flatten() {
         let name = e.file_name();
@@ -268,9 +405,11 @@ const UMU_PHASES: &[(&str, &str)] = &[
     ("proton", "proton"),
 ];
 
-/// Lowercased `comm` names of all running processes (best-effort), for the
-/// umu startup phase tracer.
-fn running_comms() -> Vec<String> {
+/// Lowercased `comm` + `cmdline` of all running processes (best-effort), for
+/// the umu startup phase tracer. `cmdline` is included because `comm` is
+/// truncated to 15 bytes and some phases (e.g. umu's `python`) are only
+/// identifiable from argv; matching the whole signature is more robust.
+fn running_signatures() -> Vec<String> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return out;
@@ -281,11 +420,25 @@ fn running_comms() -> Vec<String> {
         if !name.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        if let Ok(comm) = std::fs::read_to_string(e.path().join("comm")) {
-            out.push(comm.trim().to_ascii_lowercase());
+        if let Some(sig) = process_signature(&name) {
+            out.push(sig);
         }
     }
     out
+}
+
+/// Lowercased `"<comm> <cmdline>"` for a pid, if readable.
+fn process_signature(pid: &str) -> Option<String> {
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+        .map(|c| c.replace('\0', " "))
+        .unwrap_or_default();
+    Some(format!("{} {}", comm.trim(), cmdline).to_ascii_lowercase())
+}
+
+/// Whether any process signature contains the phase `needle`.
+fn phase_needle_seen(signatures: &[String], needle: &str) -> bool {
+    signatures.iter().any(|s| s.contains(needle))
 }
 
 /// Forwards every line of `reader` to stdout (or stderr) and appends it to
@@ -1093,15 +1246,18 @@ impl LaunchEngine {
                         break;
                     }
                     // Startup phases of umu (bwrap → python → wine → proton),
-                    // timed since the umu spawn.
-                    if let Some(d) = umu_timing.since_spawn() {
-                        let comms = running_comms();
-                        for (label, needle) in UMU_PHASES {
-                            if !seen_phases.contains(label)
-                                && comms.iter().any(|c| c.contains(needle))
-                            {
-                                seen_phases.push(label);
-                                emit(format!("⏱ umu: {label} +{:.2}s", d.as_secs_f64()));
+                    // timed since the umu spawn. Skip the `/proc` walk once every
+                    // phase is known (the common case after startup).
+                    if seen_phases.len() < UMU_PHASES.len() {
+                        if let Some(d) = umu_timing.since_spawn() {
+                            let signatures = running_signatures();
+                            for &(label, needle) in UMU_PHASES {
+                                if !seen_phases.contains(&label)
+                                    && phase_needle_seen(&signatures, needle)
+                                {
+                                    seen_phases.push(label);
+                                    emit(format!("⏱ umu: {label} +{:.2}s", d.as_secs_f64()));
+                                }
                             }
                         }
                     }
@@ -1206,6 +1362,7 @@ impl LaunchEngine {
         timer.mark("preload");
 
         // Extra files in the background (abortable when the game starts).
+        let extra_start = Instant::now();
         let preload_stop = Arc::new(AtomicBool::new(false));
         let preloader = preload::Preload::spawn_extra(
             mode,
@@ -1311,6 +1468,7 @@ impl LaunchEngine {
             extra_files += s.files;
             extra_stopped |= s.stopped;
         }
+        let extra_elapsed = extra_start.elapsed();
         let sync = prepared_prefix.finalize();
         if sync.synced {
             Self::emit(
@@ -1321,9 +1479,10 @@ impl LaunchEngine {
         }
         timer.mark("prefix-sync");
         let done = format!(
-            "⏱ sesión: {:.1}s | extra: {} archivo(s){}",
+            "⏱ sesión: {:.1}s | extra: {} archivo(s) en {:.1}s{}",
             session.as_secs_f64(),
             extra_files,
+            extra_elapsed.as_secs_f64(),
             if extra_stopped {
                 " (detenida al arrancar el juego)"
             } else {
@@ -1341,15 +1500,16 @@ impl LaunchEngine {
                 l.write(&final_report);
             }
         }
-        let outcome = match &result {
-            Ok(()) => "ok".to_string(),
-            Err(e) => format!("error: {e:#}"),
+        let outcome = if canceled() {
+            "cancelado".to_string()
+        } else {
+            match &result {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("error: {e:#}"),
+            }
         };
         Self::emit(launch_log, log, &format!("resultado: {outcome}"));
-        let fin = format_local_time(now_unix(), "%Y-%m-%d %H:%M:%S %z").unwrap_or_default();
-        if let Some(l) = launch_log {
-            l.write(&format!("fin: {fin}"));
-        }
+        write_fin(launch_log);
 
         result
     }
@@ -1363,7 +1523,12 @@ impl LaunchEngine {
     }
 
     pub fn run(opts: &LaunchOptions, mut log: impl FnMut(&str)) -> anyhow::Result<LaunchResult> {
+        install_cancel_handler();
+        // `bootstrap` (config/DB/lock/`discover`) can be slow on saturated I/O
+        // and used to be invisible in the phase report; measure it explicitly.
+        let boot_start = Instant::now();
         let boot = Self::bootstrap(opts)?;
+        let boot_elapsed = boot_start.elapsed();
         if let Some(result) = Self::shortcut_result(&boot, opts, &mut log)? {
             return Ok(result);
         }
@@ -1410,6 +1575,19 @@ impl LaunchEngine {
                 }
             }
         };
+
+        // Bootstrap (config/DB/lock/discover) happens before the phase timer and
+        // used to be invisible; surface it when it is not negligible.
+        if boot_elapsed.as_millis() >= 50 {
+            Self::emit(
+                launch_log.as_ref(),
+                &mut log,
+                &format!(
+                    "⏱ preparación (config/db+discover): {:.1}s",
+                    boot_elapsed.as_secs_f64()
+                ),
+            );
+        }
 
         if prepared.resolved.is_empty() {
             log("Sin mods activos — lanzando juego limpio.");
@@ -1513,9 +1691,15 @@ impl LaunchEngine {
     /// Warms the page cache for the active profile without launching (used by
     /// `gta-mo preload`).
     pub fn preload(opts: &LaunchOptions, mut log: impl FnMut(&str)) -> anyhow::Result<String> {
+        install_cancel_handler();
+        // Wall clock from process start, so the reported total covers
+        // `bootstrap` (incl. `discover`) and `plan`, which happen before the log
+        // exists and used to be invisible under saturated I/O.
+        let t0 = Instant::now();
         let boot = Self::bootstrap(opts)?;
         Self::validate_paths(&boot.cfg)?;
         let prepared = Self::plan(&boot, opts, false)?;
+        let prep_elapsed = t0.elapsed();
 
         // Persist the prewarm output to `preload-<ts>.log` under the profile's
         // logs dir (it used to be shown only in the GUI/terminal).
@@ -1550,6 +1734,13 @@ impl LaunchEngine {
             }
         };
 
+        if prep_elapsed.as_millis() >= 50 {
+            emit(&format!(
+                "⏱ preparación (config/db+discover+plan): {:.1}s",
+                prep_elapsed.as_secs_f64()
+            ));
+        }
+
         let mut mode = Self::resolve_preload_mode(&boot.cfg, opts);
         Self::confirm_full_preload(&mut mode, opts, plog.as_ref());
         let prefix_ram = opts.prefix_ram.unwrap_or_else(|| boot.cfg.prefix_ram());
@@ -1566,6 +1757,10 @@ impl LaunchEngine {
         let do_umu = !mode.is_off() && opts.preload_umu.unwrap_or_else(|| boot.cfg.preload_umu());
         if mode.is_off() && !prefix_ram && !do_proton && !do_steamrt && !do_umu {
             emit("Precarga desactivada (preload = \"off\" y prefix_ram = false).");
+            if let Some(l) = &plog {
+                l.write("resultado: ok");
+            }
+            write_fin(plog.as_ref());
             return Ok(String::new());
         }
 
@@ -1578,6 +1773,7 @@ impl LaunchEngine {
         // C: leave the tmpfs prefix ready for the next launch. Dropping the
         // guard is a no-op, so the copy stays until `launch` consumes it.
         let mut tmpfs_ready = false;
+        let mut prefix_elapsed = Duration::ZERO;
         if prefix_ram {
             let proton = PathBuf::from(&boot.cfg.proton_path);
             let pf = crate::prefix_ram::PreparedPrefix::prepare(
@@ -1587,6 +1783,7 @@ impl LaunchEngine {
                 materialize,
             );
             let r = pf.report();
+            prefix_elapsed = r.elapsed;
             let ram = crate::prefix_ram::prepared_bytes() as f64 / 1_048_576.0;
             if r.copied {
                 emit(&format!(
@@ -1601,7 +1798,9 @@ impl LaunchEngine {
         }
 
         let started = Instant::now();
-        let stop = AtomicBool::new(false);
+        // `&CANCELED` doubles as the cooperative stop flag, so a SIGTERM/SIGINT
+        // aborts the warm quickly (and still lets the trailer be written).
+        let stop = &CANCELED;
         if !mode.is_off() {
             emit(&format!(
                 "Precargando perfil '{}' (modo {}): {} mod(s).",
@@ -1620,7 +1819,7 @@ impl LaunchEngine {
                 &boot.paths.base_game,
                 boot.cfg.game_exe(),
                 &layers,
-                &stop,
+                stop,
             );
             emit(&format!(
                 "Precargado(s) {} archivo(s), {:.1} MiB.",
@@ -1636,7 +1835,7 @@ impl LaunchEngine {
             } else {
                 PathBuf::from(&boot.cfg.proton_path)
             };
-            let s = preload::warm_root(&root, &stop);
+            let s = preload::warm_root(&root, stop);
             emit(&format!(
                 "Proton prefetch: {} archivo(s), {:.0} MiB.",
                 s.files,
@@ -1645,7 +1844,7 @@ impl LaunchEngine {
         }
         if do_steamrt {
             if let Some(root) = steamrt_dir() {
-                let s = preload::warm_root(&root, &stop);
+                let s = preload::warm_root(&root, stop);
                 emit(&format!(
                     "steamrt prefetch: {} archivo(s), {:.0} MiB.",
                     s.files,
@@ -1654,21 +1853,41 @@ impl LaunchEngine {
             }
         }
         if do_umu {
-            match preload::warm_umu(&stop) {
+            let umu_start = Instant::now();
+            match preload::warm_umu(stop) {
                 Some(s) => emit(&format!(
-                    "Preload umu: {} archivo(s), {:.0} MiB.",
+                    "Preload umu: {} archivo(s), {:.0} MiB en {:.1}s.",
                     s.files,
-                    s.bytes as f64 / 1_048_576.0
+                    s.bytes as f64 / 1_048_576.0,
+                    umu_start.elapsed().as_secs_f64()
                 )),
                 None => emit("Preload umu: no se encontró el entorno de umu; se omite."),
             }
         }
 
+        let warm_elapsed = started.elapsed();
+        let total = t0.elapsed();
+        let cancelled = canceled();
+        let verb = if cancelled {
+            "Precarga cancelada tras"
+        } else {
+            "Precarga completada en"
+        };
         let msg = format!(
-            "Precarga completada en {:.1}s.",
-            started.elapsed().as_secs_f64()
+            "{verb} {:.1}s (preparación {:.1}s + prefijo {:.1}s + caché {:.1}s).",
+            total.as_secs_f64(),
+            prep_elapsed.as_secs_f64(),
+            prefix_elapsed.as_secs_f64(),
+            warm_elapsed.as_secs_f64()
         );
         emit(&msg);
+        if let Some(l) = &plog {
+            l.write(&format!(
+                "resultado: {}",
+                if cancelled { "cancelado" } else { "ok" }
+            ));
+        }
+        write_fin(plog.as_ref());
         Ok(msg)
     }
 
@@ -2512,5 +2731,33 @@ mod tests {
         assert_eq!(layers[3], dir.join("base").display().to_string());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_lspci_gpu_names() {
+        let text = "\
+00:00.0 Host bridge [0600]: Intel Corporation Xeon E3-1200 v5/E3-1500 v5 [8086:1904] (rev 08)
+00:02.0 VGA compatible controller [0300]: Intel Corporation Skylake GT2 [HD Graphics 520] [8086:1916] (rev 07)
+";
+        assert_eq!(
+            parse_lspci_gpu(text).as_deref(),
+            Some("Intel Corporation Skylake GT2 [HD Graphics 520]")
+        );
+        // No display controller -> None; a malformed line is skipped, not fatal.
+        assert_eq!(
+            parse_lspci_gpu("00:00.0 Host bridge [0600] no colon\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn phase_needle_matches_comm_or_cmdline() {
+        let sigs = vec![
+            "bash /run/umu-run".to_string(),
+            "python3.13 -c import umu_launcher".to_string(),
+        ];
+        assert!(phase_needle_seen(&sigs, "python"));
+        assert!(phase_needle_seen(&sigs, "umu"));
+        assert!(!phase_needle_seen(&sigs, "pressure-vessel"));
     }
 }

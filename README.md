@@ -264,19 +264,26 @@ auto_discover = true
 > `run/profiles/<slug>/logs/` (high-level launcher messages plus the
 > `umu`/Proton output, teed from the game process). The header records the
 > `gta-mo` version, the local start time and an environment block (OS/kernel,
-> CPU, RAM, GPU), followed by the profile, paths, an effective `config:` line and
-> the full mod list (`[✔]` enabled, `[✘]` disabled/hidden). Every `umu`/Proton
-> line is prefixed with `[HH:MM:SS.mmm +X.XXs]` (wall clock + time since the umu
-> spawn) and the watcher reports the umu startup phases (`bwrap`, `python`,
-> `wine`, `proton`) and the total boot. `PROTON_LOG_DIR` and `DXVK_LOG_PATH` point
+> CPU, RAM, memory pressure, `/dev/shm` free, GPU — a readable name via `lspci`
+> when `pciutils` is available, else `/sys/class/drm` —, the tmpfs prefix state
+> and the effective `STEAM_COMPAT_LIBRARY_PATHS`), followed by the profile,
+> paths, an effective `config:` line and the full mod list (`[✔]` enabled,
+> `[✘]` disabled/hidden). Every `umu`/Proton line is prefixed with
+> `[HH:MM:SS.mmm +X.XXs]` (wall clock + time since the umu spawn) and the watcher
+> reports the umu startup phases (`bwrap`, `python`, `wine`, `pressure-vessel`,
+> `proton`) and the total boot. `PROTON_LOG_DIR` and `DXVK_LOG_PATH` point
 > there too, and `UMU_LOG` keeps umu's output (`debug` with `--debug`). Proton's
 > verbose `steam-<appid>.log` is only written with `--debug` (or
 > `proton_log = true`). Standalone preload runs (`gta-mo preload`, which the GUI
-> uses as its *prewarm*) write their own `preload-<ts>.log` in the same folder.
-> The newest 20 `launch-*.log` and 20 `preload-*.log` per profile are kept. Pass
-> `--redact` (or `GTA_MO_REDACT=1`) to mask `/home/<user>` as `/home/****` so the
-> log is safe to share. The GUI's Log tab and ⋮ menu have an **Abrir carpeta de
-> logs** action.
+> uses as its *prewarm*) write their own `preload-<ts>.log` in the same folder;
+> their `Precarga completada en Xs` line breaks the total down into
+> `preparación` (config/DB/discover/plan, previously invisible), `prefijo` (the
+> tmpfs copy) and `caché` (the page-cache warm, including umu). Both launch and
+> preload logs end with a `resultado:`/`fin:` trailer, so a canceled run (GUI
+> **Detener**, Ctrl+C) or one cut short is still measurable. The newest 20
+> `launch-*.log` and 20 `preload-*.log` per profile are kept. Pass `--redact` (or
+> `GTA_MO_REDACT=1`) to mask `/home/<user>` as `/home/****` so the log is safe to
+> share. The GUI's Log tab and ⋮ menu have an **Abrir carpeta de logs** action.
 
 ## Mod packaging (`mod.toml`)
 
