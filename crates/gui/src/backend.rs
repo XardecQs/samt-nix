@@ -233,12 +233,14 @@ impl Backend {
             .map(|p| {
                 let (total, enabled) =
                     db::profile_mod_count(conn, p.id).map_err(|e| e.to_string())?;
+                let played_seconds = db::played_seconds(conn, p.id).map_err(|e| e.to_string())?;
                 Ok::<ProfileView, String>(ProfileView {
                     name: p.name.clone(),
                     slug: p.slug.clone(),
                     is_active: p.is_active,
                     total,
                     enabled,
+                    played_seconds,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -446,6 +448,7 @@ impl Backend {
             family_members,
             options_by_folder,
             edges,
+            global_played_seconds: db::global_played_seconds(conn).map_err(|e| e.to_string())?,
         })
     }
 
@@ -711,6 +714,11 @@ fn merge_meta_caches(cached: db::ModMetaCache, live: db::ModMetaCache) -> db::Mo
             live.author
         },
         url: live.url.or(cached.url),
+        urls: if live.urls.is_empty() {
+            cached.urls
+        } else {
+            live.urls
+        },
         description: live.description.or(cached.description),
         license: live.license.or(cached.license),
         cover: live.cover.or(cached.cover),
@@ -806,6 +814,7 @@ mod tests {
             version: Some("1".into()),
             author: vec!["Old".into()],
             url: None,
+            urls: vec![],
             description: None,
             license: None,
             cover: Some("c.png".into()),

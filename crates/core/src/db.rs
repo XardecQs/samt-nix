@@ -1,5 +1,5 @@
 use crate::log;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -42,6 +42,8 @@ pub struct ModMetaCache {
     pub version: Option<String>,
     pub author: Vec<String>,
     pub url: Option<String>,
+    /// Extra links declared in the manifest (`urls = [...]`).
+    pub urls: Vec<String>,
     pub description: Option<String>,
     /// License/usage terms from the manifest (metadata only).
     pub license: Option<String>,
@@ -412,6 +414,48 @@ pub fn profile_mod_count(conn: &Connection, profile_id: i64) -> anyhow::Result<(
     Ok((total, enabled))
 }
 
+/// Adds a completed game session's length to the profile's total and to the
+/// global total.
+pub fn add_played_seconds(conn: &Connection, profile_id: i64, secs: i64) -> anyhow::Result<()> {
+    if secs <= 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE profiles SET played_seconds = played_seconds + ?1 WHERE id = ?2",
+        params![secs, profile_id],
+    )?;
+    conn.execute(
+        "INSERT INTO playtime_global(id, seconds) VALUES(1, ?1)
+         ON CONFLICT(id) DO UPDATE SET seconds = seconds + excluded.seconds",
+        params![secs],
+    )?;
+    Ok(())
+}
+
+/// Playtime recorded for a profile (0 if unknown).
+pub fn played_seconds(conn: &Connection, profile_id: i64) -> anyhow::Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT played_seconds FROM profiles WHERE id = ?1",
+            params![profile_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+/// Global playtime recorded across every profile.
+pub fn global_played_seconds(conn: &Connection) -> anyhow::Result<i64> {
+    Ok(conn
+        .query_row(
+            "SELECT seconds FROM playtime_global WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
 /// Every profile and whether `mod_id` is enabled in it (for `ctl info`).
 pub fn mod_enabled_in_profiles(
     conn: &Connection,
@@ -480,8 +524,8 @@ pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> a
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
          license = ?6, cover = ?7, mount = ?8, guides = ?9, tags = ?10, components = ?11,
          screenshots = ?12, family_id = ?13, family_name = ?14, conflicts = ?15,
-         modloader_priority = ?16, modloader_folders = ?17
-         WHERE id = ?18",
+         modloader_priority = ?16, modloader_folders = ?17, urls = ?18
+         WHERE id = ?19",
         params![
             cache.mod_id,
             cache.version,
@@ -500,6 +544,7 @@ pub fn set_mod_meta_cache(conn: &Connection, id: i64, cache: &ModMetaCache) -> a
             json_vec(&cache.conflicts),
             cache.modloader_priority,
             json_vec(&cache.modloader_folders),
+            json_vec(&cache.urls),
             id,
         ],
     )?;
@@ -770,7 +815,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 14;
 
 /// Applies any pending schema migration. The whole chain runs inside a single
 /// transaction: a failure rolls everything back and `user_version` is only
@@ -819,6 +864,12 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         }
         if version < 12 {
             migrate_to_v12(conn)?;
+        }
+        if version < 13 {
+            migrate_to_v13(conn)?;
+        }
+        if version < 14 {
+            migrate_to_v14(conn)?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
@@ -941,6 +992,46 @@ fn migrate_to_v12(conn: &Connection) -> anyhow::Result<()> {
             [],
         )?;
     }
+    Ok(())
+}
+
+/// Adds the `urls` cache column (extra manifest links, JSON list). Introspection
+/// based and idempotent.
+fn migrate_to_v13(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if !cols.iter().any(|c| c.as_str() == "urls") {
+        log::info("Migrando schema: ALTER TABLE mods ADD COLUMN urls TEXT");
+        conn.execute("ALTER TABLE mods ADD COLUMN urls TEXT", [])?;
+    }
+    Ok(())
+}
+
+/// Adds per-profile playtime (`profiles.played_seconds`) and the global total
+/// table `playtime_global`. Introspection based and idempotent.
+fn migrate_to_v14(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('profiles')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if !cols.iter().any(|c| c.as_str() == "played_seconds") {
+        log::info(
+            "Migrando schema: ALTER TABLE profiles ADD COLUMN played_seconds INTEGER NOT NULL DEFAULT 0",
+        );
+        conn.execute(
+            "ALTER TABLE profiles ADD COLUMN played_seconds INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS playtime_global (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            seconds INTEGER NOT NULL DEFAULT 0
+        )",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1715,6 +1806,7 @@ pub fn meta_cache_from_meta(meta: &crate::meta::ModMeta) -> ModMetaCache {
         version: meta.version.clone(),
         author: meta.author.clone(),
         url: meta.url.clone(),
+        urls: meta.urls.clone(),
         description: meta.description.clone(),
         license: meta.license.clone(),
         cover: meta.cover.clone(),
@@ -1740,7 +1832,7 @@ pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache>
     let mut stmt = conn.prepare(
         "SELECT mod_id, version, author, url, description, license, cover, mount, guides, tags,
                 components, screenshots, family_id, family_name, conflicts,
-                modloader_priority, modloader_folders
+                modloader_priority, modloader_folders, urls
          FROM mods WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
@@ -1762,6 +1854,7 @@ pub fn load_mod_meta(conn: &Connection, id: i64) -> anyhow::Result<ModMetaCache>
             conflicts: parse_json_list(row.get(14)?),
             modloader_priority: row.get(15)?,
             modloader_folders: parse_json_list(row.get(16)?),
+            urls: parse_json_list(row.get(17)?),
         })
     })?;
     Ok(rows.next().transpose()?.unwrap_or_default())
@@ -1777,8 +1870,8 @@ pub fn update_mod_meta(
         "UPDATE mods SET mod_id = ?1, version = ?2, author = ?3, url = ?4, description = ?5,
          license = ?6, cover = ?7, mount = ?8, guides = ?9, tags = ?10, components = ?11,
          screenshots = ?12, family_id = ?13, family_name = ?14, conflicts = ?15,
-         modloader_priority = ?16, modloader_folders = ?17
-         WHERE id = ?18",
+         modloader_priority = ?16, modloader_folders = ?17, urls = ?18
+         WHERE id = ?19",
         params![
             meta.as_ref().and_then(|m| m.id.clone()),
             meta.as_ref().and_then(|m| m.version.clone()),
@@ -1809,6 +1902,7 @@ pub fn update_mod_meta(
                     .and_then(|m| m.modloader.as_ref())
                     .and_then(|ml| ml.folders.clone())
             ),
+            json_list(&meta.as_ref().map(|m| m.urls.clone())),
             id,
         ],
     )?;
@@ -2433,6 +2527,29 @@ mod tests {
     }
 
     #[test]
+    fn playtime_accumulates_per_profile_and_globally() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+        let p = active_profile(&conn).unwrap();
+        assert_eq!(played_seconds(&conn, p.id).unwrap(), 0);
+        assert_eq!(global_played_seconds(&conn).unwrap(), 0);
+
+        add_played_seconds(&conn, p.id, 120).unwrap();
+        add_played_seconds(&conn, p.id, 60).unwrap();
+        // Non-positive is ignored.
+        add_played_seconds(&conn, p.id, 0).unwrap();
+        assert_eq!(played_seconds(&conn, p.id).unwrap(), 180);
+        assert_eq!(global_played_seconds(&conn).unwrap(), 180);
+
+        // Another profile adds to the global total but not to the first one.
+        let other = create_profile(&conn, "Otro").unwrap();
+        add_played_seconds(&conn, other, 30).unwrap();
+        assert_eq!(played_seconds(&conn, p.id).unwrap(), 180);
+        assert_eq!(played_seconds(&conn, other).unwrap(), 30);
+        assert_eq!(global_played_seconds(&conn).unwrap(), 210);
+    }
+
+    #[test]
     fn fresh_bootstrap_has_full_metadata_schema() {
         let conn = mem_conn();
         run_migrations(&conn).unwrap();
@@ -2448,6 +2565,7 @@ mod tests {
             "version",
             "author",
             "url",
+            "urls",
             "description",
             "license",
             "cover",

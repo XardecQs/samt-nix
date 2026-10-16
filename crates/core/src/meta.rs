@@ -16,6 +16,9 @@ pub struct ModMeta {
     #[serde(default, deserialize_with = "de_author_list")]
     pub author: Vec<String>,
     pub url: Option<String>,
+    /// Extra links (accepts a single string or a list), beyond the main `url`.
+    #[serde(default, deserialize_with = "de_author_list")]
+    pub urls: Vec<String>,
     pub description: Option<String>,
     /// License or usage terms stated by the author (e.g. `MIT`), if any.
     pub license: Option<String>,

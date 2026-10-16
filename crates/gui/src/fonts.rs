@@ -67,9 +67,45 @@ fn system_font() -> Option<Vec<u8>> {
     std::fs::read(&path).ok()
 }
 
+/// egui family name used for the Log tab when a custom font is chosen.
+pub const LOG_FAMILY: &str = "gta-mo-log";
+
+/// Installed font families, computed once (spawning `fc-list` every frame would
+/// be wasteful since the Preferences window is redrawn continuously).
+pub fn families_cached() -> &'static [String] {
+    static FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    FAMILIES.get_or_init(list_families)
+}
+
+/// Lists installed font families (via `fc-list`), deduped and sorted.
+/// Best-effort: returns an empty list when fontconfig is unavailable.
+pub fn list_families() -> Vec<String> {
+    let Ok(fc) = which::which("fc-list") else {
+        return Vec::new();
+    };
+    let out = match Command::new(fc).args([":", "family"]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let mut families: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        // `fc-list : family` prints comma-separated aliases per line.
+        for fam in line.split(',') {
+            let fam = fam.trim();
+            if !fam.is_empty() && !families.iter().any(|f| f == fam) {
+                families.push(fam.to_string());
+            }
+        }
+    }
+    families.sort_by_key(|f| f.to_lowercase());
+    families
+}
+
 /// Installs the fonts: system font first (when available), egui's defaults as
-/// fallback for missing glyphs/emoji, and Lucide last for UI icons.
-pub fn install(ctx: &egui::Context) {
+/// fallback for missing glyphs/emoji, and Lucide last for UI icons. When
+/// `log_family` is set, its file is registered under [`LOG_FAMILY`] for the Log
+/// tab (falling back to the monospace chain for missing glyphs).
+pub fn install(ctx: &egui::Context, log_family: Option<&str>) {
     let mut fonts = egui::FontDefinitions::default();
 
     if let Some(bytes) = system_font() {
@@ -96,6 +132,22 @@ pub fn install(ctx: &egui::Context) {
             .entry(family)
             .or_default()
             .push("lucide".to_owned());
+    }
+
+    if let Some(family) = log_family {
+        if let Some(bytes) = resolve_font_file(family).and_then(|p| std::fs::read(p).ok()) {
+            fonts.font_data.insert(
+                "log".to_owned(),
+                Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            let mut chain = vec!["log".to_owned()];
+            if let Some(mono) = fonts.families.get(&egui::FontFamily::Monospace) {
+                chain.extend(mono.iter().cloned());
+            }
+            fonts
+                .families
+                .insert(egui::FontFamily::Name(LOG_FAMILY.into()), chain);
+        }
     }
 
     ctx.set_fonts(fonts);

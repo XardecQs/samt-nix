@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS mods (
     version TEXT,
     author TEXT,
     url TEXT,
+    urls TEXT,
     description TEXT,
     license TEXT,
     cover TEXT,
@@ -42,7 +43,14 @@ CREATE TABLE IF NOT EXISTS profiles (
     name TEXT NOT NULL UNIQUE,
     slug TEXT NOT NULL UNIQUE,
     is_active INTEGER DEFAULT 0 CHECK(is_active IN (0, 1)),
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    played_seconds INTEGER NOT NULL DEFAULT 0
+);
+
+-- Global playtime total (survives profile deletion). Single row, id = 1.
+CREATE TABLE IF NOT EXISTS playtime_global (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    seconds INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS profile_mods (

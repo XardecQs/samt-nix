@@ -21,6 +21,16 @@ pub struct ModNodeShape {
     pub label_font: f32,
     /// Draw a background chip behind the label for readability.
     pub label_bg: bool,
+    /// Override for the label/text color (subtler than the default text).
+    pub label_color: Option<Color32>,
+    /// Override for the label chip fill.
+    pub label_bg_color: Option<Color32>,
+    /// Draw a warning ring (cycles / missing or disabled dependencies).
+    pub problem: bool,
+    /// Color of the problem ring.
+    pub problem_color: Option<Color32>,
+    /// Dim this node (focus mode, out of the selected neighborhood).
+    pub dimmed: bool,
 }
 
 impl Default for ModNodeShape {
@@ -35,6 +45,11 @@ impl Default for ModNodeShape {
             radius: 5.0,
             label_font: 12.0,
             label_bg: true,
+            label_color: None,
+            label_bg_color: None,
+            problem: false,
+            problem_color: None,
+            dimmed: false,
         }
     }
 }
@@ -65,16 +80,29 @@ impl<N: Clone, E: Clone, Ty: EdgeType, Ix: IndexType> DisplayNode<N, E, Ty, Ix> 
     fn shapes(&mut self, ctx: &DrawContext) -> Vec<Shape> {
         let center = ctx.meta.canvas_to_screen_pos(self.pos);
         let radius = ctx.meta.canvas_to_screen_size(self.radius);
-        let color = self.color.unwrap_or_else(|| {
+        let mut color = self.color.unwrap_or_else(|| {
             if self.selected || self.dragged || self.hovered {
                 ctx.ctx.style().visuals.widgets.active.fg_stroke.color
             } else {
                 ctx.ctx.style().visuals.widgets.inactive.fg_stroke.color
             }
         });
+        if self.dimmed {
+            color = color.gamma_multiply(0.25);
+        }
 
-        let mut shapes = Vec::with_capacity(3);
+        let mut shapes = Vec::with_capacity(4);
         shapes.push(Shape::circle_filled(center, radius, color));
+        if self.problem {
+            let ring = self
+                .problem_color
+                .unwrap_or(ctx.ctx.style().visuals.warn_fg_color);
+            shapes.push(Shape::circle_stroke(
+                center,
+                radius + 3.0,
+                Stroke::new(2.0_f32, ring),
+            ));
+        }
         if self.selected || self.hovered || self.dragged {
             let stroke_color = ctx.ctx.style().visuals.selection.stroke.color;
             shapes.push(Shape::circle_stroke(
@@ -88,7 +116,12 @@ impl<N: Clone, E: Clone, Ty: EdgeType, Ix: IndexType> DisplayNode<N, E, Ty, Ix> 
             return shapes;
         }
 
-        let text_color = ctx.ctx.style().visuals.text_color();
+        let mut text_color = self
+            .label_color
+            .unwrap_or_else(|| ctx.ctx.style().visuals.text_color());
+        if self.dimmed {
+            text_color = text_color.gamma_multiply(0.25);
+        }
         let galley = ctx.ctx.fonts(|f| {
             f.layout_no_wrap(
                 self.label_text.clone(),
@@ -101,7 +134,9 @@ impl<N: Clone, E: Clone, Ty: EdgeType, Ix: IndexType> DisplayNode<N, E, Ty, Ix> 
         if self.label_bg {
             let pad = Vec2::new(4.0, 2.0);
             let rect = egui::Rect::from_min_size(pos - pad, size + pad * 2.0);
-            let fill = ctx.ctx.style().visuals.window_fill;
+            let fill = self
+                .label_bg_color
+                .unwrap_or(ctx.ctx.style().visuals.window_fill);
             shapes.push(Shape::rect_filled(rect, egui::CornerRadius::same(4), fill));
         }
         shapes.push(egui::epaint::TextShape::new(pos, galley, text_color).into());

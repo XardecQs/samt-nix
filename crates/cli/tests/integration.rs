@@ -240,7 +240,7 @@ fn fresh_database_bootstraps_to_latest_schema() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 14);
     let profile: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM profiles WHERE slug = 'default'",
@@ -355,6 +355,55 @@ fn info_reads_edited_mod_toml_without_launch() {
     assert_eq!(v["author"][1].as_str().unwrap(), "xardec");
     assert_eq!(v["mount"][0].as_str().unwrap(), "content");
     assert_eq!(v["tags"][0].as_str().unwrap(), "essential");
+}
+
+#[test]
+fn doctor_flags_bad_paths_and_reports_urls() {
+    let t = TempDb::new("doctor");
+    let game_root = t.dir.join("game");
+    std::fs::create_dir_all(&game_root).unwrap();
+    let t = t.with_config(&game_root);
+
+    t.run_ok(&["ctl", "init", "good", "--skeleton"]);
+    std::fs::write(
+        game_root.join("mods/good/mod.toml"),
+        "id = \"a:good\"\nname = \"Good\"\nurl = \"https://example.com\"\nurls = [\"https://a\", \"https://b\"]\nmount = [\"content\"]\ncover = \"cover.png\"\ntags = [\"essential\"]\n",
+    )
+    .unwrap();
+    // Missing cover is only a warning and still exits 0.
+    let out = t.run_ok(&["ctl", "doctor"]);
+    assert!(out.contains("advertencia"), "{out}");
+
+    // An escaping path is an error -> non-zero exit.
+    t.run_ok(&["ctl", "init", "bad"]);
+    std::fs::write(
+        game_root.join("mods/bad/mod.toml"),
+        "id = \"a:bad\"\nname = \"Bad\"\ncover = \"../escape.png\"\n",
+    )
+    .unwrap();
+    let out = t.run(&["ctl", "doctor"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("cover ruta inválida"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let v = json(&t.run_ok(&["ctl", "info", "good", "--json"]));
+    assert_eq!(v["urls"][0].as_str().unwrap(), "https://a");
+    assert_eq!(v["urls"][1].as_str().unwrap(), "https://b");
+}
+
+#[test]
+fn profile_playtime_reports_totals() {
+    let t = TempDb::new("playtime");
+    let v = json(&t.run_ok(&["ctl", "profile", "playtime", "--json"]));
+    assert_eq!(v["global_seconds"].as_i64().unwrap(), 0);
+    assert_eq!(v["global"].as_str().unwrap(), "—");
+
+    let list = json(&t.run_ok(&["ctl", "profile", "list", "--json"]));
+    assert!(list[0]["played_seconds"].is_number());
+    assert!(list[0]["played"].is_string());
 }
 
 #[test]

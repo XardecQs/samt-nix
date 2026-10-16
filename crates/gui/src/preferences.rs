@@ -119,6 +119,33 @@ fn appearance(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
         });
 
     ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Fuente del Log");
+        let current = s
+            .log_font
+            .clone()
+            .unwrap_or_else(|| "(monoespaciada de la UI)".into());
+        egui::ComboBox::from_id_salt("prefs_log_font")
+            .selected_text(current)
+            .width(240.0)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(s.log_font.is_none(), "(monoespaciada de la UI)")
+                    .clicked()
+                {
+                    s.log_font = None;
+                    changed = true;
+                }
+                for fam in crate::fonts::families_cached() {
+                    let selected = s.log_font.as_deref() == Some(fam.as_str());
+                    if ui.selectable_label(selected, fam).clicked() {
+                        s.log_font = Some(fam.clone());
+                        changed = true;
+                    }
+                }
+            });
+    });
+
     changed |= ui
         .checkbox(&mut s.high_contrast, "Alto contraste")
         .on_hover_text("Refuerza bordes y texto para mejorar la legibilidad")
@@ -314,6 +341,66 @@ fn graph(ui: &mut egui::Ui, g: &mut GraphSettings) -> bool {
     changed |= ui
         .checkbox(&mut g.highlight_selected, "Resaltar el nodo seleccionado")
         .changed();
+
+    ui.add_space(4.0);
+    ui.label("Vista:");
+    changed |= ui
+        .checkbox(
+            &mut g.size_by_dependents,
+            "Tamaño del nodo según sus dependientes",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(&mut g.color_edges, "Colorear aristas por tipo")
+        .changed();
+    changed |= ui
+        .checkbox(&mut g.show_legend, "Mostrar la leyenda de aristas")
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut g.focus_mode,
+            "Atenuar lo no conectado al seleccionar un nodo",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut g.highlight_problems,
+            "Resaltar ciclos y dependencias rotas",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(&mut g.color_by_author, "Colorear los nodos por autor")
+        .changed();
+    egui::Grid::new("prefs_graph_view")
+        .num_columns(2)
+        .spacing([18.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Escala por grado");
+            changed |= ui
+                .add_enabled(
+                    g.size_by_dependents,
+                    egui::Slider::new(&mut g.dep_scale, 0.0..=1.5).fixed_decimals(2),
+                )
+                .changed();
+            ui.end_row();
+
+            ui.label("Zoom mínimo de etiquetas");
+            changed |= ui
+                .add(egui::Slider::new(&mut g.label_min_zoom, 0.0..=2.0).fixed_decimals(2))
+                .on_hover_text("Oculta las etiquetas por debajo de este nivel de zoom")
+                .changed();
+            ui.end_row();
+
+            ui.label("Profundidad de foco");
+            changed |= ui
+                .add_enabled(
+                    g.focus_mode,
+                    egui::Slider::new(&mut g.focus_depth, 1..=3).fixed_decimals(0),
+                )
+                .on_hover_text("Saltos de vecindad que quedan resaltados")
+                .changed();
+            ui.end_row();
+        });
 
     ui.add_space(4.0);
     egui::CollapsingHeader::new("Fuerza (avanzado)")

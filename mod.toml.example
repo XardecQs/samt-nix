@@ -9,6 +9,7 @@
 # version = "1.0.0"
 # author = ["Autor"]       # string o lista
 # url = "https://github.com/..."
+# urls = ["https://..."]   # enlaces adicionales (string o lista)
 # description = "Descripción del mod."
 # license = "MIT"          # licencia/términos indicados por el autor (si los hay)
 # tags = ["tag1", "tag2"]  # para organizar/filtrar

@@ -1456,6 +1456,14 @@ impl LaunchEngine {
         let session = started.elapsed();
         timer.mark("sesión");
 
+        // Record playtime (skipping cancelled/aborted or near-instant sessions).
+        if !canceled() && session.as_secs() >= 5 {
+            let secs = session.as_secs() as i64;
+            if let Err(e) = db::add_played_seconds(&boot.conn, prepared.profile.id, secs) {
+                crate::log::warn(format!("No se pudo registrar el tiempo jugado: {e}"));
+            }
+        }
+
         watcher_stop.store(true, Ordering::Relaxed);
         if let Some(h) = watcher {
             let _ = h.join();

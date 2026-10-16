@@ -404,6 +404,13 @@ pub enum CtlCommand {
         #[arg(long, help = "Also scan for file conflicts between enabled mods")]
         conflicts: bool,
     },
+    #[command(
+        about = "Validate mod manifests: ids, tags and cover/guides/screenshots/mount/options paths"
+    )]
+    Doctor {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
     #[command(about = "Scan mods/ and refresh metadata/dependencies (no launch required)")]
     Discover,
     #[command(about = "Remove orphaned mod entries from the database")]
@@ -496,6 +503,25 @@ pub enum CtlCommand {
         #[command(subcommand)]
         action: RuntimeAction,
     },
+    #[command(about = "Manage per-profile .desktop entries (launch from the app menu)")]
+    Desktop {
+        #[command(subcommand)]
+        action: DesktopAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DesktopAction {
+    #[command(about = "Create/update the .desktop entry for a profile")]
+    Add {
+        ident: String,
+        #[arg(long, help = "Icon path or theme icon name (default: gta-mo-gui)")]
+        icon: Option<String>,
+    },
+    #[command(about = "Remove a profile's .desktop entry")]
+    Remove { ident: String },
+    #[command(about = "List the generated .desktop entries")]
+    List,
 }
 
 #[derive(Subcommand)]
@@ -555,6 +581,11 @@ pub enum ProfileAction {
     Copy { source: String, new_name: String },
     #[command(about = "Diff the enabled/order state of two profiles")]
     Diff { a: String, b: String },
+    #[command(about = "Show recorded playtime per profile and overall")]
+    Playtime {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

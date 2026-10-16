@@ -187,6 +187,12 @@ pub fn config_dir_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("gta-mo"))
 }
 
+/// XDG applications dir (`$XDG_DATA_HOME/applications`), where per-profile
+/// `.desktop` entries are written.
+pub fn applications_dir() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join("applications"))
+}
+
 /// Base directory for gta-mo caches (`$XDG_CACHE_HOME/gta-mo` or
 /// `~/.cache/gta-mo`).
 pub fn cache_dir_path() -> Option<PathBuf> {

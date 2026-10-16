@@ -107,6 +107,8 @@ struct ModJson {
     author: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -228,6 +230,7 @@ pub fn run(
         super::CtlCommand::Export { path } => cmd_export(conn, path.as_deref()),
         super::CtlCommand::Import { path, force } => cmd_import(conn, path, *force),
         super::CtlCommand::Health { conflicts } => cmd_health(conn, profile_ident, *conflicts),
+        super::CtlCommand::Doctor { json } => cmd_doctor(conn, *json),
         super::CtlCommand::Discover => cmd_discover(conn),
         super::CtlCommand::Clean => cmd_clean(conn),
         super::CtlCommand::Conflicts { json } => cmd_conflicts(conn, profile_ident, *json),
@@ -274,6 +277,7 @@ pub fn run(
         super::CtlCommand::Group { action } => cmd_group(conn, action, profile_ident),
         super::CtlCommand::Option { action } => cmd_option(conn, action, profile_ident),
         super::CtlCommand::Runtime { action } => cmd_runtime(action),
+        super::CtlCommand::Desktop { action } => cmd_desktop(conn, action),
     }
 }
 
@@ -346,6 +350,105 @@ fn cmd_runtime(action: &super::RuntimeAction) -> anyhow::Result<()> {
                 "Runtime eliminado ({}). Se reinstalará al lanzar.",
                 dir.display()
             ));
+            Ok(())
+        }
+    }
+}
+
+/// Builds the `Exec=` line for a per-profile `.desktop`: prefer the GUI (so it
+/// can show the "Lanzando…" splash), falling back to the CLI.
+fn desktop_exec(slug: &str) -> String {
+    if let Some(p) = std::env::var_os("GTA_MO_GUI_BIN").map(std::path::PathBuf::from) {
+        if p.is_file() {
+            return format!("{} --launch {slug}", p.display());
+        }
+    }
+    if let Ok(p) = which::which("gta-mo-gui") {
+        return format!("{} --launch {slug}", p.display());
+    }
+    let bin = std::env::current_exe()
+        .ok()
+        .filter(|p| p.is_file())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "gta-mo".into());
+    format!("{bin} launch --profile {slug}")
+}
+
+fn desktop_dir() -> anyhow::Result<std::path::PathBuf> {
+    gta_mo_core::config::applications_dir()
+        .ok_or_else(|| anyhow::anyhow!("No se pudo resolver el directorio de aplicaciones XDG"))
+}
+
+/// Creates/updates/removes per-profile `.desktop` entries under the XDG
+/// applications dir.
+fn cmd_desktop(conn: &Connection, action: &super::DesktopAction) -> anyhow::Result<()> {
+    match action {
+        super::DesktopAction::Add { ident, icon } => {
+            let p = db::resolve_profile(conn, ident)?;
+            let dir = desktop_dir()?;
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join(format!("gta-mo-{}.desktop", p.slug));
+            let exec = desktop_exec(&p.slug);
+            let icon = icon.clone().unwrap_or_else(|| "gta-mo-gui".into());
+            let contents = format!(
+                "[Desktop Entry]\n\
+                 Type=Application\n\
+                 Version=1.0\n\
+                 Name={name} (GTA: SA)\n\
+                 Comment=Lanzar GTA: San Andreas con el perfil «{name}»\n\
+                 Exec={exec}\n\
+                 Icon={icon}\n\
+                 Terminal=false\n\
+                 Categories=Game;\n\
+                 StartupWMClass=gta_sa.exe\n",
+                name = p.name,
+            );
+            std::fs::write(&path, contents)?;
+            log::info(format!("Entrada creada: {} (Exec: {exec})", path.display()));
+            if which::which("update-desktop-database").is_ok() {
+                let _ = std::process::Command::new("update-desktop-database")
+                    .arg(&dir)
+                    .status();
+            }
+            Ok(())
+        }
+        super::DesktopAction::Remove { ident } => {
+            let p = db::resolve_profile(conn, ident)?;
+            let dir = desktop_dir()?;
+            let path = dir.join(format!("gta-mo-{}.desktop", p.slug));
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+                log::info(format!("Entrada eliminada: {}", path.display()));
+            } else {
+                log::info(format!("No existía: {}", path.display()));
+            }
+            Ok(())
+        }
+        super::DesktopAction::List => {
+            let dir = gta_mo_core::config::applications_dir();
+            let mut rows = Vec::new();
+            for p in db::list_profiles(conn)? {
+                let exists = dir
+                    .as_ref()
+                    .map(|d| d.join(format!("gta-mo-{}.desktop", p.slug)).exists())
+                    .unwrap_or(false);
+                rows.push(vec![
+                    p.name.clone(),
+                    p.slug.clone(),
+                    if exists { "sí" } else { "no" }.to_string(),
+                ]);
+            }
+            println!(
+                "{}",
+                render_table(
+                    vec![
+                        "PERFIL".to_string(),
+                        "SLUG".to_string(),
+                        "DESKTOP".to_string()
+                    ],
+                    rows,
+                )
+            );
             Ok(())
         }
     }
@@ -481,6 +584,7 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 # version = "1.0.0"
 # author = ["AUTOR"]           # string o lista
 # url = "https://..."
+# urls = ["https://..."]       # enlaces adicionales (string o lista)
 # description = "Descripción del mod."
 # license = "MIT"              # licencia/términos indicados por el autor
 # tags = ["tag1", "tag2"]      # para organizar/filtrar
@@ -596,6 +700,20 @@ fn cmd_init(conn: &Connection, folder: &str, skeleton: bool) -> anyhow::Result<(
     Ok(())
 }
 
+/// Formats a playtime in seconds as `12 min`, `3 h 05 min` or `—`.
+fn fmt_playtime(seconds: i64) -> String {
+    if seconds <= 0 {
+        return "—".into();
+    }
+    let mins = seconds / 60;
+    let hours = mins / 60;
+    if hours > 0 {
+        format!("{hours} h {:02} min", mins % 60)
+    } else {
+        format!("{mins} min")
+    }
+}
+
 fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Result<()> {
     match action {
         super::ProfileAction::List { json } => {
@@ -611,10 +729,13 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
                     active: bool,
                     mods: i64,
                     enabled: i64,
+                    played_seconds: i64,
+                    played: String,
                 }
                 let mut out = Vec::new();
                 for p in &profiles {
                     let (total, enabled) = db::profile_mod_count(conn, p.id)?;
+                    let played_seconds = db::played_seconds(conn, p.id)?;
                     out.push(ProfileJson {
                         id: p.id,
                         name: p.name.clone(),
@@ -622,6 +743,8 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
                         active: p.id == active.id,
                         mods: total,
                         enabled,
+                        played_seconds,
+                        played: fmt_playtime(played_seconds),
                     });
                 }
                 println!("{}", serde_json::to_string_pretty(&out)?);
@@ -631,6 +754,7 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
             let mut rows = Vec::new();
             for p in &profiles {
                 let (total, enabled) = db::profile_mod_count(conn, p.id)?;
+                let played = db::played_seconds(conn, p.id)?;
                 let mark = if p.id == active.id {
                     "*".green().to_string()
                 } else {
@@ -643,6 +767,7 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
                     p.slug.clone(),
                     total.to_string(),
                     enabled.to_string(),
+                    fmt_playtime(played),
                 ]);
             }
             println!(
@@ -655,10 +780,59 @@ fn cmd_profile(conn: &Connection, action: &super::ProfileAction) -> anyhow::Resu
                         "SLUG".to_string(),
                         "MODS".to_string(),
                         "ON".to_string(),
+                        "JUGADO".to_string(),
                     ],
                     rows,
                 )
             );
+            Ok(())
+        }
+        super::ProfileAction::Playtime { json } => {
+            let global = db::global_played_seconds(conn)?;
+            let profiles = db::list_profiles(conn)?;
+            let per: Vec<(String, i64)> = profiles
+                .iter()
+                .map(|p| Ok((p.name.clone(), db::played_seconds(conn, p.id)?)))
+                .collect::<anyhow::Result<_>>()?;
+
+            if *json {
+                #[derive(Serialize)]
+                struct PlaytimeJson {
+                    global_seconds: i64,
+                    global: String,
+                    profiles: Vec<ProfilePlaytimeJson>,
+                }
+                #[derive(Serialize)]
+                struct ProfilePlaytimeJson {
+                    name: String,
+                    seconds: i64,
+                    played: String,
+                }
+                let out = PlaytimeJson {
+                    global_seconds: global,
+                    global: fmt_playtime(global),
+                    profiles: per
+                        .iter()
+                        .map(|(name, s)| ProfilePlaytimeJson {
+                            name: name.clone(),
+                            seconds: *s,
+                            played: fmt_playtime(*s),
+                        })
+                        .collect(),
+                };
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
+
+            let rows: Vec<Vec<String>> = per
+                .iter()
+                .map(|(name, s)| vec![name.clone(), fmt_playtime(*s)])
+                .collect();
+            println!(
+                "{}",
+                render_table(vec!["PERFIL".to_string(), "JUGADO".to_string()], rows)
+            );
+            println!("Total global: {}", fmt_playtime(global));
             Ok(())
         }
         super::ProfileAction::Create { name } => {
@@ -1238,6 +1412,7 @@ fn cmd_list(
                 version: meta.version,
                 author: meta.author,
                 url: meta.url,
+                urls: meta.urls,
                 description: meta.description,
                 license: meta.license,
                 cover: meta.cover,
@@ -1778,6 +1953,7 @@ fn cmd_info(
             version: Option<String>,
             author: Vec<String>,
             url: Option<String>,
+            urls: Vec<String>,
             description: Option<String>,
             license: Option<String>,
             cover: Option<String>,
@@ -1910,6 +2086,7 @@ fn cmd_info(
             version: meta.version,
             author: meta.author,
             url: meta.url,
+            urls: meta.urls,
             description: meta.description,
             license: meta.license,
             cover: meta.cover,
@@ -1972,6 +2149,14 @@ fn cmd_info(
         }
         if let Some(u) = &meta.url {
             rows.push(vec![label("URL"), u.blue().underline().to_string()]);
+        }
+        for (i, u) in meta.urls.iter().enumerate() {
+            let key = if meta.urls.len() > 1 {
+                format!("URL {}", i + 1)
+            } else {
+                "URL extra".to_string()
+            };
+            rows.push(vec![label(&key), u.blue().underline().to_string()]);
         }
         if let Some(d) = &meta.description {
             rows.push(vec![label("Descripción"), d.yellow().to_string()]);
@@ -3053,6 +3238,8 @@ struct ExportMod {
     author: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    urls: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3086,6 +3273,7 @@ impl ExportMod {
             version: cache.version.clone(),
             author: cache.author.clone(),
             url: cache.url.clone(),
+            urls: cache.urls.clone(),
             description: cache.description.clone(),
             license: cache.license.clone(),
             cover: cache.cover.clone(),
@@ -3121,6 +3309,7 @@ impl ExportMod {
             version: self.version.clone(),
             author: self.author.clone(),
             url: self.url.clone(),
+            urls: self.urls.clone(),
             description: self.description.clone(),
             license: self.license.clone(),
             cover: self.cover.clone(),
@@ -3793,6 +3982,247 @@ fn cmd_health(
     if conflicts {
         println!();
         cmd_conflicts(conn, profile_ident, false)?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct DoctorJson<'a> {
+    errors: &'a [String],
+    warnings: &'a [String],
+}
+
+/// Validates the paths a manifest points at (relative, existing), reporting an
+/// error for a bad/escaping path and a warning for a missing one.
+fn doctor_check_path(
+    mod_dir: &std::path::Path,
+    folder: &str,
+    kind: &str,
+    entry: &str,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    if !gta_mo_core::meta::valid_relative_path(entry) {
+        errors.push(format!("{folder}: {kind} ruta inválida '{entry}'"));
+    } else if mod_dir.join(entry).symlink_metadata().is_err() {
+        warnings.push(format!("{folder}: {kind} '{entry}' no existe"));
+    }
+}
+
+/// Read-only validation of every installed mod's `mod.toml` (ids, tags and the
+/// `cover/guides/screenshots/mount/options/components` paths). Unlike `health`,
+/// it does not look at the profile's dependency state; it works without a
+/// launchable setup. Exits non-zero when it finds errors.
+fn cmd_doctor(conn: &Connection, json: bool) -> anyhow::Result<()> {
+    let mods_dir = mods_dir_from_config().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No se pudo resolver el directorio de mods (revisa game_root/mods_dir en la config)."
+        )
+    })?;
+
+    let mods = db::load_all_mods(conn)?;
+    let by_folder: std::collections::HashSet<String> =
+        mods.iter().map(|m| m.folder_name.clone()).collect();
+    let mut id_owners: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    // Cross-references to resolve after the id/folder sets are complete.
+    let mut refs: Vec<(String, String, String)> = Vec::new();
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    for m in &mods {
+        let folder = m.folder_name.clone();
+        let dir = mods_dir.join(&folder);
+        if !dir.is_dir() {
+            errors.push(format!("{folder}: carpeta no existe en disco"));
+            continue;
+        }
+        let meta = match gta_mo_core::meta::read_mod_meta(&mods_dir, &folder) {
+            Ok(Some(meta)) => meta,
+            Ok(None) => continue,
+            Err(e) => {
+                errors.push(format!("{folder}: {e}"));
+                continue;
+            }
+        };
+        checked += 1;
+
+        if let Some(id) = meta.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if !gta_mo_core::meta::valid_mod_id(id) {
+                errors.push(format!(
+                    "{folder}: id inválido '{id}' (usa author:slug con [a-z0-9_-])"
+                ));
+            } else {
+                id_owners
+                    .entry(id.to_ascii_lowercase())
+                    .or_default()
+                    .push(folder.clone());
+            }
+        }
+
+        if let Some(tags) = &meta.tags {
+            for t in tags {
+                if !gta_mo_core::meta::valid_tag(t) {
+                    warnings.push(format!("{folder}: tag inválido '{t}'"));
+                }
+            }
+        }
+
+        if let Some(c) = meta.cover.as_deref().filter(|c| !c.is_empty()) {
+            doctor_check_path(&dir, &folder, "cover", c, &mut errors, &mut warnings);
+        }
+        for g in meta.guides.iter().flatten() {
+            doctor_check_path(&dir, &folder, "guides", g, &mut errors, &mut warnings);
+        }
+        for s in meta.screenshots.iter().flatten() {
+            doctor_check_path(&dir, &folder, "screenshots", s, &mut errors, &mut warnings);
+        }
+
+        if let Some(mount) = &meta.mount {
+            for entry in mount {
+                if !gta_mo_core::meta::valid_mount_entry(entry) {
+                    errors.push(format!("{folder}: mount inválido '{entry}'"));
+                } else if !dir.join(entry).is_dir() {
+                    warnings.push(format!("{folder}: mount '{entry}' no existe"));
+                }
+            }
+        }
+
+        for c in meta.components.iter().flatten() {
+            if c.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                warnings.push(format!("{folder}: componente sin nombre"));
+            }
+            if let Some(p) = c.path.as_deref().filter(|p| !p.is_empty()) {
+                doctor_check_path(
+                    &dir,
+                    &folder,
+                    "components[].path",
+                    p,
+                    &mut errors,
+                    &mut warnings,
+                );
+            }
+            if let Some(u) = c.url.as_deref().filter(|u| !u.is_empty()) {
+                if !is_http_url(u) {
+                    warnings.push(format!("{folder}: componente URL no http(s) '{u}'"));
+                }
+            }
+        }
+
+        if let Some(f) = &meta.family {
+            if !gta_mo_core::meta::valid_family_id(&f.id) {
+                errors.push(format!("{folder}: family.id inválido '{}'", f.id));
+            }
+        }
+
+        if let Some(ml) = &meta.modloader {
+            if let Some(p) = ml.priority {
+                if !(1..=100).contains(&p) {
+                    warnings.push(format!("{folder}: modloader.priority {p} fuera de 1..100"));
+                }
+            }
+            for f in ml.folders.iter().flatten() {
+                if !gta_mo_core::meta::valid_modloader_folder(f) {
+                    warnings.push(format!("{folder}: carpeta de modloader inválida '{f}'"));
+                }
+            }
+        }
+
+        for g in meta.options.iter().flatten() {
+            if !gta_mo_core::meta::valid_option_key(&g.group) {
+                errors.push(format!("{folder}: grupo de opción inválido '{}'", g.group));
+            }
+            for c in &g.choices {
+                if !gta_mo_core::meta::valid_option_key(&c.key) {
+                    errors.push(format!("{folder}: opción inválida '{}/{}'", g.group, c.key));
+                    continue;
+                }
+                let path = c
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| format!("options/{}/{}", g.group, c.key));
+                if !gta_mo_core::meta::valid_mount_entry(&path) {
+                    errors.push(format!("{folder}: ruta de opción inválida '{path}'"));
+                } else if !dir.join(&path).is_dir() {
+                    warnings.push(format!("{folder}: opción '{path}' no existe"));
+                }
+            }
+            if let Some(d) = &g.default {
+                if !g.choices.iter().any(|c| &c.key == d) {
+                    warnings.push(format!(
+                        "{folder}: default '{}' no es una opción de '{}'",
+                        d, g.group
+                    ));
+                }
+            }
+        }
+
+        if let Some(u) = meta.url.as_deref().filter(|u| !u.is_empty()) {
+            if !is_http_url(u) {
+                warnings.push(format!("{folder}: url no http(s) '{u}'"));
+            }
+        }
+        for r in meta
+            .dependencies
+            .iter()
+            .flat_map(|d| d.required.iter().chain(d.optional.iter()))
+        {
+            refs.push((folder.clone(), "dependencia".into(), r.clone()));
+        }
+        for r in &meta.conflicts {
+            refs.push((folder.clone(), "conflict".into(), r.clone()));
+        }
+        for r in &meta.requires_any {
+            refs.push((folder.clone(), "requires_any".into(), r.clone()));
+        }
+    }
+
+    for (id, owners) in &id_owners {
+        if owners.len() > 1 {
+            errors.push(format!("id duplicado '{id}': {}", owners.join(", ")));
+        }
+    }
+
+    let ids: std::collections::HashSet<String> = id_owners.keys().cloned().collect();
+    let resolve = |r: &str| -> bool {
+        let norm = r.trim().to_ascii_lowercase();
+        ids.contains(&norm) || by_folder.contains(r.trim())
+    };
+    for (folder, kind, r) in &refs {
+        if !resolve(r) {
+            warnings.push(format!("{folder}: {kind} '{r}' no resuelve a ningún mod"));
+        }
+    }
+
+    if json {
+        let out = serde_json::to_string_pretty(&DoctorJson {
+            errors: &errors,
+            warnings: &warnings,
+        })?;
+        println!("{out}");
+    } else {
+        for e in &errors {
+            println!("[X] {e}");
+        }
+        for w in &warnings {
+            println!("[!] {w}");
+        }
+        if errors.is_empty() && warnings.is_empty() {
+            println!("Manifiestos correctos: {checked} mod(s) revisado(s).");
+        } else {
+            println!();
+            println!(
+                "Resumen: {} error(es), {} advertencia(s) en {checked} manifiesto(s)",
+                errors.len(),
+                warnings.len()
+            );
+        }
+    }
+
+    if !errors.is_empty() {
+        anyhow::bail!("{} error(es) en los manifiestos", errors.len());
     }
     Ok(())
 }

@@ -125,6 +125,37 @@ pub struct GraphSettings {
     pub only_enabled: bool,
     #[serde(default = "default_true")]
     pub auto_settle: bool,
+    /// Node radius grows with the number of visible dependents (in-degree of
+    /// `required` edges).
+    #[serde(default = "default_true")]
+    pub size_by_dependents: bool,
+    /// Scales the log growth of the radius-by-degree.
+    #[serde(default = "default_dep_scale")]
+    pub dep_scale: f32,
+    /// Hide node labels below this zoom (unless selected/hovered).
+    #[serde(default = "default_label_min_zoom")]
+    pub label_min_zoom: f32,
+    /// Color edges by relation kind.
+    #[serde(default = "default_true")]
+    pub color_edges: bool,
+    /// Show the edge-kind legend overlay.
+    #[serde(default = "default_true")]
+    pub show_legend: bool,
+    /// Dim nodes/edges outside the neighborhood of the selected node.
+    #[serde(default = "default_true")]
+    pub focus_mode: bool,
+    /// Neighborhood depth for the focus mode.
+    #[serde(default = "default_focus_depth")]
+    pub focus_depth: u32,
+    /// Ring the nodes that have cycles or missing/disabled dependencies.
+    #[serde(default = "default_true")]
+    pub highlight_problems: bool,
+    /// Color nodes by author instead of enabled/hidden state.
+    #[serde(default)]
+    pub color_by_author: bool,
+    /// Saved node positions keyed by mod folder (`[graph.positions]`).
+    #[serde(default)]
+    pub positions: std::collections::HashMap<String, (f32, f32)>,
     #[serde(default)]
     pub force: ForcePrefs,
 }
@@ -149,9 +180,31 @@ impl Default for GraphSettings {
             highlight_selected: true,
             only_enabled: false,
             auto_settle: true,
+            size_by_dependents: true,
+            dep_scale: default_dep_scale(),
+            label_min_zoom: default_label_min_zoom(),
+            color_edges: true,
+            show_legend: true,
+            focus_mode: true,
+            focus_depth: default_focus_depth(),
+            highlight_problems: true,
+            color_by_author: false,
+            positions: std::collections::HashMap::new(),
             force: ForcePrefs::default(),
         }
     }
+}
+
+fn default_dep_scale() -> f32 {
+    0.35
+}
+
+fn default_label_min_zoom() -> f32 {
+    0.6
+}
+
+fn default_focus_depth() -> u32 {
+    1
 }
 
 fn default_node_radius() -> f32 {
@@ -221,6 +274,9 @@ pub struct GuiSettings {
     pub preload_umu: Option<bool>,
     #[serde(default)]
     pub graph: GraphSettings,
+    /// Font family for the Log tab (`None` = the UI monospace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_font: Option<String>,
     /// Per-browser UI preferences (`[browsers.<id>]`).
     #[serde(default)]
     pub browsers: HashMap<String, BrowserPrefs>,
@@ -243,6 +299,7 @@ impl Default for GuiSettings {
             preload_steamrt: None,
             preload_umu: None,
             graph: GraphSettings::default(),
+            log_font: None,
             browsers: HashMap::new(),
         }
     }
@@ -389,6 +446,12 @@ mod tests {
         assert_eq!(s.graph.label_font, 12.0);
         assert!(s.graph.label_bg && s.graph.highlight_selected);
         assert!(!s.graph.only_enabled);
+        assert!(s.graph.size_by_dependents && s.graph.color_edges && s.graph.show_legend);
+        assert!(s.graph.focus_mode && s.graph.highlight_problems);
+        assert_eq!(s.graph.dep_scale, 0.35);
+        assert_eq!(s.graph.label_min_zoom, 0.6);
+        assert_eq!(s.graph.focus_depth, 1);
+        assert!(s.graph.positions.is_empty());
 
         let s = GuiSettings {
             graph: GraphSettings {

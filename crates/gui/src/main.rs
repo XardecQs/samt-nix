@@ -5,6 +5,7 @@ mod app;
 mod backend;
 mod file_browser;
 mod fonts;
+mod graph_edge;
 mod graph_node;
 mod icons;
 mod lightbox;
@@ -33,7 +34,25 @@ fn load_icon() -> Option<egui::IconData> {
     })
 }
 
+/// Parses `--launch <slug>` / `--launch=<slug>` from the CLI, so a per-profile
+/// `.desktop` entry can open the GUI and start the game right away.
+fn parse_launch_arg(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--launch" {
+            return it.next().cloned();
+        }
+        if let Some(v) = a.strip_prefix("--launch=") {
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn main() -> eframe::Result {
+    let launch = parse_launch_arg(&std::env::args().collect::<Vec<_>>());
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1050.0, 700.0])
         .with_min_inner_size([360.0, 420.0])
@@ -51,6 +70,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "gta-mo-gui",
         options,
-        Box::new(|cc| Ok(Box::new(app::GtaMoApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::GtaMoApp::new(cc, launch.clone())))),
     )
 }

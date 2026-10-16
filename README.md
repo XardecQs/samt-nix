@@ -298,6 +298,7 @@ name = "Nombre visible"           # si falta, se usa el nombre de la carpeta
 version = "1.2.0"
 author = ["Autor1", "Autor2"]     # string o lista
 url = "https://github.com/..."
+urls = ["https://..."]            # enlaces adicionales (opcional)
 description = "Descripción larga..."
 license = "MIT"                   # licencia/términos del autor (opcional)
 tags = ["essential", "bugfix"]    # opcional, para organizar/filtrar
@@ -498,10 +499,16 @@ gta-mo ctl group disable Graphics
   both checks at once.
 - `ctl which <game-relative-path>` answers "who provides this file and who
   wins" for a single path (base game, a single mod, or a conflict).
+- `ctl doctor [--json]` is a read-only linter over **every** manifest: `id`
+  format/duplicates, `tags`, and existence/validity of
+  `cover/guides/screenshots/mount/options/components[].path`, plus `family`,
+  `modloader` and the references in `dependencies`/`conflicts`/`requires_any`.
+  It exits non-zero when it finds errors.
 
 ```bash
 gta-mo ctl health                          # folder/manifest/dep problems
 gta-mo ctl health --conflicts              # plus a conflict scan
+gta-mo ctl doctor                          # validate every mod.toml
 gta-mo ctl conflicts                       # all file conflicts of the profile
 gta-mo ctl which models/player.dff         # who wins that file
 ```
@@ -560,6 +567,10 @@ gta-mo ctl profile use <name>
 gta-mo ctl profile rename <old> <new>
 gta-mo ctl profile copy <source> <new-name>
 gta-mo ctl profile diff <a> <b>
+gta-mo ctl profile playtime [--json]           # recorded playtime per profile + total
+gta-mo ctl desktop add <profile> [--icon <i>]  # per-profile .desktop entry
+gta-mo ctl desktop remove <profile>
+gta-mo ctl desktop list
 gta-mo ctl group list [--json]
 gta-mo ctl group create <name>
 gta-mo ctl group rename <id|slug|name> <new-name>
@@ -572,6 +583,7 @@ gta-mo ctl option list <id|folder> [--json] [--profile <name>]
 gta-mo ctl option set <id|folder> <group> <value> [--profile <name>]
 gta-mo ctl option unset <id|folder> <group> [--profile <name>]
 gta-mo ctl health [--conflicts]
+gta-mo ctl doctor [--json]              # validate ids, tags and manifest paths
 gta-mo ctl conflicts [--json]
 gta-mo ctl which <game-relative-path>
 gta-mo ctl runtime status [--json]             # umu/steamrt runtime + cache state
@@ -591,6 +603,15 @@ gta-mo ctl import <file> [--force]
 - `profile rename` only changes the display name — the directory slug (and
   therefore the saves/logs in `run/profiles/<slug>/`) stays unchanged.
 - `profile copy` duplicates the mod states of another profile.
+- Playtime is recorded per profile and globally (`profiles.played_seconds` +
+  a `playtime_global` counter, schema v14) after each completed launch;
+  `ctl profile list` shows a `JUGADO` column and `ctl profile playtime` prints
+  the per-profile and total time (the GUI's Profiles tab shows them too).
+- `ctl desktop add|remove|list` writes/removes a per-profile entry under
+  `~/.local/share/applications/gta-mo-<slug>.desktop` (`Exec` = the GUI with
+  `--launch <slug>` so it shows a "Lanzando…" splash, falling back to
+  `gta-mo launch --profile <slug>`). The GUI has the same editor in the
+  Profiles tab.
 - `--json` prints structured output (list, info, profile list) to stdout,
   useful for the GUI and scripting.
 - `rename --folder`: also renames the mod's directory on disk (and keeps the
@@ -733,7 +754,10 @@ without a manifest, a **tag editor** and a raw **mod.toml editor**, per-profile
 **notes** and **hide** toggles (per profile and global, with a "Mostrar ocultos"
 filter)), a **family** badge and declared **conflicts** in the detail panel,
 profiles tab with create/use/rename/copy/delete
-(renaming also moves `run/profiles/<slug>`), a **Datos** tab listing the active
+(renaming also moves `run/profiles/<slug>`), per-profile **playtime** (also
+global) and a **`.desktop` editor** (create/remove the per-profile entry), an
+**Autores** tab grouping the mods by author (with a hint of each author's mods
+and a "color the graph by author" toggle), a **Datos** tab listing the active
 profile's saves, settings, User Tracks and screenshots written under
 `userfiles/` (with PortableGTA) plus a recommendation to install PortableGTA,
 an **Overwrite** tab that browses the profile's `upper/` (the overwrite layer)
@@ -743,7 +767,10 @@ and flags files no mod provides as *huérfanos*, with Mount/Unmount controls
 that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run) that
 becomes a **Detener** button while the game runs, Discover/Clean actions, a
-streaming Log tab, and a status bar.
+streaming Log tab (per-line severity colors, an INFO/warn/error filter, a text
+search and a selectable font — see **Preferencias → Apariencia**), and a status
+bar. Opened from a per-profile `.desktop`, it shows a **"Lanzando…"** splash and
+minimizes once the game process starts.
 
 ### Dependency graph
 
@@ -752,16 +779,21 @@ with [`egui_graphs`](https://crates.io/crates/egui_graphs)) renders the mods as
 nodes (green = enabled, gray = disabled, dark = hidden) and the relations as
 edges: required dependencies, optional ones, conflicts, `requires_any`
 alternatives and `[family]` families. Edges can be filtered with the
-*Opcionales*, *Conflictos* and *Familias* toggles. It supports free zoom/pan
-(the mouse wheel zooms towards the cursor and drag pans, even outside the
-viewport) plus **＋/－/⤢ Ajustar** buttons, node dragging, a **Fuerza**
-layout (it settles and pauses on its own) and a **Reorganizar** button. A single
-click selects a node (shown
-in an info line) and a double click opens its detail; labels have a background
-and stay at a constant screen size, and edges/arrows do not grow with the zoom.
-Positions are kept when only the enabled state changes. All of this (plus the
-advanced force parameters) is configurable in
-**Preferencias → Grafo** and persisted in `gui.toml`.
+*Opcionales*, *Conflictos* and *Familias* toggles and are **colored by kind**
+(with a legend), node **radius grows with the number of dependents**, labels
+hide **below a zoom threshold**, and a **search box** highlights matches.
+Selecting a node **dims the rest** (focus mode) and nodes with **cycles or
+missing/disabled dependencies** get a warning ring; nodes can be **colored by
+author** (see the **Autores** tab). It supports free zoom/pan (the mouse wheel
+zooms towards the cursor and drag pans, even outside the viewport) plus
+**＋/－/⤢ Ajustar** buttons, node dragging, a **Fuerza** layout (it settles and
+pauses on its own) and a **Reorganizar** button (which also discards the saved
+positions). A single click selects a node (shown in an info line) and a double
+click opens its detail; labels have a background and stay at a constant screen
+size, and edges/arrows do not grow with the zoom. **Node positions are saved**
+per mod and restored on the next run (the layout opens paused when every node
+has a saved position). All of this (plus the advanced force parameters) is
+configurable in **Preferencias → Grafo** and persisted in `gui.toml`.
 
 **Datos** and **Overwrite** share one explorer widget: a folder-tree sidebar and
 a clickable breadcrumb, a list or thumbnail-grid content area (with an

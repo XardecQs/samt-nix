@@ -18,11 +18,69 @@ enum Tab {
     Mods,
     Profiles,
     Groups,
+    Authors,
     Data,
     Overwrite,
     Dependencies,
     Conflicts,
     Log,
+}
+
+/// Severity filter for the Log tab.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogLevelFilter {
+    All,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevelFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "Todo",
+            Self::Info => "Info",
+            Self::Warn => "Avisos",
+            Self::Error => "Errores",
+        }
+    }
+}
+
+/// Detected severity of a log line, from its textual prefix.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Timing,
+    Header,
+    Plain,
+}
+
+fn log_level(line: &str) -> LogLevel {
+    let t = line.trim_start();
+    if t.starts_with("[X]") || t.starts_with("[error]") || t.starts_with("resultado: error") {
+        LogLevel::Error
+    } else if t.starts_with("[!]") {
+        LogLevel::Warn
+    } else if t.starts_with("[+]") || t.starts_with("[✔]") || t.starts_with("resultado: ok") {
+        LogLevel::Info
+    } else if t.starts_with('⏱') {
+        LogLevel::Timing
+    } else if t.starts_with("===") || t.starts_with("---") {
+        LogLevel::Header
+    } else {
+        LogLevel::Plain
+    }
+}
+
+fn log_level_passes(filter: LogLevelFilter, level: LogLevel) -> bool {
+    match filter {
+        LogLevelFilter::All => true,
+        LogLevelFilter::Info => !matches!(level, LogLevel::Warn | LogLevel::Error),
+        LogLevelFilter::Warn => matches!(level, LogLevel::Warn | LogLevel::Error),
+        LogLevelFilter::Error => matches!(level, LogLevel::Error),
+    }
 }
 
 /// Dependency tab view mode.
@@ -39,7 +97,7 @@ type DepGraph = egui_graphs::Graph<
     petgraph::Directed,
     petgraph::graph::DefaultIx,
     crate::graph_node::ModNodeShape,
-    egui_graphs::DefaultEdgeShape,
+    crate::graph_edge::ModEdgeShape,
 >;
 
 type ForceGraphView<'a> = egui_graphs::GraphView<
@@ -49,7 +107,7 @@ type ForceGraphView<'a> = egui_graphs::GraphView<
     petgraph::Directed,
     petgraph::graph::DefaultIx,
     crate::graph_node::ModNodeShape,
-    egui_graphs::DefaultEdgeShape,
+    crate::graph_edge::ModEdgeShape,
     egui_graphs::FruchtermanReingoldWithCenterGravityState,
     egui_graphs::LayoutForceDirected<egui_graphs::FruchtermanReingoldWithCenterGravity>,
 >;
@@ -151,6 +209,20 @@ fn job_label(args: &[String]) -> String {
     }
 }
 
+/// Formats a playtime in seconds as `12 min`, `3 h 05 min` or `—`.
+fn fmt_playtime(seconds: i64) -> String {
+    if seconds <= 0 {
+        return "—".into();
+    }
+    let mins = seconds / 60;
+    let hours = mins / 60;
+    if hours > 0 {
+        format!("{hours} h {:02} min", mins % 60)
+    } else {
+        format!("{mins} min")
+    }
+}
+
 pub struct GtaMoApp {
     backend: Backend,
     snapshot: Snapshot,
@@ -175,6 +247,10 @@ pub struct GtaMoApp {
     log_follow: bool,
     /// Log: scroll to the end on the next draw.
     log_scroll_to_end: bool,
+    /// Log: severity filter.
+    log_level_filter: LogLevelFilter,
+    /// Log: text search.
+    log_query: String,
     launch_debug: bool,
     launch_dry_run: bool,
     pending: VecDeque<Job>,
@@ -253,23 +329,29 @@ pub struct GtaMoApp {
     graph_reset_layout: bool,
     /// Fit the view to the graph on the next draw (used on build/reorganize).
     graph_fit_pending: bool,
+    /// Text filter for the graph view (highlights matches, dims the rest).
+    graph_search: String,
     /// Background snapshot generation; stale results are discarded.
     snapshot_gen: u64,
     /// A background refresh is in flight (keeps repainting until it lands).
     snapshot_pending: bool,
     /// Prewarm the prefix once the first snapshot with an active profile lands.
     prewarm_pending: bool,
+    /// Profile requested with `--launch`, started once the first snapshot lands.
+    pending_launch: Option<String>,
+    /// Show the "Lanzando…" splash (opened via a per-profile `.desktop`).
+    show_splash: bool,
     /// Cached umu runtime status, loaded when the dialog opens (not per frame).
     runtime_status: Option<gta_mo_core::umu::RuntimeStatus>,
 }
 
 impl GtaMoApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, launch: Option<String>) -> Self {
         let settings = GuiSettings::load();
         let base_ppp = cc.egui_ctx.pixels_per_point();
         cc.egui_ctx
             .set_pixels_per_point(base_ppp * settings.ui_scale);
-        crate::fonts::install(&cc.egui_ctx);
+        crate::fonts::install(&cc.egui_ctx, settings.log_font.as_deref());
         // Enables `egui::Image` file loading (needed for animated GIFs).
         egui_extras::install_image_loaders(&cc.egui_ctx);
         cc.egui_ctx.set_theme(settings.theme.to_egui());
@@ -301,6 +383,8 @@ impl GtaMoApp {
             current_job_label: None,
             log_follow: true,
             log_scroll_to_end: false,
+            log_level_filter: LogLevelFilter::All,
+            log_query: String::new(),
             launch_debug: false,
             launch_dry_run: false,
             pending: VecDeque::new(),
@@ -358,9 +442,12 @@ impl GtaMoApp {
             graph_signature: 0,
             graph_reset_layout: false,
             graph_fit_pending: true,
+            graph_search: String::new(),
             snapshot_gen: 0,
             snapshot_pending: false,
             prewarm_pending: true,
+            show_splash: launch.is_some(),
+            pending_launch: launch,
             runtime_status: None,
         };
         app.refresh();
@@ -409,6 +496,7 @@ impl GtaMoApp {
         ctx.set_pixels_per_point(self.base_ppp * self.settings.ui_scale);
         ctx.set_theme(self.settings.theme.to_egui());
         theme::apply(ctx, self.settings.theme_config());
+        crate::fonts::install(ctx, self.settings.log_font.as_deref());
         apply_style(ctx, &self.settings);
     }
 
@@ -432,6 +520,7 @@ impl GtaMoApp {
             || self.show_about
             || self.show_shortcuts
             || self.show_runtime
+            || self.show_splash
     }
 
     /// Persists a browser's UI state (view/sort/thumbnail size) when it changed.
@@ -503,6 +592,19 @@ impl GtaMoApp {
                 if self.prewarm_pending && !self.snapshot.active_slug.is_empty() {
                     self.prewarm_pending = false;
                     self.prewarm();
+                }
+                // `--launch <slug>`: start that profile once the DB is loaded.
+                if let Some(slug) = self.pending_launch.take() {
+                    self.log.clear();
+                    self.log.push(format!("--- lanzando perfil '{slug}' ---"));
+                    let mut args: Vec<String> = vec!["launch".into(), "--deps-enable".into()];
+                    if self.launch_debug {
+                        args.push("--debug".into());
+                    }
+                    self.push_optimize_args(&mut args);
+                    args.push("--profile".into());
+                    args.push(slug);
+                    self.exec(args, true);
                 }
             }
             Err(e) => self.status = Some(e),
@@ -684,6 +786,14 @@ impl GtaMoApp {
                     if l.contains("desactivada automáticamente") {
                         let text = l.strip_prefix("[!] ").unwrap_or(&l).to_string();
                         self.toasts.push(ctx, crate::toasts::ToastKind::Info, text);
+                    }
+                    // Opened from a `.desktop`: once the game process is up,
+                    // dismiss the splash and get the window out of the way.
+                    if self.show_splash
+                        && (l.contains("⏱ proceso del juego") || l.contains("Lanzando juego"))
+                    {
+                        self.show_splash = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
                     self.log.push(l);
                     if self.log.len() > 2000 {
@@ -1360,6 +1470,7 @@ impl eframe::App for GtaMoApp {
                 Tab::Mods => self.ui_mods(ui),
                 Tab::Profiles => self.ui_profiles(ui),
                 Tab::Groups => self.ui_groups(ui),
+                Tab::Authors => self.ui_authors(ui),
                 Tab::Data => self.ui_data(ui),
                 Tab::Overwrite => self.ui_overwrite(ui),
                 Tab::Dependencies => self.ui_dependencies(ui),
@@ -1462,6 +1573,10 @@ impl eframe::App for GtaMoApp {
             if !self.show_runtime {
                 self.runtime_status = None;
             }
+        }
+
+        if self.show_splash {
+            self.ui_splash(ctx);
         }
 
         self.ui_lightbox(ctx);
@@ -1602,13 +1717,14 @@ impl GtaMoApp {
         // Dependencias and Conflictos appear when their measured width fits, and
         // labels are dropped at very small widths. Everything else lives in
         // "más".
-        let all: [(Tab, &str, &str, Option<usize>); 8] = [
+        let all: [(Tab, &str, &str, Option<usize>); 9] = [
             (Tab::Mods, crate::icons::LIST, "Mods", None),
             (Tab::Profiles, crate::icons::USERS, "Perfiles", None),
             (Tab::Log, crate::icons::INFO, "Log", None),
             (Tab::Data, crate::icons::SAVE, "Datos", None),
             (Tab::Overwrite, crate::icons::PLUG, "Overwrite", None),
             (Tab::Groups, crate::icons::FOLDER, "Grupos", None),
+            (Tab::Authors, crate::icons::USERS, "Autores", None),
             (
                 Tab::Dependencies,
                 crate::icons::SWAP_H,
@@ -1710,10 +1826,11 @@ impl GtaMoApp {
             + self.snapshot.dep_cycles.len();
         let conflicts = self.conflicts.iter().filter(|c| !c.duplicate).count();
 
-        let items: [(Tab, &str, &str, Option<usize>); 8] = [
+        let items: [(Tab, &str, &str, Option<usize>); 9] = [
             (Tab::Mods, crate::icons::LIST, "Mods", None),
             (Tab::Profiles, crate::icons::USERS, "Perfiles", None),
             (Tab::Groups, crate::icons::FOLDER, "Grupos", None),
+            (Tab::Authors, crate::icons::USERS, "Autores", None),
             (Tab::Data, crate::icons::SAVE, "Datos", None),
             (Tab::Overwrite, crate::icons::PLUG, "Overwrite", None),
             (
@@ -1806,6 +1923,37 @@ impl GtaMoApp {
                 }
             });
         self.filters.group = group;
+
+        let mut author = self.filters.author.clone();
+        let mut authors: Vec<String> = Vec::new();
+        for m in &self.snapshot.mods {
+            for a in &m.meta.author {
+                if !authors.iter().any(|x| x.eq_ignore_ascii_case(a)) {
+                    authors.push(a.clone());
+                }
+            }
+        }
+        authors.sort();
+        egui::ComboBox::from_id_salt("author_filter")
+            .selected_text(author.clone().unwrap_or_else(|| "Todos los autores".into()))
+            .show_ui(ui, |ui| {
+                ui.set_min_width(160.0);
+                if ui
+                    .selectable_label(author.is_none(), "Todos los autores")
+                    .clicked()
+                {
+                    author = None;
+                }
+                for a in &authors {
+                    if ui
+                        .selectable_label(author.as_deref() == Some(a.as_str()), a)
+                        .clicked()
+                    {
+                        author = Some(a.clone());
+                    }
+                }
+            });
+        self.filters.author = author;
 
         egui::ComboBox::from_id_salt("status_filter")
             .selected_text(self.filters.status.label())
@@ -2085,6 +2233,24 @@ impl GtaMoApp {
                                     folder,
                                     "--url".into(),
                                 ]);
+                            }
+                            resp.on_hover_text(u);
+                            ui.end_row();
+                        }
+                        for u in &m.meta.urls {
+                            ui.label("URL:");
+                            let resp = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(u)
+                                        .underline()
+                                        .color(theme::active(ui.ctx()).accent),
+                                )
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                            );
+                            if resp.clicked() {
+                                let url = u.clone();
+                                self.open_detached(vec!["ctl".into(), "open-url".into(), url]);
                             }
                             resp.on_hover_text(u);
                             ui.end_row();
@@ -2801,6 +2967,48 @@ impl GtaMoApp {
                     });
                 }
             }
+            ui.menu_button(format!("{} Acceso directo", crate::icons::PLUS), |ui| {
+                let enabled = sel.is_some() && !(self.busy || self.playing);
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Crear .desktop"))
+                    .on_hover_text(
+                        "Crea ~/.local/share/applications/gta-mo-<slug>.desktop para \
+                             lanzar este perfil desde el menú de aplicaciones",
+                    )
+                    .clicked()
+                {
+                    if let Some(s) = &sel {
+                        self.exec(
+                            vec!["ctl".into(), "desktop".into(), "add".into(), s.clone()],
+                            false,
+                        );
+                    }
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Quitar .desktop"))
+                    .clicked()
+                {
+                    if let Some(s) = &sel {
+                        self.exec(
+                            vec!["ctl".into(), "desktop".into(), "remove".into(), s.clone()],
+                            false,
+                        );
+                    }
+                    ui.close();
+                }
+            });
+            if self.snapshot.global_played_seconds > 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Total: {}",
+                            fmt_playtime(self.snapshot.global_played_seconds)
+                        ))
+                        .weak(),
+                    );
+                });
+            }
         });
         ui.separator();
         egui::ScrollArea::vertical()
@@ -2820,6 +3028,13 @@ impl GtaMoApp {
                             egui::RichText::new(format!(
                                 "{} mods · {} activos",
                                 p.total, p.enabled
+                            ))
+                            .weak(),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "· {} jugadas",
+                                fmt_playtime(p.played_seconds)
                             ))
                             .weak(),
                         );
@@ -2966,11 +3181,17 @@ impl GtaMoApp {
             ui.selectable_value(&mut self.deps_view, DepsView::List, "Lista");
             ui.selectable_value(&mut self.deps_view, DepsView::Graph, "Grafo");
             if self.deps_view == DepsView::Graph {
-                if ui.button("Reorganizar").clicked() {
+                if ui
+                    .button("Reorganizar")
+                    .on_hover_text("Volver a colocar los nodos (descarta las posiciones guardadas)")
+                    .clicked()
+                {
                     self.graph = None;
                     self.graph_stale = true;
                     self.graph_reset_layout = true;
                     self.graph_fit_pending = true;
+                    self.settings.graph.positions.clear();
+                    self.settings.save();
                 }
                 if ui
                     .checkbox(&mut self.settings.graph.show_optional, "Opcionales")
@@ -3172,43 +3393,171 @@ impl GtaMoApp {
         }
     }
 
-    /// Applies the configured node style, label visibility and selection
-    /// highlight to every node (called every frame).
-    fn apply_graph_node_style(&self, graph: &mut DepGraph, accent: egui::Color32) {
+    /// Applies the configured node style to every node (called every frame):
+    /// radius by dependents, labels by zoom, subtle label colors, problem rings,
+    /// author coloring, and dimming for focus/search.
+    fn apply_graph_node_style(&self, graph: &mut DepGraph, ui: &egui::Ui) {
+        use crate::model::GEdgeKind;
         let cfg = &self.settings.graph;
-        let info: HashMap<i64, (String, egui::Color32)> = self
+        let palette = theme::active(ui.ctx());
+        let zoom = egui_graphs::Metadata::load(ui).zoom;
+
+        // Visible required in-degree per node.
+        let mut indeg: HashMap<i64, u32> = HashMap::new();
+        for e in &self.snapshot.edges {
+            if e.kind == GEdgeKind::Required {
+                *indeg.entry(e.to).or_default() += 1;
+            }
+        }
+
+        // Folders flagged as problematic (cycles or missing/disabled deps).
+        let problems = self.problem_folders();
+
+        // Focus neighborhood of the selected node.
+        let focus: Option<std::collections::HashSet<i64>> = if cfg.focus_mode {
+            self.graph_selected
+                .map(|s| self.focus_neighborhood(s, cfg.focus_depth))
+        } else {
+            None
+        };
+        let search = self.graph_search.trim().to_lowercase();
+        let matches: Option<std::collections::HashSet<i64>> = if search.is_empty() {
+            None
+        } else {
+            Some(
+                self.snapshot
+                    .mods
+                    .iter()
+                    .filter(|m| {
+                        m.name.to_lowercase().contains(&search)
+                            || m.folder.to_lowercase().contains(&search)
+                    })
+                    .map(|m| m.id)
+                    .collect(),
+            )
+        };
+
+        let info: HashMap<i64, (String, String, egui::Color32)> = self
             .snapshot
             .mods
             .iter()
             .map(|m| {
-                (
-                    m.id,
-                    (m.name.clone(), Self::graph_node_color(m.enabled, m.hidden)),
-                )
+                let color = if cfg.color_by_author {
+                    Self::author_color(&m.meta.author, &palette)
+                } else {
+                    Self::graph_node_color(m.enabled, m.hidden)
+                };
+                (m.id, (m.name.clone(), m.folder.clone(), color))
             })
             .collect();
+
         for node in graph.g_mut().node_weights_mut() {
             let id = *node.payload();
-            let Some((name, base_color)) = info.get(&id) else {
+            let Some((name, folder, base_color)) = info.get(&id) else {
                 continue;
             };
             let selected = node.selected();
-            let show_label = cfg.labels_always || selected || node.hovered();
+            let show_label =
+                (cfg.labels_always && zoom >= cfg.label_min_zoom) || selected || node.hovered();
             node.set_label(if show_label {
                 name.clone()
             } else {
                 String::new()
             });
             node.set_color(if selected && cfg.highlight_selected {
-                accent
+                palette.accent
             } else {
                 *base_color
             });
+
+            let dimmed = (focus.as_ref().is_some_and(|f| !f.contains(&id)))
+                || (matches.as_ref().is_some_and(|m| !m.contains(&id))
+                    && self.graph_selected != Some(id));
+
+            let radius = if cfg.size_by_dependents {
+                let deg = indeg.get(&id).copied().unwrap_or(0) as f32;
+                (cfg.node_radius * (1.0 + cfg.dep_scale * (1.0 + deg).ln()))
+                    .clamp(cfg.node_radius, cfg.node_radius * 4.0)
+            } else {
+                cfg.node_radius
+            };
+
             let display = node.display_mut();
-            display.radius = cfg.node_radius;
+            display.radius = radius;
             display.label_font = cfg.label_font;
             display.label_bg = cfg.label_bg;
+            display.label_color = Some(palette.text_muted);
+            display.label_bg_color = Some(Self::label_chip(&palette));
+            display.problem = cfg.highlight_problems && problems.contains(folder);
+            display.problem_color = Some(palette.warning);
+            display.dimmed = dimmed;
         }
+    }
+
+    /// Translucent chip fill for the node labels.
+    fn label_chip(p: &theme::Palette) -> egui::Color32 {
+        egui::Color32::from_rgba_unmultiplied(p.surface.r(), p.surface.g(), p.surface.b(), 210)
+    }
+
+    /// Deterministic color derived from the mod's first author.
+    fn author_color(authors: &[String], p: &theme::Palette) -> egui::Color32 {
+        if authors.is_empty() {
+            return p.text_muted;
+        }
+        let mut hasher = DefaultHasher::new();
+        authors[0].to_lowercase().hash(&mut hasher);
+        let hue = (hasher.finish() % 360) as f32;
+        egui::ecolor::Hsva::new(hue / 360.0, 0.45, 0.75, 1.0).into()
+    }
+
+    /// Folders with a dependency cycle or a missing/disabled required dep.
+    fn problem_folders(&self) -> std::collections::HashSet<String> {
+        let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for chain in &self.snapshot.dep_cycles {
+            for folder in chain {
+                set.insert(folder.clone());
+            }
+        }
+        for status in self.snapshot.dep_status.values() {
+            for folder in status.disabled.iter().chain(status.missing.iter()) {
+                set.insert(folder.clone());
+            }
+        }
+        set
+    }
+
+    /// Mod ids within `depth` hops of `start` (undirected, over visible edges).
+    fn focus_neighborhood(&self, start: i64, depth: u32) -> std::collections::HashSet<i64> {
+        let mut adj: HashMap<i64, Vec<i64>> = HashMap::new();
+        for e in &self.snapshot.edges {
+            if !Self::edge_visible(
+                e.kind,
+                self.settings.graph.show_optional,
+                self.settings.graph.show_conflicts,
+                self.settings.graph.show_families,
+            ) {
+                continue;
+            }
+            adj.entry(e.from).or_default().push(e.to);
+            adj.entry(e.to).or_default().push(e.from);
+        }
+        let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        seen.insert(start);
+        let mut frontier = vec![start];
+        for _ in 0..depth {
+            let mut next = Vec::new();
+            for id in frontier {
+                if let Some(neigh) = adj.get(&id) {
+                    for n in neigh {
+                        if seen.insert(*n) {
+                            next.push(*n);
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+        seen
     }
 
     /// Builds the dependency graph from the snapshot, honoring the edge filters.
@@ -3289,10 +3638,30 @@ impl GtaMoApp {
         } else {
             0.001
         };
+        let palette = theme::active(ui.ctx());
         for edge in graph.g_mut().edge_weights_mut() {
+            let color = if cfg.color_edges {
+                Some(Self::edge_kind_color(edge.payload(), &palette))
+            } else {
+                None
+            };
             let display = edge.display_mut();
-            display.width = width;
-            display.tip_size = tip;
+            display.set_width(width);
+            display.set_tip_size(tip);
+            display.color = color;
+            display.dimmed = false;
+        }
+    }
+
+    /// Base stroke color for each relation kind.
+    fn edge_kind_color(kind: &crate::model::GEdgeKind, p: &theme::Palette) -> egui::Color32 {
+        use crate::model::GEdgeKind;
+        match kind {
+            GEdgeKind::Required => p.text_muted,
+            GEdgeKind::Optional => p.text_disabled,
+            GEdgeKind::Conflict => p.danger,
+            GEdgeKind::RequiresAny => p.warning,
+            GEdgeKind::Family => p.info,
         }
     }
 
@@ -3316,8 +3685,37 @@ impl GtaMoApp {
             // Appearance-only changes are handled by `apply_graph_node_style`.
             self.graph_stale = false;
         }
+        // Restore saved node positions on a fresh build; if every node had one,
+        // start with the force layout paused.
+        let all_saved = if just_built {
+            let positions = self.settings.graph.positions.clone();
+            let mut all = !positions.is_empty();
+            if let Some(g) = self.graph.as_mut() {
+                for node in g.g_mut().node_weights_mut() {
+                    let id = *node.payload();
+                    match self
+                        .snapshot
+                        .mods
+                        .iter()
+                        .find(|m| m.id == id)
+                        .and_then(|m| positions.get(&m.folder))
+                    {
+                        Some((x, y)) => node.set_location(egui::Pos2::new(*x, *y)),
+                        None => all = false,
+                    }
+                }
+            }
+            all
+        } else {
+            false
+        };
         if just_built || self.graph_reset_layout {
             self.reset_graph_layout(ui);
+            if just_built && all_saved {
+                let mut state = ForceGraphView::get_layout_state(ui);
+                state.base.is_running = false;
+                ForceGraphView::set_layout_state(ui, state);
+            }
         }
         self.graph_reset_layout = false;
 
@@ -3352,6 +3750,15 @@ impl GtaMoApp {
             {
                 fit = true;
             }
+            ui.separator();
+            ui.add(
+                egui::TextEdit::singleline(&mut self.graph_search)
+                    .hint_text("Buscar en el grafo…")
+                    .desired_width(180.0),
+            );
+            if !self.graph_search.is_empty() && ui.button("✕").clicked() {
+                self.graph_search.clear();
+            }
         });
 
         // Selection is managed by us (single click selects, double opens the
@@ -3372,7 +3779,7 @@ impl GtaMoApp {
             None => return,
         };
         self.apply_graph_edge_style(&mut graph, ui);
-        self.apply_graph_node_style(&mut graph, theme::active(ui.ctx()).accent);
+        self.apply_graph_node_style(&mut graph, ui);
         let resp = {
             let mut view = ForceGraphView::new(&mut graph)
                 .with_interactions(&interactions)
@@ -3439,6 +3846,25 @@ impl GtaMoApp {
             .collect();
         graph.set_selected_nodes(selected_idx);
 
+        // Persist node positions once the layout is paused (settled or paused by
+        // restored positions), so the next session reopens the same layout.
+        {
+            let state = ForceGraphView::get_layout_state(ui);
+            if !state.base.is_running {
+                let mut pos: HashMap<String, (f32, f32)> = HashMap::new();
+                for node in graph.g().node_weights() {
+                    if let Some(m) = self.snapshot.mods.iter().find(|m| m.id == *node.payload()) {
+                        let l = node.location();
+                        pos.insert(m.folder.clone(), (l.x, l.y));
+                    }
+                }
+                if !pos.is_empty() && pos != self.settings.graph.positions {
+                    self.settings.graph.positions = pos;
+                    self.settings.save();
+                }
+            }
+        }
+
         self.graph = Some(graph);
 
         // Apply zoom after the widget so it is not overwritten this frame.
@@ -3480,6 +3906,101 @@ impl GtaMoApp {
                     }
                 });
             }
+        }
+
+        if self.settings.graph.show_legend && self.settings.graph.color_edges {
+            let p = theme::active(ui.ctx());
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                for (label, color) in [
+                    ("Requerida", p.text_muted),
+                    ("Opcional", p.text_disabled),
+                    ("Conflicto", p.danger),
+                    ("Alternativa", p.warning),
+                    ("Familia", p.info),
+                ] {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, color);
+                    ui.label(egui::RichText::new(label).small().weak());
+                    ui.add_space(6.0);
+                }
+            });
+        }
+    }
+
+    /// Mods grouped by their (first) author, with a shortcut to color the graph
+    /// by author.
+    fn ui_authors(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        let palette = theme::active(ui.ctx());
+        let mut go_to: Option<i64> = None;
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Mods por autor").strong());
+            if ui
+                .checkbox(
+                    &mut self.settings.graph.color_by_author,
+                    "Colorear el grafo por autor",
+                )
+                .changed()
+            {
+                self.graph_stale = true;
+                self.settings.save();
+            }
+        });
+        ui.separator();
+
+        let mut groups: std::collections::BTreeMap<String, Vec<(i64, String, bool)>> =
+            std::collections::BTreeMap::new();
+        for m in &self.snapshot.mods {
+            let key = m
+                .meta
+                .author
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "(sin autor)".into());
+            groups
+                .entry(key)
+                .or_default()
+                .push((m.id, m.name.clone(), m.enabled));
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("authors_scroll")
+            .show(ui, |ui| {
+                for (author, mods) in &groups {
+                    let header = format!("{}  ({})", author, mods.len());
+                    egui::CollapsingHeader::new(header)
+                        .id_salt(author)
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for (id, name, enabled) in mods {
+                                ui.horizontal(|ui| {
+                                    let dot = if *enabled {
+                                        palette.success
+                                    } else {
+                                        palette.text_muted
+                                    };
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(8.0, 8.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().circle_filled(rect.center(), 3.5, dot);
+                                    if ui.link(name).clicked() {
+                                        go_to = Some(*id);
+                                    }
+                                });
+                            }
+                        });
+                }
+            });
+
+        if let Some(id) = go_to {
+            self.selected_mod = Some(id);
+            self.reload_relations();
+            self.tab = Tab::Mods;
+            self.detail_opened = Some(std::time::Instant::now());
         }
     }
 
@@ -3971,9 +4492,45 @@ impl GtaMoApp {
         }
     }
 
+    /// "Lanzando…" splash shown when the app was opened from a per-profile
+    /// `.desktop` (`--launch`). Dismissed (and the window minimized) once the
+    /// game process starts, or by the user.
+    fn ui_splash(&mut self, ctx: &egui::Context) {
+        let mut dismiss = false;
+        let mut cancel = false;
+        overlay_page(ctx, "gta_mo_splash", 420.0, |ui| {
+            if overlay_header(ui, "Lanzando…", "Ocultar") {
+                dismiss = true;
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Preparando el juego…");
+            });
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("La ventana se minimizará cuando arranque el juego.")
+                    .small()
+                    .weak(),
+            );
+            ui.add_space(12.0);
+            if ui.button(format!("{} Cancelar", crate::icons::X)).clicked() {
+                cancel = true;
+            }
+        });
+        if dismiss {
+            self.show_splash = false;
+        }
+        if cancel {
+            self.cancel_current_job();
+            self.show_splash = false;
+        }
+    }
+
     fn ui_log(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::active(ui.ctx());
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .button(format!("{} Limpiar", crate::icons::ERASER))
                 .clicked()
@@ -4004,15 +4561,68 @@ impl GtaMoApp {
                 self.log_follow = true;
                 self.log_scroll_to_end = true;
             }
+            ui.separator();
+            egui::ComboBox::from_id_salt("log_level_filter")
+                .selected_text(self.log_level_filter.label())
+                .show_ui(ui, |ui| {
+                    for f in [
+                        LogLevelFilter::All,
+                        LogLevelFilter::Info,
+                        LogLevelFilter::Warn,
+                        LogLevelFilter::Error,
+                    ] {
+                        ui.selectable_value(&mut self.log_level_filter, f, f.label());
+                    }
+                });
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.log_query)
+                        .hint_text("Filtrar…")
+                        .desired_width(160.0),
+                )
+                .changed()
+            {
+                self.log_scroll_to_end = true;
+            }
+            if !self.log_query.is_empty() && ui.button("✕").clicked() {
+                self.log_query.clear();
+            }
         });
         ui.separator();
+
+        let query = self.log_query.trim().to_lowercase();
+        let filter = self.log_level_filter;
+        let family = if self.settings.log_font.is_some() {
+            egui::FontFamily::Name(crate::fonts::LOG_FAMILY.into())
+        } else {
+            egui::FontFamily::Monospace
+        };
         let out = egui::ScrollArea::vertical()
             .id_salt("log_scroll")
             .auto_shrink(false)
             .stick_to_bottom(self.log_follow)
             .show(ui, |ui| {
                 for l in &self.log {
-                    ui.monospace(l);
+                    let level = log_level(l);
+                    if !log_level_passes(filter, level) {
+                        continue;
+                    }
+                    if !query.is_empty() && !l.to_lowercase().contains(&query) {
+                        continue;
+                    }
+                    let (color, strong) = match level {
+                        LogLevel::Error => (palette.danger, true),
+                        LogLevel::Warn => (palette.warning, true),
+                        LogLevel::Info => (palette.success, false),
+                        LogLevel::Timing => (palette.info, false),
+                        LogLevel::Header => (palette.accent, true),
+                        LogLevel::Plain => (palette.text, false),
+                    };
+                    let mut rich = egui::RichText::new(l).family(family.clone()).color(color);
+                    if strong {
+                        rich = rich.strong();
+                    }
+                    ui.add(egui::Label::new(rich).wrap());
                 }
                 if self.log_scroll_to_end {
                     ui.scroll_to_cursor(Some(egui::Align::BOTTOM));

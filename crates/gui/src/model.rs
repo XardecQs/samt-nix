@@ -8,6 +8,8 @@ pub struct ProfileView {
     pub is_active: bool,
     pub total: i64,
     pub enabled: i64,
+    /// Total playtime recorded for this profile (seconds).
+    pub played_seconds: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +87,8 @@ pub struct Snapshot {
     pub options_by_folder: HashMap<String, HashMap<String, String>>,
     /// Dependency/relation edges for the graph view (`from` depends on `to`).
     pub edges: Vec<GEdge>,
+    /// Global playtime across every profile (seconds).
+    pub global_played_seconds: i64,
 }
 
 /// Kind of relation drawn by the dependency graph.
@@ -152,6 +156,7 @@ pub struct Filters {
     pub search: String,
     pub tag: Option<String>,
     pub group: Option<String>,
+    pub author: Option<String>,
     pub status: StatusFilter,
     pub sort: SortField,
     pub desc: bool,
@@ -165,6 +170,7 @@ impl Default for Filters {
             search: String::new(),
             tag: None,
             group: None,
+            author: None,
             status: StatusFilter::All,
             sort: SortField::Order,
             desc: true,
@@ -193,6 +199,11 @@ pub fn filter_and_sort(mods: &mut Vec<ModView>, filters: &Filters) {
         }
         if let Some(group) = &filters.group {
             if !m.groups.iter().any(|g| g.eq_ignore_ascii_case(group)) {
+                return false;
+            }
+        }
+        if let Some(author) = &filters.author {
+            if !m.meta.author.iter().any(|a| a.eq_ignore_ascii_case(author)) {
                 return false;
             }
         }
