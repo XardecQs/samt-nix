@@ -768,7 +768,8 @@ that flags required dependencies that are disabled/missing, a Conflicts tab
 (background scan), a launch button (`--deps-enable`, plus `--debug`/dry-run) that
 becomes a **Detener** button while the game runs, Discover/Clean actions, a
 streaming Log tab (per-line severity colors, an INFO/warn/error filter, a text
-search and a selectable font — see **Preferencias → Apariencia**), and a status
+search, a selectable font and optional **Nerd Font icons** per line — from an
+installed Nerd Font, toggled in **Preferencias → Apariencia**), and a status
 bar. Opened from a per-profile `.desktop`, it shows a **"Lanzando…"** splash and
 minimizes once the game process starts.
 

@@ -277,6 +277,9 @@ pub struct GuiSettings {
     /// Font family for the Log tab (`None` = the UI monospace).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_font: Option<String>,
+    /// Decorate the Log tab lines with Nerd Font glyphs (needs a Nerd Font).
+    #[serde(default = "default_true")]
+    pub log_nerd_icons: bool,
     /// Per-browser UI preferences (`[browsers.<id>]`).
     #[serde(default)]
     pub browsers: HashMap<String, BrowserPrefs>,
@@ -300,6 +303,7 @@ impl Default for GuiSettings {
             preload_umu: None,
             graph: GraphSettings::default(),
             log_font: None,
+            log_nerd_icons: true,
             browsers: HashMap::new(),
         }
     }

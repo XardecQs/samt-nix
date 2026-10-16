@@ -146,6 +146,21 @@ fn appearance(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
             });
     });
 
+    if crate::fonts::nerd_available() {
+        changed |= ui
+            .checkbox(&mut s.log_nerd_icons, "Iconos Nerd Font en el Log")
+            .on_hover_text("Prefija cada línea del Log con un icono decorativo (necesita una Nerd Font instalada)")
+            .changed();
+    } else {
+        ui.add_enabled(
+            false,
+            egui::Checkbox::new(
+                &mut s.log_nerd_icons,
+                "Iconos Nerd Font en el Log (no hay Nerd Font instalada)",
+            ),
+        );
+    }
+
     changed |= ui
         .checkbox(&mut s.high_contrast, "Alto contraste")
         .on_hover_text("Refuerza bordes y texto para mejorar la legibilidad")

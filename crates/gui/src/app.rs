@@ -83,6 +83,54 @@ fn log_level_passes(filter: LogLevelFilter, level: LogLevel) -> bool {
     }
 }
 
+/// Payload of a teed `umu`/Proton line (`[HH:MM:SS.mmm +X.XXs] rest`), if any.
+fn teed_payload(line: &str) -> Option<&str> {
+    let inner = line.strip_prefix('[')?;
+    let close = inner.find("] ")?;
+    let stamp = &inner[..close];
+    // Looks like `HH:MM:SS.mmm +X.XXs`.
+    if stamp.contains(':') && stamp.contains(" +") && stamp.ends_with('s') {
+        Some(&inner[close + 2..])
+    } else {
+        None
+    }
+}
+
+/// Decorative Nerd Font glyph for a log line (severity or origin), if any.
+fn log_glyph(line: &str) -> Option<&'static str> {
+    use crate::nerd;
+    let t = line.trim_start();
+    if let Some(payload) = teed_payload(t) {
+        let low = payload.to_lowercase();
+        if low.contains("proton") || low.contains("pressure-vessel") {
+            return Some(nerd::PROTON);
+        }
+        if low.contains("dxvk")
+            || low.contains("vulkan")
+            || low.contains("vkd3d")
+            || low.contains("d3d")
+        {
+            return Some(nerd::DXVK);
+        }
+        if low.contains("python") || low.contains("umu") {
+            return Some(nerd::UMU);
+        }
+        return Some(nerd::OUTPUT);
+    }
+    match log_level(line) {
+        LogLevel::Error => Some(nerd::ERROR),
+        LogLevel::Warn => Some(nerd::WARN),
+        LogLevel::Info => Some(nerd::INFO),
+        LogLevel::Timing => Some(nerd::TIMING),
+        LogLevel::Header => Some(if t.starts_with("---") {
+            nerd::SEPARATOR
+        } else {
+            nerd::HEADER
+        }),
+        LogLevel::Plain => None,
+    }
+}
+
 /// Dependency tab view mode.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DepsView {
@@ -4597,11 +4645,16 @@ impl GtaMoApp {
         } else {
             egui::FontFamily::Monospace
         };
+        let nerd = self.settings.log_nerd_icons && crate::fonts::nerd_available();
         let out = egui::ScrollArea::vertical()
             .id_salt("log_scroll")
             .auto_shrink(false)
             .stick_to_bottom(self.log_follow)
             .show(ui, |ui| {
+                let base_font = {
+                    let f = egui::TextStyle::Monospace.resolve(ui.style());
+                    egui::FontId::new(f.size, family.clone())
+                };
                 for l in &self.log {
                     let level = log_level(l);
                     if !log_level_passes(filter, level) {
@@ -4618,6 +4671,23 @@ impl GtaMoApp {
                         LogLevel::Header => (palette.accent, true),
                         LogLevel::Plain => (palette.text, false),
                     };
+                    // Decorative Nerd Font glyph in the left margin.
+                    if nerd {
+                        if let Some(g) = log_glyph(l) {
+                            let fmt = egui::TextFormat {
+                                font_id: base_font.clone(),
+                                color,
+                                ..Default::default()
+                            };
+                            let mut job = egui::text::LayoutJob::default();
+                            job.wrap.max_width = ui.available_width();
+                            job.append(g, 0.0, fmt.clone());
+                            job.append(" ", 0.0, fmt.clone());
+                            job.append(l, 0.0, fmt);
+                            ui.add(egui::Label::new(job));
+                            continue;
+                        }
+                    }
                     let mut rich = egui::RichText::new(l).family(family.clone()).color(color);
                     if strong {
                         rich = rich.strong();
@@ -5773,6 +5843,38 @@ mod tests {
             assert!(!seen.contains(&key), "posición repetida en i={i}: {p:?}");
             seen.push(key);
         }
+    }
+
+    #[test]
+    fn log_glyph_maps_severity_and_origin() {
+        use crate::nerd;
+        assert_eq!(super::log_glyph("[X] algo"), Some(nerd::ERROR));
+        assert_eq!(super::log_glyph("[!] algo"), Some(nerd::WARN));
+        assert_eq!(super::log_glyph("[+] algo"), Some(nerd::INFO));
+        assert_eq!(super::log_glyph("⏱ umu responde: 1s"), Some(nerd::TIMING));
+        assert_eq!(super::log_glyph("=== gta-mo ==="), Some(nerd::HEADER));
+        assert_eq!(
+            super::log_glyph("--- lanzando perfil 'x' ---"),
+            Some(nerd::SEPARATOR)
+        );
+        assert_eq!(super::log_glyph("texto plano sin marca"), None);
+        // Teed umu/Proton output (`[HH:MM:SS.mmm +X.XXs] …`).
+        assert_eq!(
+            super::log_glyph("[12:00:00.000 +1.00s] proton: hello"),
+            Some(nerd::PROTON)
+        );
+        assert_eq!(
+            super::log_glyph("[12:00:00.000 +1.00s] dxvk: init"),
+            Some(nerd::DXVK)
+        );
+        assert_eq!(
+            super::log_glyph("[12:00:00.000 +1.00s] python: umu"),
+            Some(nerd::UMU)
+        );
+        assert_eq!(
+            super::log_glyph("[12:00:00.000 +1.00s] random output"),
+            Some(nerd::OUTPUT)
+        );
     }
 
     #[test]

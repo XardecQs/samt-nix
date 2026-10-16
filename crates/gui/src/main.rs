@@ -11,6 +11,7 @@ mod icons;
 mod lightbox;
 mod model;
 mod motion;
+mod nerd;
 mod preferences;
 mod runtime;
 mod settings;

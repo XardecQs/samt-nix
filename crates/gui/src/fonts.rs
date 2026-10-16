@@ -6,7 +6,42 @@
 use eframe::egui;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// Whether an installed Nerd Font was found (used to enable the Log glyphs).
+static NERD_AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+/// True when a Nerd Font was registered as a fallback this run.
+pub fn nerd_available() -> bool {
+    NERD_AVAILABLE.load(Ordering::Relaxed)
+}
+
+/// Finds an installed Nerd Font TTF/SFNT via fontconfig (`fc-list`), so the Log
+/// can render decorative glyphs without depending on the chosen UI font.
+fn nerd_font_file() -> Option<PathBuf> {
+    let fc = which::which("fc-list").ok()?;
+    let out = Command::new(fc)
+        .args([":", "family", "file"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if !line.to_lowercase().contains("nerd") {
+            continue;
+        }
+        // `fc-list : family file` prints `Family1,Family2: /path/font.ttf`.
+        if let Some((_fam, path)) = line.rsplit_once(": ") {
+            let p = PathBuf::from(path.trim());
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
 
 /// Reads the GNOME interface font name (`Family Size`). Returns just the
 /// family, dropping the trailing point size.
@@ -132,6 +167,23 @@ pub fn install(ctx: &egui::Context, log_family: Option<&str>) {
             .entry(family)
             .or_default()
             .push("lucide".to_owned());
+    }
+
+    // Nerd Font as a fallback for the decorative Log glyphs (best-effort).
+    NERD_AVAILABLE.store(false, Ordering::Relaxed);
+    if let Some(bytes) = nerd_font_file().and_then(|p| std::fs::read(p).ok()) {
+        fonts.font_data.insert(
+            "nerd".to_owned(),
+            Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("nerd".to_owned());
+        }
+        NERD_AVAILABLE.store(true, Ordering::Relaxed);
     }
 
     if let Some(family) = log_family {
