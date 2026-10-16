@@ -12,6 +12,7 @@ mod graph_node;
 mod icons;
 mod icons_theme;
 mod lightbox;
+mod manifest_form;
 mod model;
 mod motion;
 mod nerd;

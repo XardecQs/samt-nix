@@ -751,7 +751,11 @@ Features: mods list with search/tag/group/enabled-status filters and sorting,
 enable/disable and drag&drop load-order controls (with an insertion bar), a rich
 detail panel (author, Mod ID, URL, tags, groups, mount, description, cover,
 screenshot gallery, components, a one-click **Crear mod.toml** for mods
-without a manifest, a **tag editor** and a raw **mod.toml editor**, per-profile
+without a manifest, a **tag editor** and a **mod.toml editor** (a structured
+**Formulario** tab — identity, links, media, mount, dependencies, family,
+Mod Loader, options and components — plus a raw **TOML crudo** tab; saving only
+rewrites the edited keys with `toml_edit`, preserving comments, ordering and
+unknown keys), per-profile
 **notes** and **hide** toggles (per profile and global, with a "Mostrar ocultos"
 filter)), a **family** badge and declared **conflicts** in the detail panel,
 profiles tab with create/use/rename/copy/delete

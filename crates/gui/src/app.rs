@@ -204,10 +204,19 @@ impl InputState {
     }
 }
 
-/// State of the raw `mod.toml` editor dialog.
+/// Which view of the `mod.toml` editor is active.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManifestTab {
+    Form,
+    Raw,
+}
+
+/// State of the `mod.toml` editor dialog (structured form + raw TOML tabs).
 struct ManifestEditor {
     folder: String,
     content: String,
+    form: crate::manifest_form::ManifestForm,
+    tab: ManifestTab,
     error: Option<String>,
 }
 
@@ -2660,9 +2669,19 @@ impl GtaMoApp {
                                 let path = dir.join(&folder).join("mod.toml");
                                 match std::fs::read_to_string(&path) {
                                     Ok(content) => {
+                                        let form =
+                                            toml::from_str::<gta_mo_core::meta::ModMeta>(&content)
+                                                .map(|m| {
+                                                    crate::manifest_form::ManifestForm::from_meta(
+                                                        &m,
+                                                    )
+                                                })
+                                                .unwrap_or_default();
                                         self.manifest_editor = Some(ManifestEditor {
                                             folder: folder.clone(),
                                             content,
+                                            form,
+                                            tab: ManifestTab::Form,
                                             error: None,
                                         });
                                     }
@@ -5324,24 +5343,44 @@ impl GtaMoApp {
             let mut save = false;
             let mut reload = false;
             let title = format!("mod.toml — {}", ed.folder);
-            overlay_page(ctx, "gta_mo_manifest", 780.0, |ui| {
+            overlay_page(ctx, "gta_mo_manifest", 820.0, |ui| {
                 if overlay_header(ui, &title, "Atrás") {
                     close = true;
+                }
+                let was_raw = ed.tab == ManifestTab::Raw;
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut ed.tab, ManifestTab::Form, "Formulario");
+                    ui.selectable_value(&mut ed.tab, ManifestTab::Raw, "TOML crudo");
+                });
+                if was_raw && ed.tab == ManifestTab::Form {
+                    // Re-extract the form from the edited raw text.
+                    match toml::from_str::<gta_mo_core::meta::ModMeta>(&ed.content) {
+                        Ok(m) => {
+                            ed.form = crate::manifest_form::ManifestForm::from_meta(&m);
+                            ed.error = None;
+                        }
+                        Err(e) => ed.error = Some(format!("TOML inválido: {e}")),
+                    }
                 }
                 if let Some(err) = &ed.error {
                     ui.colored_label(theme::active(ui.ctx()).danger, err);
                     ui.add_space(4.0);
                 }
-                let available = (ui.available_height() - 40.0).max(120.0);
-                egui::ScrollArea::both()
+                ui.separator();
+                let available = (ui.available_height() - 42.0).max(160.0);
+                egui::ScrollArea::vertical()
                     .max_height(available)
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut ed.content)
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(20),
-                        );
+                    .auto_shrink(false)
+                    .show(ui, |ui| match ed.tab {
+                        ManifestTab::Raw => {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut ed.content)
+                                    .code_editor()
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(22),
+                            );
+                        }
+                        ManifestTab::Form => ui_manifest_form(ui, &mut ed.form),
                     });
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -5357,6 +5396,9 @@ impl GtaMoApp {
                 if let Some(dir) = self.backend.mods_dir_path() {
                     match std::fs::read_to_string(dir.join(&ed.folder).join("mod.toml")) {
                         Ok(c) => {
+                            ed.form = toml::from_str::<gta_mo_core::meta::ModMeta>(&c)
+                                .map(|m| crate::manifest_form::ManifestForm::from_meta(&m))
+                                .unwrap_or_default();
                             ed.content = c;
                             ed.error = None;
                         }
@@ -5366,21 +5408,36 @@ impl GtaMoApp {
             }
             let mut saved = false;
             if save {
-                // Validate locally for immediate feedback (the CLI re-validates).
-                match toml::from_str::<gta_mo_core::meta::ModMeta>(&ed.content) {
-                    Ok(_) => {
-                        self.exec_stdin(
-                            vec![
-                                "ctl".into(),
-                                "manifest".into(),
-                                "set".into(),
-                                ed.folder.clone(),
-                            ],
-                            ed.content.clone(),
-                        );
-                        saved = true;
+                // Form: apply onto the parsed document (preserves comments and
+                // unknown keys). Raw: use the text as-is.
+                let mut text = ed.content.clone();
+                if ed.tab == ManifestTab::Form {
+                    match ed.content.parse::<toml_edit::DocumentMut>() {
+                        Ok(mut doc) => {
+                            ed.form.apply(&mut doc);
+                            text = doc.to_string();
+                        }
+                        Err(e) => ed.error = Some(format!("TOML inválido: {e}")),
                     }
-                    Err(e) => ed.error = Some(format!("TOML inválido: {e}")),
+                }
+                if ed.error.is_none() {
+                    // Validate locally for immediate feedback (the CLI re-validates).
+                    match toml::from_str::<gta_mo_core::meta::ModMeta>(&text) {
+                        Ok(_) => {
+                            self.exec_stdin(
+                                vec![
+                                    "ctl".into(),
+                                    "manifest".into(),
+                                    "set".into(),
+                                    ed.folder.clone(),
+                                ],
+                                text.clone(),
+                            );
+                            ed.content = text;
+                            saved = true;
+                        }
+                        Err(e) => ed.error = Some(format!("TOML inválido: {e}")),
+                    }
                 }
             }
             if close || saved {
@@ -5605,6 +5662,126 @@ impl GtaMoApp {
 
 /// Applies spacing, control sizes and animation derived from the settings.
 /// Colors are handled separately by [`theme::apply`].
+/// Renders the structured `mod.toml` form (sections + nested sub-editors).
+fn ui_manifest_form(ui: &mut egui::Ui, f: &mut crate::manifest_form::ManifestForm) {
+    egui::CollapsingHeader::new("Identidad")
+        .default_open(true)
+        .show(ui, |ui| {
+            crate::form::text(ui, "ID (autor:slug)", &mut f.id);
+            crate::form::text(ui, "Nombre", &mut f.name);
+            crate::form::text(ui, "Versión", &mut f.version);
+            crate::form::text(ui, "Licencia", &mut f.license);
+            crate::form::text(ui, "Carátula", &mut f.cover);
+        });
+    egui::CollapsingHeader::new("Descripción y enlaces")
+        .default_open(false)
+        .show(ui, |ui| {
+            crate::form::multiline(ui, "Descripción", &mut f.description, 4);
+            crate::form::text(ui, "URL", &mut f.url);
+            crate::form::list(ui, "URLs adicionales", &mut f.urls, "https://…");
+            crate::form::list(ui, "Autores", &mut f.authors, "Autor");
+            crate::form::list(ui, "Tags", &mut f.tags, "tag");
+        });
+    egui::CollapsingHeader::new("Medios y montaje")
+        .default_open(false)
+        .show(ui, |ui| {
+            crate::form::list(ui, "Guías", &mut f.guides, "guides/…");
+            crate::form::list(ui, "Capturas", &mut f.screenshots, "screenshots");
+            crate::form::list(ui, "Mount", &mut f.mount, "content");
+        });
+    egui::CollapsingHeader::new("Dependencias y relaciones")
+        .default_open(false)
+        .show(ui, |ui| {
+            crate::form::list(ui, "Requeridas", &mut f.dep_required, "autor:slug");
+            crate::form::list(ui, "Opcionales", &mut f.dep_optional, "autor:slug");
+            crate::form::list(ui, "Conflictos", &mut f.conflicts, "autor:slug");
+            crate::form::list(ui, "requires_any", &mut f.requires_any, "autor:slug");
+            crate::form::text(ui, "Familia id", &mut f.family_id);
+            crate::form::text(ui, "Familia nombre", &mut f.family_name);
+        });
+    egui::CollapsingHeader::new("Mod Loader")
+        .default_open(false)
+        .show(ui, |ui| {
+            crate::form::text(ui, "Prioridad (1..100)", &mut f.modloader_priority);
+            crate::form::list(ui, "Carpetas", &mut f.modloader_folders, "Carpeta");
+        });
+    egui::CollapsingHeader::new("Opciones")
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut remove: Option<usize> = None;
+            for (i, o) in f.options.iter_mut().enumerate() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("Grupo {}", i + 1)).strong());
+                        if ui.button("✕").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                    crate::form::text(ui, "group", &mut o.group);
+                    crate::form::text(ui, "name", &mut o.name);
+                    crate::form::text(ui, "default", &mut o.default);
+                    ui.label("Opciones:");
+                    let mut rm: Option<usize> = None;
+                    for (j, c) in o.choices.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut c.key)
+                                    .hint_text("key")
+                                    .desired_width(120.0),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut c.name)
+                                    .hint_text("name")
+                                    .desired_width(160.0),
+                            );
+                            if ui.button("✕").clicked() {
+                                rm = Some(j);
+                            }
+                        });
+                    }
+                    if let Some(j) = rm {
+                        o.choices.remove(j);
+                    }
+                    if ui.button("+ Opción").clicked() {
+                        o.choices.push(Default::default());
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                f.options.remove(i);
+            }
+            if ui.button("+ Grupo").clicked() {
+                f.options.push(Default::default());
+            }
+        });
+    egui::CollapsingHeader::new("Componentes")
+        .default_open(false)
+        .show(ui, |ui| {
+            let mut remove: Option<usize> = None;
+            for (i, c) in f.components.iter_mut().enumerate() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("Componente {}", i + 1)).strong());
+                        if ui.button("✕").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                    crate::form::text(ui, "name", &mut c.name);
+                    crate::form::text(ui, "version", &mut c.version);
+                    crate::form::text(ui, "author", &mut c.author);
+                    crate::form::text(ui, "url", &mut c.url);
+                    crate::form::text(ui, "path", &mut c.path);
+                });
+            }
+            if let Some(i) = remove {
+                f.components.remove(i);
+            }
+            if ui.button("+ Componente").clicked() {
+                f.components.push(Default::default());
+            }
+        });
+}
+
 fn apply_style(ctx: &egui::Context, settings: &GuiSettings) {
     let mut style = (*ctx.style()).clone();
     style.animation_time = if settings.reduce_motion { 0.0 } else { 0.18 };
