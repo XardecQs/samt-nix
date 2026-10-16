@@ -518,6 +518,8 @@ pub enum DesktopAction {
         #[arg(long, help = "Icon path or theme icon name (default: gta-mo-gui)")]
         icon: Option<String>,
     },
+    #[command(about = "Replace a profile's .desktop entry with stdin content")]
+    Set { ident: String },
     #[command(about = "Remove a profile's .desktop entry")]
     Remove { ident: String },
     #[command(about = "List the generated .desktop entries")]

@@ -9,6 +9,9 @@ struct TempDb {
     /// Private `XDG_RUNTIME_DIR` so the launcher lock never collides with the
     /// developer's own running app (`gta-mo-gui` / a manual `gta-mo mount`).
     runtime: PathBuf,
+    /// Private `XDG_DATA_HOME` so `ctl desktop` never writes to the real
+    /// `~/.local/share/applications`.
+    data: PathBuf,
     config: Option<PathBuf>,
 }
 
@@ -19,11 +22,14 @@ impl TempDb {
         std::fs::create_dir_all(&dir).unwrap();
         let runtime = dir.join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
         let db = dir.join("test.db");
         Self {
             dir,
             db,
             runtime,
+            data,
             config: None,
         }
     }
@@ -46,6 +52,7 @@ impl TempDb {
         let mut cmd = Command::new(BIN);
         cmd.env("GTA_MO_DB", &self.db);
         cmd.env("XDG_RUNTIME_DIR", &self.runtime);
+        cmd.env("XDG_DATA_HOME", &self.data);
         if let Some(cfg) = &self.config {
             cmd.env("GTA_MO_CONFIG", cfg);
         }
@@ -69,6 +76,7 @@ impl TempDb {
         let mut cmd = Command::new(BIN);
         cmd.env("GTA_MO_DB", &self.db);
         cmd.env("XDG_RUNTIME_DIR", &self.runtime);
+        cmd.env("XDG_DATA_HOME", &self.data);
         if let Some(cfg) = &self.config {
             cmd.env("GTA_MO_CONFIG", cfg);
         }
@@ -404,6 +412,27 @@ fn profile_playtime_reports_totals() {
     let list = json(&t.run_ok(&["ctl", "profile", "list", "--json"]));
     assert!(list[0]["played_seconds"].is_number());
     assert!(list[0]["played"].is_string());
+}
+
+#[test]
+fn desktop_set_and_list_write_a_profile_entry() {
+    let t = TempDb::new("desktop");
+    t.run_ok(&["ctl", "profile", "create", "Juego"]);
+    let content = "[Desktop Entry]\nType=Application\nName=Juego (GTA: SA)\nExec=gta-mo-gui --launch juego\nIcon=gta-mo-gui\nTerminal=false\n";
+    let out = t.run_stdin(&["ctl", "desktop", "set", "Juego"], content);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let path = t.data.join("applications/gta-mo-juego.desktop");
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(written.contains("Name=Juego (GTA: SA)"));
+    assert!(written.contains("Exec=gta-mo-gui --launch juego"));
+    let list = t.run_ok(&["ctl", "desktop", "list"]);
+    assert!(list.contains("juego"), "{list}");
+    t.run_ok(&["ctl", "desktop", "remove", "Juego"]);
+    assert!(!path.exists());
 }
 
 #[test]

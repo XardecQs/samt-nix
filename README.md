@@ -569,6 +569,7 @@ gta-mo ctl profile copy <source> <new-name>
 gta-mo ctl profile diff <a> <b>
 gta-mo ctl profile playtime [--json]           # recorded playtime per profile + total
 gta-mo ctl desktop add <profile> [--icon <i>]  # per-profile .desktop entry
+gta-mo ctl desktop set <profile>               # replace it with stdin content
 gta-mo ctl desktop remove <profile>
 gta-mo ctl desktop list
 gta-mo ctl group list [--json]
@@ -755,7 +756,10 @@ without a manifest, a **tag editor** and a raw **mod.toml editor**, per-profile
 filter)), a **family** badge and declared **conflicts** in the detail panel,
 profiles tab with create/use/rename/copy/delete
 (renaming also moves `run/profiles/<slug>`), per-profile **playtime** (also
-global) and a **`.desktop` editor** (create/remove the per-profile entry), an
+global) and a **`.desktop` editor** (a section for the selected profile: fields —
+name, comment, exec, icon, categories, `StartupWMClass`…, a **theme icon picker**
+with PNG preview and a raw path field — writing the entry via `ctl desktop set`),
+an
 **Autores** tab grouping the mods by author (with a hint of each author's mods
 and a "color the graph by author" toggle), a **Datos** tab listing the active
 profile's saves, settings, User Tracks and screenshots written under

@@ -412,6 +412,25 @@ fn cmd_desktop(conn: &Connection, action: &super::DesktopAction) -> anyhow::Resu
             }
             Ok(())
         }
+        super::DesktopAction::Set { ident } => {
+            let p = db::resolve_profile(conn, ident)?;
+            let dir = desktop_dir()?;
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join(format!("gta-mo-{}.desktop", p.slug));
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut content)?;
+            if content.trim().is_empty() {
+                anyhow::bail!("Entrada vacía: se esperaba el contenido del .desktop por stdin");
+            }
+            std::fs::write(&path, content)?;
+            log::info(format!("Entrada actualizada: {}", path.display()));
+            if which::which("update-desktop-database").is_ok() {
+                let _ = std::process::Command::new("update-desktop-database")
+                    .arg(&dir)
+                    .status();
+            }
+            Ok(())
+        }
         super::DesktopAction::Remove { ident } => {
             let p = db::resolve_profile(conn, ident)?;
             let dir = desktop_dir()?;

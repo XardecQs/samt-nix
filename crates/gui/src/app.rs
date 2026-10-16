@@ -217,6 +217,14 @@ struct NotesEditor {
     content: String,
 }
 
+/// State of the per-profile `.desktop` editor (a section in the Profiles tab).
+struct DesktopEditor {
+    slug: String,
+    entry: crate::desktop::DesktopEntry,
+    icon_query: String,
+    error: Option<String>,
+}
+
 #[allow(clippy::enum_variant_names)]
 enum ConfirmAction {
     DeleteProfile(String),
@@ -306,6 +314,7 @@ pub struct GtaMoApp {
     confirm: Option<ConfirmState>,
     manifest_editor: Option<ManifestEditor>,
     notes_editor: Option<NotesEditor>,
+    desktop_editor: Option<DesktopEditor>,
     /// Profile user data (saves/tracks/screenshots), refreshed on `refresh`.
     userdata: Vec<gta_mo_core::userdata::Entry>,
     /// Whether an enabled mod provides PortableGTA.
@@ -440,6 +449,7 @@ impl GtaMoApp {
             confirm: None,
             manifest_editor: None,
             notes_editor: None,
+            desktop_editor: None,
             userdata: Vec::new(),
             portablegta: false,
             userdata_error: None,
@@ -3092,6 +3102,216 @@ impl GtaMoApp {
                     });
                 }
             });
+
+        if let Some(slug) = self.selected_profile.clone() {
+            let name = self
+                .snapshot
+                .profiles
+                .iter()
+                .find(|p| p.slug == slug)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| slug.clone());
+            ui.separator();
+            egui::CollapsingHeader::new("Acceso directo (.desktop)")
+                .id_salt("desktop_editor")
+                .default_open(false)
+                .show(ui, |ui| {
+                    self.ui_desktop_editor(ui, &slug, &name);
+                });
+        }
+    }
+
+    /// Loads the profile's `.desktop` (or a sensible default) into the editor.
+    fn ensure_desktop_editor(&mut self, slug: &str, name: &str) {
+        if self.desktop_editor.as_ref().map(|e| e.slug.as_str()) == Some(slug) {
+            return;
+        }
+        let path = gta_mo_core::config::applications_dir()
+            .map(|d| d.join(format!("gta-mo-{slug}.desktop")));
+        let entry = path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|t| crate::desktop::DesktopEntry::parse(&t))
+            .unwrap_or_else(|| crate::desktop::DesktopEntry {
+                name: format!("{name} (GTA: SA)"),
+                comment: format!("Lanzar GTA: San Andreas con el perfil «{name}»"),
+                exec: format!("gta-mo-gui --launch {slug}"),
+                icon: "gta-mo-gui".into(),
+                categories: "Game;".into(),
+                startup_wm_class: "gta_sa.exe".into(),
+                ..Default::default()
+            });
+        self.desktop_editor = Some(DesktopEditor {
+            slug: slug.to_string(),
+            entry,
+            icon_query: String::new(),
+            error: None,
+        });
+    }
+
+    /// Per-profile `.desktop` editor: fields + theme icon picker + preview.
+    fn ui_desktop_editor(&mut self, ui: &mut egui::Ui, slug: &str, name: &str) {
+        self.ensure_desktop_editor(slug, name);
+        let Some(mut ed) = self.desktop_editor.take() else {
+            return;
+        };
+        if let Some(err) = &ed.error {
+            ui.colored_label(theme::active(ui.ctx()).danger, err);
+            ui.add_space(4.0);
+        }
+        ui.label(
+            egui::RichText::new(format!("~/.local/share/applications/gta-mo-{slug}.desktop"))
+                .small()
+                .weak(),
+        );
+        ui.add_space(4.0);
+
+        egui::Grid::new("desktop_fields")
+            .num_columns(2)
+            .spacing([14.0, 6.0])
+            .show(ui, |ui| {
+                crate::form::text(ui, "Nombre", &mut ed.entry.name);
+                ui.end_row();
+                crate::form::text(ui, "Nombre genérico", &mut ed.entry.generic_name);
+                ui.end_row();
+                crate::form::text(ui, "Comentario", &mut ed.entry.comment);
+                ui.end_row();
+                crate::form::text(ui, "Exec", &mut ed.entry.exec);
+                ui.end_row();
+                crate::form::text(ui, "Icono", &mut ed.entry.icon);
+                ui.end_row();
+                crate::form::text(ui, "Directorio", &mut ed.entry.working_dir);
+                ui.end_row();
+                crate::form::text(ui, "Categorías", &mut ed.entry.categories);
+                ui.end_row();
+                crate::form::text(ui, "StartupWMClass", &mut ed.entry.startup_wm_class);
+                ui.end_row();
+            });
+        ui.horizontal(|ui| {
+            crate::form::check(ui, "Terminal", &mut ed.entry.terminal);
+            crate::form::check(ui, "Oculto (NoDisplay)", &mut ed.entry.no_display);
+        });
+
+        // Preview + theme icon picker.
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Vista previa:");
+            match crate::icons_theme::resolve(&ed.entry.icon) {
+                Some(path) => {
+                    let raster = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| {
+                            matches!(
+                                e.to_ascii_lowercase().as_str(),
+                                "png" | "jpg" | "jpeg" | "webp" | "bmp"
+                            )
+                        })
+                        .unwrap_or(false);
+                    if raster {
+                        ui.add(
+                            egui::Image::new(format!("file://{}", path.display()))
+                                .max_size(egui::vec2(64.0, 64.0)),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("(SVG: vista previa pendiente)")
+                                .weak()
+                                .small(),
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new(path.display().to_string())
+                            .small()
+                            .weak(),
+                    );
+                }
+                None => {
+                    ui.label(egui::RichText::new("(sin resolver)").weak().small());
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Buscar icono del tema:");
+            ui.add(
+                egui::TextEdit::singleline(&mut ed.icon_query)
+                    .hint_text("p. ej. games")
+                    .desired_width(200.0),
+            );
+        });
+        let q = ed.icon_query.trim().to_lowercase();
+        if !q.is_empty() {
+            let icon_index = crate::icons_theme::index();
+            egui::ScrollArea::vertical()
+                .id_salt("desktop_icon_list")
+                .max_height(140.0)
+                .show(ui, |ui| {
+                    let mut shown = 0;
+                    for (iname, path) in icon_index.iter() {
+                        if !iname.to_lowercase().contains(&q) {
+                            continue;
+                        }
+                        if ui.selectable_label(false, iname).clicked() {
+                            ed.entry.icon = iname.clone();
+                        }
+                        let _ = path;
+                        shown += 1;
+                        if shown >= 60 {
+                            break;
+                        }
+                    }
+                    if shown == 0 {
+                        ui.label(egui::RichText::new("sin coincidencias").weak().small());
+                    }
+                });
+        }
+
+        ui.add_space(6.0);
+        let mut save = false;
+        let mut remove = false;
+        ui.horizontal(|ui| {
+            if ui.button("Guardar .desktop").clicked() {
+                save = true;
+            }
+            if ui
+                .button(format!("{} Quitar", crate::icons::TRASH))
+                .clicked()
+            {
+                remove = true;
+            }
+        });
+
+        if save {
+            let text = ed.entry.to_desktop_string();
+            self.exec_stdin(
+                vec![
+                    "ctl".into(),
+                    "desktop".into(),
+                    "set".into(),
+                    slug.to_string(),
+                ],
+                text,
+            );
+            self.toasts.push(
+                ui.ctx(),
+                crate::toasts::ToastKind::Success,
+                "Entrada .desktop guardada",
+            );
+        }
+        if remove {
+            self.exec(
+                vec![
+                    "ctl".into(),
+                    "desktop".into(),
+                    "remove".into(),
+                    slug.to_string(),
+                ],
+                false,
+            );
+            ed.error = None;
+        }
+        self.desktop_editor = Some(ed);
     }
 
     fn ui_groups(&mut self, ui: &mut egui::Ui) {

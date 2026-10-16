@@ -3,11 +3,14 @@
 mod about;
 mod app;
 mod backend;
+mod desktop;
 mod file_browser;
 mod fonts;
+mod form;
 mod graph_edge;
 mod graph_node;
 mod icons;
+mod icons_theme;
 mod lightbox;
 mod model;
 mod motion;
