@@ -160,8 +160,8 @@ legacy_root = true
 ignore = ["tools", "reports"]
 ```
 
-- `external/` and `own/` group third-party and own mods; only metadata is
-  tracked in the mods repo.
+- `external/` groups third-party mods; the mods repo tracks only their
+  metadata. `own/` groups own mods and tracks their full content and sources.
 - `generated/` is where `unmount --capture` / `ctl upper capture` write; it is
   intended to be gitignored.
 - Direct children of `mods/` remain valid as legacy mods while `legacy_root`
