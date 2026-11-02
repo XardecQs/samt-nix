@@ -48,15 +48,33 @@ impl TempDb {
         self
     }
 
-    fn run(&self, args: &[&str]) -> Output {
+    fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(BIN);
         cmd.env("GTA_MO_DB", &self.db);
         cmd.env("XDG_RUNTIME_DIR", &self.runtime);
         cmd.env("XDG_DATA_HOME", &self.data);
+        // Never inherit a developer's real config: tests must be isolated.
+        cmd.env_remove("GTA_MO_CONFIG");
         if let Some(cfg) = &self.config {
             cmd.env("GTA_MO_CONFIG", cfg);
         }
-        cmd.args(args).output().unwrap()
+        cmd.args(args);
+        cmd
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+
+    /// Runs the binary from `cwd` with an empty XDG config home, so the test
+    /// can exercise the no-config path even when the workspace has config.toml.
+    fn run_in_dir(&self, cwd: &Path, args: &[&str]) -> Output {
+        let config_home = cwd.join("xdg-config");
+        std::fs::create_dir_all(&config_home).unwrap();
+        let mut cmd = self.command(args);
+        cmd.current_dir(cwd);
+        cmd.env("XDG_CONFIG_HOME", config_home);
+        cmd.output().unwrap()
     }
 
     fn run_ok(&self, args: &[&str]) -> String {
@@ -103,6 +121,38 @@ impl Drop for TempDb {
 
 fn json(s: &str) -> serde_json::Value {
     serde_json::from_str(s).expect("salida no es JSON válido")
+}
+
+#[test]
+fn add_works_without_config() {
+    let t = TempDb::new("add-noconfig");
+    let cwd = t.dir.join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let out = t.run_in_dir(&cwd, &["ctl", "add", "m1"]);
+    assert!(
+        out.status.success(),
+        "ctl add falló sin config\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = t.run_in_dir(&cwd, &["ctl", "list", "--json"]);
+    assert!(out.status.success());
+    let list = json(&String::from_utf8_lossy(&out.stdout));
+    let m1 = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["folder"] == "m1")
+        .expect("m1 registrado");
+    assert_eq!(m1["rel_path"], "m1");
+
+    // The duplicate is rejected for being a duplicate, not for missing config.
+    let dup = t.run_in_dir(&cwd, &["ctl", "add", "m1"]);
+    assert!(!dup.status.success());
+    let stderr = String::from_utf8_lossy(&dup.stderr);
+    assert!(stderr.contains("ya existe"), "{stderr}");
 }
 
 #[test]

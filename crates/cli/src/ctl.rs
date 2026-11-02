@@ -1597,38 +1597,68 @@ fn cmd_add(
     name: Option<&str>,
     category: Option<&str>,
 ) -> anyhow::Result<()> {
-    let cfg =
-        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
-    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
-    let layout = gta_mo_core::layout::ModsLayout::load(&paths.mods_dir)?;
+    // `ctl add` is a database-only operation and must keep working without a
+    // config (the integration tests and `ctl` on a fresh host do this). When a
+    // config exists, use its `.samt.toml` to choose the default category; when
+    // it does not, fall back to the historical flat layout unless the caller
+    // explicitly asks for a category/nested path.
+    let layout = match gta_mo_core::config::find_config_file() {
+        Some(_) => {
+            let cfg = gta_mo_core::config::load_config()
+                .map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+            let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+            Some(gta_mo_core::layout::ModsLayout::load(&paths.mods_dir)?)
+        }
+        None => None,
+    };
 
-    let loc = if folder.contains('/') {
-        if !gta_mo_core::layout::valid_rel_path(folder) {
-            anyhow::bail!("Ruta de mod inválida: '{folder}'.");
+    let loc = match layout {
+        Some(layout) => {
+            if folder.contains('/') {
+                if !gta_mo_core::layout::valid_rel_path(folder) {
+                    anyhow::bail!("Ruta de mod inválida: '{folder}'.");
+                }
+                if layout.is_flat() {
+                    anyhow::bail!(
+                        "No hay .samt.toml en el directorio de mods; no se puede registrar una ruta anidada."
+                    );
+                }
+                if folder.split('/').count() != 2 {
+                    anyhow::bail!("Usa una ruta <categoría>/<mod> (un solo nivel).");
+                }
+                let folder_name = folder
+                    .rsplit('/')
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("Ruta de mod inválida: '{folder}'."))?;
+                let category = folder.split('/').next().unwrap_or_default();
+                if !layout.categories.iter().any(|c| c == category) {
+                    anyhow::bail!("Categoría desconocida en la ruta: '{category}'.");
+                }
+                gta_mo_core::layout::ModLocation {
+                    rel_path: folder.to_string(),
+                    folder_name: folder_name.to_string(),
+                    category: Some(category.to_string()),
+                }
+            } else {
+                location_for(&layout, folder, category)?
+            }
         }
-        if layout.is_flat() {
-            anyhow::bail!(
-                "No hay .samt.toml en el directorio de mods; no se puede registrar una ruta anidada."
-            );
+        None => {
+            if folder.contains('/') {
+                anyhow::bail!("No hay config/.samt.toml; no se puede registrar una ruta anidada.");
+            }
+            if category.is_some() {
+                anyhow::bail!("No hay config/.samt.toml; no se puede usar --category.");
+            }
+            if !gta_mo_core::layout::valid_segment(folder) {
+                anyhow::bail!("Nombre de carpeta no válido: '{folder}'.");
+            }
+            gta_mo_core::layout::ModLocation {
+                rel_path: folder.to_string(),
+                folder_name: folder.to_string(),
+                category: None,
+            }
         }
-        if folder.split('/').count() != 2 {
-            anyhow::bail!("Usa una ruta <categoría>/<mod> (un solo nivel).");
-        }
-        let folder_name = folder
-            .rsplit('/')
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("Ruta de mod inválida: '{folder}'."))?;
-        let category = folder.split('/').next().unwrap_or_default();
-        if !layout.categories.iter().any(|c| c == category) {
-            anyhow::bail!("Categoría desconocida en la ruta: '{category}'.");
-        }
-        gta_mo_core::layout::ModLocation {
-            rel_path: folder.to_string(),
-            folder_name: folder_name.to_string(),
-            category: Some(category.to_string()),
-        }
-    } else {
-        location_for(&layout, folder, category)?
     };
 
     if db::mod_exists(conn, &loc.folder_name)? {
