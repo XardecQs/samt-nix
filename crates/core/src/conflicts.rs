@@ -28,6 +28,7 @@ pub struct Conflict {
 /// and reports paths provided by more than one mod.
 pub fn scan_conflicts(
     mods_dir: &Path,
+    mod_paths: &crate::layout::ModPaths,
     resolved: &[String],
     spec: &crate::games::GameSpec,
     options: &HashMap<String, HashMap<String, String>>,
@@ -36,7 +37,8 @@ pub fn scan_conflicts(
     let empty = HashMap::new();
     for folder in resolved {
         let selected = options.get(folder).unwrap_or(&empty);
-        for layer in crate::meta::mod_layers_with_options(mods_dir, folder, selected) {
+        for layer in crate::meta::mod_layers_with_options(mods_dir, mod_paths.rel(folder), selected)
+        {
             walk(&layer, &layer, folder, &mut files, 0)?;
         }
     }
@@ -64,6 +66,7 @@ pub fn scan_conflicts(
 /// without re-walking every mod per file.
 pub fn providers_map(
     mods_dir: &Path,
+    mod_paths: &crate::layout::ModPaths,
     resolved: &[String],
     spec: &crate::games::GameSpec,
     options: &HashMap<String, HashMap<String, String>>,
@@ -72,7 +75,8 @@ pub fn providers_map(
     let empty = HashMap::new();
     for folder in resolved {
         let selected = options.get(folder).unwrap_or(&empty);
-        for layer in crate::meta::mod_layers_with_options(mods_dir, folder, selected) {
+        for layer in crate::meta::mod_layers_with_options(mods_dir, mod_paths.rel(folder), selected)
+        {
             walk(&layer, &layer, folder, &mut files, 0)?;
         }
     }
@@ -106,6 +110,7 @@ pub struct PathProviders {
 /// Returns `None` when no mod provides it (the file comes from the base game).
 pub fn providers_for_path(
     mods_dir: &Path,
+    mod_paths: &crate::layout::ModPaths,
     resolved: &[String],
     rel: &str,
     spec: &crate::games::GameSpec,
@@ -116,7 +121,8 @@ pub fn providers_for_path(
     let empty = HashMap::new();
     for folder in resolved {
         let selected = options.get(folder).unwrap_or(&empty);
-        for layer in crate::meta::mod_layers_with_options(mods_dir, folder, selected) {
+        for layer in crate::meta::mod_layers_with_options(mods_dir, mod_paths.rel(folder), selected)
+        {
             walk_path(&layer, &layer, folder, &rel, &mut found, 0)?;
         }
     }

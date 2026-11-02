@@ -331,6 +331,11 @@ pub enum CtlCommand {
         folder: String,
         #[arg(long, help = "Visible display name")]
         name: Option<String>,
+        #[arg(
+            long,
+            help = "Category from mods/.samt.toml (defaults to default_category)"
+        )]
+        category: Option<String>,
     },
     #[command(about = "Generate a mod.toml metadata template in a mod folder")]
     Init {
@@ -340,6 +345,11 @@ pub enum CtlCommand {
             help = "Also create the content/, guides/ and screenshots/ directory skeleton"
         )]
         skeleton: bool,
+        #[arg(
+            long,
+            help = "Category from mods/.samt.toml (defaults to default_category)"
+        )]
+        category: Option<String>,
     },
     #[command(about = "Remove a mod")]
     Remove {
@@ -468,6 +478,11 @@ pub enum CtlCommand {
     Modloader {
         #[command(subcommand)]
         action: ModloaderAction,
+    },
+    #[command(about = "Inspect the mods directory layout (.samt.toml categories)")]
+    Mods {
+        #[command(subcommand)]
+        action: ModsAction,
     },
     #[command(about = "View/manage the active profile's user data (saves, tracks, screenshots)")]
     Data {
@@ -641,6 +656,15 @@ pub enum ManifestAction {
 pub enum ModloaderAction {
     #[command(about = "Show the effective Mod Loader priorities for a profile")]
     Show {
+        #[arg(long, help = "Output as JSON")]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ModsAction {
+    #[command(about = "Show the parsed layout and the discovered mods")]
+    Layout {
         #[arg(long, help = "Output as JSON")]
         json: bool,
     },

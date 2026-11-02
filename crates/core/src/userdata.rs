@@ -154,9 +154,13 @@ pub fn remove(upper: &Path, subdir: &str, rel: &str) -> anyhow::Result<()> {
 
 /// True when an enabled mod provides `portablegta.asi` (so the game writes its
 /// user files inside the game directory, per profile).
-pub fn portablegta_installed(mods_dir: &Path, resolved: &[String]) -> bool {
+pub fn portablegta_installed(
+    mods_dir: &Path,
+    mod_paths: &crate::layout::ModPaths,
+    resolved: &[String],
+) -> bool {
     resolved.iter().any(|folder| {
-        crate::meta::mod_layers(mods_dir, folder)
+        crate::meta::mod_layers(mods_dir, mod_paths.rel(folder))
             .iter()
             .any(|layer| contains_file(layer, "portablegta.asi", 0))
     })
@@ -256,8 +260,16 @@ mod tests {
             "x",
         )
         .unwrap();
-        assert!(portablegta_installed(&dir, &["SomeMod".to_string()]));
-        assert!(!portablegta_installed(&dir, &[]));
+        assert!(portablegta_installed(
+            &dir,
+            &crate::layout::ModPaths::default(),
+            &["SomeMod".to_string()],
+        ));
+        assert!(!portablegta_installed(
+            &dir,
+            &crate::layout::ModPaths::default(),
+            &[]
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

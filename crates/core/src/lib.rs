@@ -10,6 +10,7 @@ pub mod constraints;
 pub mod db;
 pub mod games;
 pub mod launcher;
+pub mod layout;
 pub mod log;
 pub mod meta;
 pub mod modloader;

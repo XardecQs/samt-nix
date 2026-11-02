@@ -23,7 +23,7 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 # auto_discover = false
 # default_profile = "vanilla"   # used by `launch` when --profile is not given
 # dxvk_hud = "devinfo,fps,frametimes,submissions,compiler,version,api,pipelines,memory,gpuload,drawcalls"
-# mods_dir = "/path/to/mods"    # defaults to game_root/mods
+# mods_dir = "/path/to/mods"    # defaults to game_root/mods (flat or .samt.toml categories)
 #
 # Page-cache preloading before launch (speeds up startup on slow disks):
 #   "off"    = do not preload

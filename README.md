@@ -130,7 +130,7 @@ The tool expects this structure under `game_root` (defined in `config.toml`):
 ```
 game_root/
 ├── base/              # Clean, unmodded game files
-├── mods/              # One subdirectory per mod
+├── mods/              # Mods (flat legacy or categories via .samt.toml)
 ├── pfx/               # Wine prefix (auto-created by umu-launcher)
 └── run/
     ├── merged/        # Overlay mount point (single)
@@ -145,6 +145,29 @@ game_root/
 
 Each profile gets its own `upper/`, so savegames (e.g. with PortableGTA),
 game-written configs and logs never mix between profiles.
+
+### Mods directory layout
+
+`mods/` can stay flat (one subdirectory per mod, the historical layout) or opt
+into categories with a versioned `mods/.samt.toml`:
+
+```toml
+layout_version = 1
+categories = ["external", "own", "generated"]
+default_category = "external"
+generated_category = "generated"
+legacy_root = true
+ignore = ["tools", "reports"]
+```
+
+- `external/` and `own/` group third-party and own mods; only metadata is
+  tracked in the mods repo.
+- `generated/` is where `unmount --capture` / `ctl upper capture` write; it is
+  intended to be gitignored.
+- Direct children of `mods/` remain valid as legacy mods while `legacy_root`
+  is enabled, so a flat installation keeps working.
+- Without `.samt.toml` the layout is flat and behaves exactly as before.
+- Use `gta-mo ctl mods layout` to inspect the parsed layout and discovered mods.
 
 > **Upgrading from before 0.36.0:** the old shared `run/upper/` is moved to
 > `run/profiles/default/upper` on the first `gta-mo launch` (this is done at
@@ -528,8 +551,8 @@ gta-mo ctl list [-v] [--enabled|--disabled] [--json] [--profile <name>]
               [--tag <tag>] [--group <group>] [--author <author>] [--id <id>]
               [--search <text>] [--sort name|folder|author|order|mod_id|version|status] [--dir asc|desc]
               [--hidden|--only-hidden]
-gta-mo ctl add <folder> [--name <name>]
-gta-mo ctl init <folder> [--skeleton]       # create folder + mod.toml (and content/guides/screenshots) and register the mod
+gta-mo ctl add <folder|category/folder> [--name <name>] [--category <cat>]
+gta-mo ctl init <folder> [--skeleton] [--category <cat>]  # create folder + mod.toml (and content/guides/screenshots) and register the mod
 gta-mo ctl remove <id|folder>
 gta-mo ctl enable <id|folder> [--profile <name>]
 gta-mo ctl disable <id|folder> [--profile <name>]
@@ -539,6 +562,7 @@ gta-mo ctl rename <id|folder> <name> [--folder]
 gta-mo ctl info <id|folder> [-v] [--json] [--profile <name>]
 gta-mo ctl open <id|folder> [--url]
 gta-mo ctl discover                          # scan mods/ and refresh metadata + [dependencies]
+gta-mo ctl mods layout [--json]              # inspect .samt.toml categories and discovered mods
 gta-mo ctl clean                             # remove orphaned mod entries from the database
 gta-mo ctl dep add <mod> <dependency> [--optional]
 gta-mo ctl dep remove <mod> <dependency>
@@ -904,7 +928,7 @@ To develop it: `nix develop`, then `cargo run -p gta-mo-gui`.
 
 ## How it works
 
-1. Mods live as subdirectories under `mods/`
+1. Mods live as subdirectories under `mods/` (flat legacy or `external/own/generated` categories via `.samt.toml`)
 2. `schema.sql` defines the SQLite database that tracks mods, their
    dependencies, and per-profile enabled/load-order state
 3. The binary builds a `fuse-overlayfs` layer stack from the enabled mods of
@@ -925,7 +949,7 @@ This is useful to run an installer by hand (e.g. an MTA `.exe` under the same
 **Temporary profiles.** `gta-mo mount --temp` mounts the active profile's mods
 but writes to a throwaway `run/profiles/tmp-*/upper`. After the installer ran:
 
-- `gta-mo unmount --capture <mod>` packs the upper into `mods/<mod>/content/`
+- `gta-mo unmount --capture <mod>` packs the upper into `mods/generated/<mod>/content/`
   (plus a minimal `mod.toml` with `mount = ["content"]`) and registers it.
 - `gta-mo unmount --discard` throws the upper away.
 - `gta-mo unmount` keeps it, so it can be captured later with

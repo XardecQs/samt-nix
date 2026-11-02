@@ -21,11 +21,11 @@ pub fn ini_path(upper: &Path) -> PathBuf {
 /// selected options into account (their contents are layered too).
 pub fn detect_folders(
     mods_dir: &Path,
-    folder: &str,
+    rel_path: &str,
     selected: &HashMap<String, String>,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for layer in crate::meta::mod_layers_with_options(mods_dir, folder, selected) {
+    for layer in crate::meta::mod_layers_with_options(mods_dir, rel_path, selected) {
         let Ok(entries) = std::fs::read_dir(layer.join("modloader")) else {
             continue;
         };
@@ -48,11 +48,13 @@ pub fn entries_for(
     mods_dir: &Path,
     enabled: &[String],
     options_by_folder: &HashMap<String, HashMap<String, String>>,
+    mod_paths: &crate::layout::ModPaths,
 ) -> Vec<(String, i64)> {
     let mut entries: Vec<(String, i64)> = Vec::new();
     let empty = HashMap::new();
     for folder in enabled {
-        let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, folder) else {
+        let rel_path = mod_paths.rel(folder);
+        let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, rel_path) else {
             continue;
         };
         let Some(ml) = meta.modloader else { continue };
@@ -62,7 +64,7 @@ pub fn entries_for(
         let selected = options_by_folder.get(folder).unwrap_or(&empty);
         let folders = match ml.folders {
             Some(f) if !f.is_empty() => f,
-            _ => detect_folders(mods_dir, folder, selected),
+            _ => detect_folders(mods_dir, rel_path, selected),
         };
         // Mod Loader's PriorityLimit is 100; clamp so a manifest cannot emit an
         // out-of-range value into the generated `modloader.ini`.
@@ -316,7 +318,12 @@ _ignore
         .unwrap();
 
         let enabled = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let entries = entries_for(&dir, &enabled, &HashMap::new());
+        let entries = entries_for(
+            &dir,
+            &enabled,
+            &HashMap::new(),
+            &crate::layout::ModPaths::default(),
+        );
         assert_eq!(
             entries,
             vec![("Low".to_string(), 1), ("Shared".to_string(), 100)]

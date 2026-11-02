@@ -520,6 +520,7 @@ mod tests {
             .map(|&(id, folder, enabled, order)| ModEntry {
                 id,
                 folder_name: folder.to_string(),
+                rel_path: folder.to_string(),
                 name: folder.to_string(),
                 enabled,
                 load_order: order,

@@ -26,7 +26,7 @@ let
     # Directory layout expected under game_root:
     #   game_root/
     #   ├── base/     — Clean, unmodded game files
-    #   ├── mods/     — One subdirectory per mod
+    #   ├── mods/     — Mods (flat legacy or .samt.toml categories)
     #   ├── pfx/      — Wine prefix (auto-created by umu-launcher)
     #   └── run/
     #       ├── merged/             — Overlay mount point

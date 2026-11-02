@@ -12,10 +12,24 @@ pub struct ProfileView {
     pub played_seconds: i64,
 }
 
+/// Human-readable label for a mod origin (`external`, `own`, `generated`, `legacy`).
+pub fn origin_label(origin: &str) -> &'static str {
+    match origin {
+        "external" => "Externo",
+        "own" => "Propio",
+        "generated" => "Generado",
+        _ => "Legacy",
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModView {
     pub id: i64,
     pub folder: String,
+    /// Path relative to the mods directory (`external/foo`).
+    pub rel_path: String,
+    /// `external`, `own`, `generated` or `legacy`.
+    pub origin: String,
     pub name: String,
     pub enabled: bool,
     pub order: i64,
@@ -73,6 +87,9 @@ pub struct Snapshot {
     pub active_slug: String,
     pub all_tags: Vec<String>,
     pub all_groups: Vec<String>,
+    pub all_origins: Vec<String>,
+    /// Logical folder name -> relative path on disk.
+    pub mod_paths: gta_mo_core::layout::ModPaths,
     /// Effective overlay priority order of the enabled mods (top first).
     pub resolved: Vec<String>,
     /// (group name, members in the active profile).
@@ -157,6 +174,7 @@ pub struct Filters {
     pub tag: Option<String>,
     pub group: Option<String>,
     pub author: Option<String>,
+    pub origin: Option<String>,
     pub status: StatusFilter,
     pub sort: SortField,
     pub desc: bool,
@@ -171,6 +189,7 @@ impl Default for Filters {
             tag: None,
             group: None,
             author: None,
+            origin: None,
             status: StatusFilter::All,
             sort: SortField::Order,
             desc: true,
@@ -204,6 +223,11 @@ pub fn filter_and_sort(mods: &mut Vec<ModView>, filters: &Filters) {
         }
         if let Some(author) = &filters.author {
             if !m.meta.author.iter().any(|a| a.eq_ignore_ascii_case(author)) {
+                return false;
+            }
+        }
+        if let Some(origin) = &filters.origin {
+            if !m.origin.eq_ignore_ascii_case(origin) {
                 return false;
             }
         }
@@ -249,6 +273,8 @@ mod tests {
         ModView {
             id,
             folder: folder.into(),
+            rel_path: folder.into(),
+            origin: "legacy".into(),
             name: name.into(),
             enabled,
             order,
@@ -295,6 +321,24 @@ mod tests {
         };
         filter_and_sort(&mut mods, &f);
         assert_eq!(mods.len(), 1);
+    }
+
+    #[test]
+    fn filters_by_origin() {
+        let mut mods = vec![
+            mod_view(1, "Alpha", "alpha", true, 10),
+            mod_view(2, "Beta", "beta", true, 20),
+        ];
+        mods[0].origin = "external".into();
+        mods[1].origin = "own".into();
+        let f = Filters {
+            origin: Some("own".into()),
+            ..Default::default()
+        };
+        filter_and_sort(&mut mods, &f);
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].id, 2);
+        assert_eq!(origin_label("generated"), "Generado");
     }
 
     #[test]

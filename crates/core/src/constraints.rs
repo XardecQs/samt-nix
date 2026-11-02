@@ -50,6 +50,7 @@ fn resolve_ref(
 /// by the *selected* choices are evaluated too.
 pub fn check(
     mods_dir: &Path,
+    mod_paths: &crate::layout::ModPaths,
     all_folders: &[String],
     enabled: &[String],
     options: &HashMap<String, HashMap<String, String>>,
@@ -59,7 +60,7 @@ pub fn check(
     // id -> folder, so references can use the stable id.
     let mut by_id: HashMap<String, String> = HashMap::new();
     for folder in all_folders {
-        if let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, folder) {
+        if let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, mod_paths.rel(folder)) {
             if let Some(id) = meta.id {
                 by_id.insert(crate::meta::normalize_mod_id(&id), folder.clone());
             }
@@ -71,7 +72,7 @@ pub fn check(
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
     for folder in enabled {
-        let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, folder) else {
+        let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, mod_paths.rel(folder)) else {
             continue;
         };
         if let Some(family) = &meta.family {
@@ -104,7 +105,7 @@ pub fn check(
         // Constraints declared by the *selected* options.
         if let Some(selected) = options.get(folder) {
             if !selected.is_empty() {
-                let option_groups = crate::meta::mod_option_groups(mods_dir, folder);
+                let option_groups = crate::meta::mod_option_groups(mods_dir, mod_paths.rel(folder));
                 for (group, value) in selected {
                     let Some(g) = option_groups.iter().find(|g| &g.group == group) else {
                         violations.push(Violation {
@@ -253,6 +254,7 @@ mod tests {
         let all = vec!["A".to_string(), "B".to_string(), "C".to_string()];
         let v = check(
             &dir,
+            &crate::layout::ModPaths::default(),
             &all,
             &["A".to_string(), "B".to_string()],
             &HashMap::new(),
@@ -261,6 +263,7 @@ mod tests {
 
         let v = check(
             &dir,
+            &crate::layout::ModPaths::default(),
             &all,
             &["A".to_string(), "C".to_string()],
             &HashMap::new(),
@@ -270,7 +273,14 @@ mod tests {
         assert!(v[0].message.contains("A") && v[0].message.contains("C"));
 
         // Not co-enabled -> no violation.
-        assert!(check(&dir, &all, &["A".to_string()], &HashMap::new()).is_empty());
+        assert!(check(
+            &dir,
+            &crate::layout::ModPaths::default(),
+            &all,
+            &["A".to_string()],
+            &HashMap::new()
+        )
+        .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -309,14 +319,26 @@ group = "edition"
         let mut sel = HashMap::new();
         sel.insert("edition".to_string(), "a".to_string());
         let opts: HashMap<String, HashMap<String, String>> = [("M".to_string(), sel)].into();
-        let v = check(&dir, &all, &enabled, &opts);
+        let v = check(
+            &dir,
+            &crate::layout::ModPaths::default(),
+            &all,
+            &enabled,
+            &opts,
+        );
         assert_eq!(v.iter().filter(|x| x.kind == Kind::Conflict).count(), 1);
 
         // Edition "b" needs "Dep" (disabled) -> Requires violation.
         let mut sel = HashMap::new();
         sel.insert("edition".to_string(), "b".to_string());
         let opts: HashMap<String, HashMap<String, String>> = [("M".to_string(), sel)].into();
-        let v = check(&dir, &all, &enabled, &opts);
+        let v = check(
+            &dir,
+            &crate::layout::ModPaths::default(),
+            &all,
+            &enabled,
+            &opts,
+        );
         assert_eq!(v.iter().filter(|x| x.kind == Kind::Requires).count(), 1);
         assert_eq!(v.iter().filter(|x| x.kind == Kind::Conflict).count(), 0);
 
@@ -324,7 +346,13 @@ group = "edition"
         let mut sel = HashMap::new();
         sel.insert("edition".to_string(), "nope".to_string());
         let opts: HashMap<String, HashMap<String, String>> = [("M".to_string(), sel)].into();
-        let v = check(&dir, &all, &enabled, &opts);
+        let v = check(
+            &dir,
+            &crate::layout::ModPaths::default(),
+            &all,
+            &enabled,
+            &opts,
+        );
         assert_eq!(v.iter().filter(|x| x.kind == Kind::Option).count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -345,12 +373,19 @@ group = "edition"
 
         let all = vec!["Needs".to_string(), "Alt1".to_string(), "Alt2".to_string()];
         // Nothing enabled -> violation.
-        let v = check(&dir, &all, &["Needs".to_string()], &HashMap::new());
+        let v = check(
+            &dir,
+            &crate::layout::ModPaths::default(),
+            &all,
+            &["Needs".to_string()],
+            &HashMap::new(),
+        );
         assert_eq!(v.iter().filter(|x| x.kind == Kind::Requires).count(), 1);
 
         // Any one alternative satisfies it.
         assert!(check(
             &dir,
+            &crate::layout::ModPaths::default(),
             &all,
             &["Needs".to_string(), "Alt1".to_string()],
             &HashMap::new()
@@ -358,6 +393,7 @@ group = "edition"
         .is_empty());
         assert!(check(
             &dir,
+            &crate::layout::ModPaths::default(),
             &all,
             &["Needs".to_string(), "Alt2".to_string()],
             &HashMap::new()

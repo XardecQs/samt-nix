@@ -156,14 +156,14 @@ impl Backend {
         self.game
     }
 
-    pub fn cover_path(&self, folder: &str, cover: &str) -> Option<PathBuf> {
+    pub fn cover_path(&self, rel_path: &str, cover: &str) -> Option<PathBuf> {
         // `cover` also carries screenshot paths (both go through load_image).
         // Reject absolute paths and `..` so a malicious mod.toml cannot make the
         // GUI read files outside the mod folder.
         if !gta_mo_core::meta::valid_relative_path(cover) {
             return None;
         }
-        self.mods_dir.as_ref().map(|d| d.join(folder).join(cover))
+        self.mods_dir.as_ref().map(|d| d.join(rel_path).join(cover))
     }
 
     /// Resolves the dependency graph of a mod within the active profile.
@@ -245,17 +245,23 @@ impl Backend {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mods = db::load_all_mods_for_profile(conn, profile.id)
-            .map_err(|e| e.to_string())?
+        let raw_mods =
+            db::load_all_mods_for_profile(conn, profile.id).map_err(|e| e.to_string())?;
+        let mut mod_paths = gta_mo_core::layout::ModPaths::new();
+        for m in &raw_mods {
+            mod_paths.insert(&m.folder_name, &m.rel_path);
+        }
+        let mods = raw_mods
             .into_iter()
             .map(|m| -> Result<ModView, String> {
                 let folder = m.folder_name.clone();
+                let rel_path = m.rel_path.clone();
                 let cached = db::load_mod_meta(conn, m.id).map_err(|e| e.to_string())?;
                 // mod.toml es la fuente canónica: léelo en vivo y funde sus
                 // campos con la caché (los ausentes caen a lo cacheado), así las
                 // ediciones manuales (nombre, cover, tags…) se reflejan al
                 // instante sin esperar un discover.
-                let live = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &folder)
+                let live = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &rel_path)
                     .ok()
                     .flatten();
                 let meta = match live {
@@ -271,13 +277,16 @@ impl Backend {
                     .into_iter()
                     .map(|g| g.name)
                     .collect();
-                let screenshots = gta_mo_core::meta::mod_screenshots(&paths.mods_dir, &folder);
-                let has_manifest = paths.mods_dir.join(&folder).join("mod.toml").is_file();
-                let option_groups = gta_mo_core::meta::mod_option_groups(&paths.mods_dir, &folder);
+                let screenshots = gta_mo_core::meta::mod_screenshots(&paths.mods_dir, &rel_path);
+                let has_manifest = paths.mods_dir.join(&rel_path).join("mod.toml").is_file();
+                let option_groups =
+                    gta_mo_core::meta::mod_option_groups(&paths.mods_dir, &rel_path);
                 let selected_options = mod_options_by_id.get(&m.id).cloned().unwrap_or_default();
                 Ok(ModView {
                     id: m.id,
                     folder,
+                    rel_path,
+                    origin: gta_mo_core::layout::origin_of(&m.rel_path).to_string(),
                     name,
                     enabled: m.enabled,
                     order: m.load_order,
@@ -320,6 +329,10 @@ impl Backend {
         }
         all_tags.sort();
 
+        let mut all_origins: Vec<String> = mods.iter().map(|m| m.origin.clone()).collect();
+        all_origins.sort();
+        all_origins.dedup();
+
         let all_groups = db::list_groups(conn)
             .map_err(|e| e.to_string())?
             .into_iter()
@@ -355,7 +368,7 @@ impl Backend {
             // actually mounts (which also resolves defaults).
             let effective = gta_mo_core::meta::fill_option_defaults(
                 &paths.mods_dir,
-                &m.folder,
+                &m.rel_path,
                 &m.selected_options,
             );
             if !effective.is_empty() {
@@ -405,7 +418,7 @@ impl Backend {
                 }
             }
             // `requires_any` is not cached: read it from the live manifest.
-            if let Ok(Some(live)) = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder) {
+            if let Ok(Some(live)) = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.rel_path) {
                 for r in &live.requires_any {
                     if let Some(to) = resolve_ref(r) {
                         if to != m.id {
@@ -441,6 +454,8 @@ impl Backend {
             active_slug: profile.slug,
             all_tags,
             all_groups,
+            all_origins,
+            mod_paths,
             resolved,
             group_counts,
             dep_status,
@@ -495,7 +510,9 @@ impl Backend {
         let portablegta = self
             .mods_dir
             .as_ref()
-            .map(|md| gta_mo_core::userdata::portablegta_installed(md, &snap.resolved))
+            .map(|md| {
+                gta_mo_core::userdata::portablegta_installed(md, &snap.mod_paths, &snap.resolved)
+            })
             .unwrap_or(false);
         UserdataPayload {
             entries,
@@ -512,28 +529,30 @@ impl Backend {
         gen: u64,
         mods_dir: PathBuf,
         resolved: Vec<String>,
+        mod_paths: gta_mo_core::layout::ModPaths,
         spec: &'static gta_mo_core::games::GameSpec,
         options: HashMap<String, HashMap<String, String>>,
         tx: Sender<GuiEvent>,
     ) {
         thread::spawn(move || {
-            let list = match conflicts::scan_conflicts(&mods_dir, &resolved, spec, &options) {
-                Ok(cs) => cs
-                    .into_iter()
-                    .map(|c| ConflictView {
-                        path: c.path,
-                        severity: match c.severity {
-                            conflicts::Severity::High => "alta",
-                            conflicts::Severity::Medium => "media",
-                            conflicts::Severity::Info => "info",
-                        }
-                        .to_string(),
-                        providers: c.providers,
-                        duplicate: c.duplicate,
-                    })
-                    .collect(),
-                Err(_) => Vec::new(),
-            };
+            let list =
+                match conflicts::scan_conflicts(&mods_dir, &mod_paths, &resolved, spec, &options) {
+                    Ok(cs) => cs
+                        .into_iter()
+                        .map(|c| ConflictView {
+                            path: c.path,
+                            severity: match c.severity {
+                                conflicts::Severity::High => "alta",
+                                conflicts::Severity::Medium => "media",
+                                conflicts::Severity::Info => "info",
+                            }
+                            .to_string(),
+                            providers: c.providers,
+                            duplicate: c.duplicate,
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
             let _ = tx.send(GuiEvent::ConflictScan(gen, list));
         });
     }
@@ -547,6 +566,7 @@ impl Backend {
         user_data_dir: Option<&'static str>,
         mods_dir: PathBuf,
         resolved: Vec<String>,
+        mod_paths: gta_mo_core::layout::ModPaths,
         spec: &'static gta_mo_core::games::GameSpec,
         options: HashMap<String, HashMap<String, String>>,
         tx: Sender<GuiEvent>,
@@ -554,7 +574,8 @@ impl Backend {
         thread::spawn(move || {
             let scan = upper::scan(&upper_dir, user_data_dir);
             let providers =
-                conflicts::providers_map(&mods_dir, &resolved, spec, &options).unwrap_or_default();
+                conflicts::providers_map(&mods_dir, &mod_paths, &resolved, spec, &options)
+                    .unwrap_or_default();
             let rows: Vec<UpperView> = scan
                 .files
                 .into_iter()

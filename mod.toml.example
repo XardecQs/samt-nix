@@ -1,6 +1,7 @@
 # GTA Mod Organizer manifest
 #
-# Copy this file as `mod.toml` inside a mod folder under `mods/` and fill it in.
+# Copy this file as `mod.toml` inside a mod folder under `mods/` (flat legacy,
+# `mods/external/<slug>/` or `mods/own/<slug>/` with `.samt.toml`) and fill it in.
 # All fields are optional; `mount` and `[dependencies]` are the only ones with
 # functional impact. You can also generate it per-mod with: gta-mo ctl init <folder>
 

@@ -248,7 +248,7 @@ fn fresh_database_bootstraps_to_latest_schema() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     let profile: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM profiles WHERE slug = 'default'",
@@ -1272,4 +1272,71 @@ fn option_set_and_list_persist_per_profile() {
     t.run_ok(&["ctl", "option", "unset", "m1", "variant"]);
     let v = json(&t.run_ok(&["ctl", "option", "list", "m1", "--json"]));
     assert!(v[0]["selected"].is_null());
+}
+
+#[test]
+fn categories_layout_discovery_and_capture() {
+    let root = std::env::temp_dir().join(format!("gta-mo-it-catroot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("mods/external/foo")).unwrap();
+    std::fs::write(
+        root.join("mods/.samt.toml"),
+        "layout_version = 1\ncategories = [\"external\", \"own\", \"generated\"]\ndefault_category = \"external\"\ngenerated_category = \"generated\"\nlegacy_root = true\nignore = [\"tools\"]\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("mods/external/foo/mod.toml"), "name = \"Foo\"\n").unwrap();
+
+    let t = TempDb::new("categories").with_config(&root);
+
+    let layout = json(&t.run_ok(&["ctl", "mods", "layout", "--json"]));
+    assert_eq!(layout["flat"], false);
+    assert_eq!(layout["mods"][0]["rel_path"], "external/foo");
+    assert_eq!(layout["mods"][0]["origin"], "external");
+
+    t.run_ok(&["ctl", "discover"]);
+    let list = json(&t.run_ok(&["ctl", "list", "--json"]));
+    let foo = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["folder"] == "foo")
+        .expect("foo registrado");
+    assert_eq!(foo["rel_path"], "external/foo");
+    assert_eq!(foo["origin"], "external");
+
+    // Both the logical name and the relative path resolve the same mod.
+    t.run_ok(&["ctl", "enable", "external/foo"]);
+    let info = json(&t.run_ok(&["ctl", "info", "foo", "--json"]));
+    assert_eq!(info["folder"], "foo");
+    assert_eq!(info["rel_path"], "external/foo");
+
+    // New mods use the requested category.
+    t.run_ok(&["ctl", "init", "bar", "--category", "own"]);
+    assert!(root.join("mods/own/bar/mod.toml").is_file());
+
+    // Captures go to the generated category, even when it did not exist yet.
+    let source = root.join("capture-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("d3d9.dll"), b"fake").unwrap();
+    t.run_ok(&[
+        "ctl",
+        "upper",
+        "capture",
+        "cap",
+        "--from",
+        source.to_str().unwrap(),
+    ]);
+    assert!(root.join("mods/generated/cap/content/d3d9.dll").is_file());
+    assert!(root.join("mods/generated/cap/mod.toml").is_file());
+
+    let list = json(&t.run_ok(&["ctl", "list", "--json"]));
+    let cap = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["folder"] == "cap")
+        .expect("captura registrada");
+    assert_eq!(cap["origin"], "generated");
+
+    let _ = std::fs::remove_dir_all(&root);
 }

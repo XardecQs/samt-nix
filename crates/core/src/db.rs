@@ -7,6 +7,8 @@ use std::path::Path;
 pub struct ModEntry {
     pub id: i64,
     pub folder_name: String,
+    /// Path relative to the mods directory (`external/foo`, or `foo` for legacy).
+    pub rel_path: String,
     pub name: String,
     pub enabled: bool,
     pub load_order: i64,
@@ -31,6 +33,8 @@ impl ModEntry {
 pub struct ModIdentity {
     pub id: i64,
     pub folder_name: String,
+    /// Path relative to the mods directory (`external/foo`, or `foo` for legacy).
+    pub rel_path: String,
     pub name: String,
 }
 
@@ -495,13 +499,27 @@ pub fn insert_profile(
 }
 
 /// Inserts a mod without touching profile states (used by `ctl import`).
-pub fn insert_mod(conn: &Connection, folder: &str, name: &str) -> anyhow::Result<i64> {
-    if !crate::meta::overlay_safe_folder(folder) {
-        anyhow::bail!("Carpeta de mod inválida en el import: '{folder}' (contiene ',' o ':').");
+pub fn insert_mod(
+    conn: &Connection,
+    folder: &str,
+    rel_path: &str,
+    name: &str,
+) -> anyhow::Result<i64> {
+    if !crate::layout::valid_segment(folder) {
+        anyhow::bail!("Carpeta de mod inválida en el import: '{folder}'.");
+    }
+    if !crate::layout::valid_rel_path(rel_path) {
+        anyhow::bail!("Ruta de mod inválida en el import: '{rel_path}'.");
+    }
+    let components = rel_path.split('/').count();
+    if components != 1 && components != 2 {
+        anyhow::bail!(
+            "Ruta de mod no soportada en el import: '{rel_path}' (usa <mod> o <categoría>/<mod>)."
+        );
     }
     conn.execute(
-        "INSERT INTO mods (folder_name, name) VALUES (?1, ?2)",
-        params![folder, name],
+        "INSERT INTO mods (folder_name, rel_path, name) VALUES (?1, ?2, ?3)",
+        params![folder, rel_path, name],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -815,7 +833,7 @@ pub fn open_db(db_path: &Path) -> anyhow::Result<Connection> {
 }
 
 /// Current schema version. Every new migration step bumps it.
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// Applies any pending schema migration. The whole chain runs inside a single
 /// transaction: a failure rolls everything back and `user_version` is only
@@ -870,6 +888,9 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         }
         if version < 14 {
             migrate_to_v14(conn)?;
+        }
+        if version < 15 {
+            migrate_to_v15(conn)?;
         }
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(())
@@ -1006,6 +1027,30 @@ fn migrate_to_v13(conn: &Connection) -> anyhow::Result<()> {
         log::info("Migrando schema: ALTER TABLE mods ADD COLUMN urls TEXT");
         conn.execute("ALTER TABLE mods ADD COLUMN urls TEXT", [])?;
     }
+    Ok(())
+}
+
+/// Adds the mods' path relative to the mods directory (`external/foo`), keeping
+/// `folder_name` as the logical basename key. Existing rows are backfilled from
+/// `folder_name`, so a flat installation keeps working unchanged.
+fn migrate_to_v15(conn: &Connection) -> anyhow::Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('mods')")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    if !cols.iter().any(|c| c.as_str() == "rel_path") {
+        log::info("Migrando schema: ALTER TABLE mods ADD COLUMN rel_path TEXT");
+        conn.execute("ALTER TABLE mods ADD COLUMN rel_path TEXT", [])?;
+    }
+    conn.execute(
+        "UPDATE mods SET rel_path = folder_name
+         WHERE rel_path IS NULL OR rel_path = ''",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_mods_rel_path ON mods(rel_path)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1244,13 +1289,15 @@ fn bootstrap_to_v1(conn: &Connection) -> anyhow::Result<()> {
 }
 
 pub fn load_all_mods(conn: &Connection) -> anyhow::Result<Vec<ModIdentity>> {
-    let mut stmt = conn.prepare("SELECT id, folder_name, name FROM mods")?;
+    let mut stmt =
+        conn.prepare("SELECT id, folder_name, COALESCE(rel_path, folder_name), name FROM mods")?;
     let mods = stmt
         .query_map([], |row| {
             Ok(ModIdentity {
                 id: row.get(0)?,
                 folder_name: row.get(1)?,
-                name: row.get(2)?,
+                rel_path: row.get(2)?,
+                name: row.get(3)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1262,7 +1309,7 @@ pub fn load_all_mods_for_profile(
     profile_id: i64,
 ) -> anyhow::Result<Vec<ModEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.folder_name, m.name,
+        "SELECT m.id, m.folder_name, COALESCE(m.rel_path, m.folder_name), m.name,
                 COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0),
                 COALESCE(m.hidden, 0), pm.hidden, pm.notes
          FROM mods m
@@ -1274,12 +1321,13 @@ pub fn load_all_mods_for_profile(
             Ok(ModEntry {
                 id: row.get(0)?,
                 folder_name: row.get(1)?,
-                name: row.get(2)?,
-                enabled: row.get::<_, i64>(3)? != 0,
-                load_order: row.get(4)?,
-                hidden_global: row.get::<_, i64>(5)? != 0,
-                hidden_profile: row.get::<_, Option<i64>>(6)?.map(|v| v != 0),
-                notes: row.get(7)?,
+                rel_path: row.get(2)?,
+                name: row.get(3)?,
+                enabled: row.get::<_, i64>(4)? != 0,
+                load_order: row.get(5)?,
+                hidden_global: row.get::<_, i64>(6)? != 0,
+                hidden_profile: row.get::<_, Option<i64>>(7)?.map(|v| v != 0),
+                notes: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1318,7 +1366,7 @@ pub fn load_live_dependencies(
     let cached = load_dependencies(conn)?;
     let mut out: HashMap<i64, Vec<DepRef>> = HashMap::new();
     for m in load_all_mods(conn)? {
-        match crate::meta::read_mod_meta(mods_dir, &m.folder_name) {
+        match crate::meta::read_mod_meta(mods_dir, &m.rel_path) {
             // Manifest present: its `[dependencies]` is authoritative (an absent
             // section means "no dependencies").
             Ok(Some(meta)) => {
@@ -1423,11 +1471,12 @@ pub fn mod_exists(conn: &Connection, folder_name: &str) -> anyhow::Result<bool> 
 pub fn add_mod_to_all_profiles(
     conn: &Connection,
     folder_name: &str,
+    rel_path: &str,
     display_name: &str,
 ) -> anyhow::Result<i64> {
     conn.execute(
-        "INSERT INTO mods (folder_name, name) VALUES (?1, ?2)",
-        params![folder_name, display_name],
+        "INSERT INTO mods (folder_name, rel_path, name) VALUES (?1, ?2, ?3)",
+        params![folder_name, rel_path, display_name],
     )?;
     let mod_id = conn.last_insert_rowid();
 
@@ -1720,33 +1769,65 @@ pub fn set_mod_name(conn: &Connection, id: i64, name: &str) -> anyhow::Result<()
     Ok(())
 }
 
-pub fn set_mod_folder(conn: &Connection, id: i64, folder: &str) -> anyhow::Result<()> {
+pub fn set_mod_location(
+    conn: &Connection,
+    id: i64,
+    folder: &str,
+    rel_path: &str,
+) -> anyhow::Result<()> {
     conn.execute(
-        "UPDATE mods SET folder_name = ?1 WHERE id = ?2",
-        params![folder, id],
+        "UPDATE mods SET folder_name = ?1, rel_path = ?2 WHERE id = ?3",
+        params![folder, rel_path, id],
     )?;
     Ok(())
 }
 
 pub fn get_mod_by_id(conn: &Connection, id: i64) -> anyhow::Result<Option<ModIdentity>> {
-    let mut stmt = conn.prepare("SELECT id, folder_name, name FROM mods WHERE id = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, folder_name, COALESCE(rel_path, folder_name), name
+         FROM mods WHERE id = ?1",
+    )?;
     let mut rows = stmt.query_map(params![id], |row| {
         Ok(ModIdentity {
             id: row.get(0)?,
             folder_name: row.get(1)?,
-            name: row.get(2)?,
+            rel_path: row.get(2)?,
+            name: row.get(3)?,
         })
     })?;
     Ok(rows.next().transpose()?)
 }
 
 pub fn get_mod_by_folder(conn: &Connection, folder: &str) -> anyhow::Result<Option<ModIdentity>> {
-    let mut stmt = conn.prepare("SELECT id, folder_name, name FROM mods WHERE folder_name = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, folder_name, COALESCE(rel_path, folder_name), name
+         FROM mods WHERE folder_name = ?1",
+    )?;
     let mut rows = stmt.query_map(params![folder], |row| {
         Ok(ModIdentity {
             id: row.get(0)?,
             folder_name: row.get(1)?,
-            name: row.get(2)?,
+            rel_path: row.get(2)?,
+            name: row.get(3)?,
+        })
+    })?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn get_mod_by_rel_path(
+    conn: &Connection,
+    rel_path: &str,
+) -> anyhow::Result<Option<ModIdentity>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, folder_name, COALESCE(rel_path, folder_name), name
+         FROM mods WHERE rel_path = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![rel_path], |row| {
+        Ok(ModIdentity {
+            id: row.get(0)?,
+            folder_name: row.get(1)?,
+            rel_path: row.get(2)?,
+            name: row.get(3)?,
         })
     })?;
     Ok(rows.next().transpose()?)
@@ -1922,9 +2003,15 @@ pub fn resolve_mod_ident(conn: &Connection, ident: &str) -> anyhow::Result<i64> 
         if let Some(m) = get_mod_by_folder(conn, ident)? {
             return Ok(m.id);
         }
+        if let Some(m) = get_mod_by_rel_path(conn, ident)? {
+            return Ok(m.id);
+        }
         anyhow::bail!("Mod con id={} no encontrado.", id);
     }
 
+    if let Some(m) = get_mod_by_rel_path(conn, ident)? {
+        return Ok(m.id);
+    }
     let m = get_mod_by_folder(conn, ident)?;
     m.map(|m| m.id)
         .ok_or_else(|| anyhow::anyhow!("Mod '{}' no encontrado.", ident))
@@ -1976,7 +2063,7 @@ pub fn get_dependencies_of(
     mod_id: i64,
 ) -> anyhow::Result<Vec<(ModEntry, bool)>> {
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.folder_name, m.name,
+        "SELECT m.id, m.folder_name, COALESCE(m.rel_path, m.folder_name), m.name,
                 COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0), d.required,
                 COALESCE(m.hidden, 0), pm.hidden, pm.notes
          FROM mod_dependencies d
@@ -1989,14 +2076,15 @@ pub fn get_dependencies_of(
             ModEntry {
                 id: row.get(0)?,
                 folder_name: row.get(1)?,
-                name: row.get(2)?,
-                enabled: row.get::<_, i64>(3)? != 0,
-                load_order: row.get(4)?,
-                hidden_global: row.get::<_, i64>(6)? != 0,
-                hidden_profile: row.get::<_, Option<i64>>(7)?.map(|v| v != 0),
-                notes: row.get(8)?,
+                rel_path: row.get(2)?,
+                name: row.get(3)?,
+                enabled: row.get::<_, i64>(4)? != 0,
+                load_order: row.get(5)?,
+                hidden_global: row.get::<_, i64>(7)? != 0,
+                hidden_profile: row.get::<_, Option<i64>>(8)?.map(|v| v != 0),
+                notes: row.get(9)?,
             },
-            row.get::<_, i64>(5)? != 0,
+            row.get::<_, i64>(6)? != 0,
         ))
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -2008,7 +2096,7 @@ pub fn get_dependents_of(
     mod_id: i64,
 ) -> anyhow::Result<Vec<ModEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.folder_name, m.name,
+        "SELECT m.id, m.folder_name, COALESCE(m.rel_path, m.folder_name), m.name,
                 COALESCE(pm.enabled, 0), COALESCE(pm.load_order, 0),
                 COALESCE(m.hidden, 0), pm.hidden, pm.notes
          FROM mod_dependencies d
@@ -2020,12 +2108,13 @@ pub fn get_dependents_of(
         Ok(ModEntry {
             id: row.get(0)?,
             folder_name: row.get(1)?,
-            name: row.get(2)?,
-            enabled: row.get::<_, i64>(3)? != 0,
-            load_order: row.get(4)?,
-            hidden_global: row.get::<_, i64>(5)? != 0,
-            hidden_profile: row.get::<_, Option<i64>>(6)?.map(|v| v != 0),
-            notes: row.get(7)?,
+            rel_path: row.get(2)?,
+            name: row.get(3)?,
+            enabled: row.get::<_, i64>(4)? != 0,
+            load_order: row.get(5)?,
+            hidden_global: row.get::<_, i64>(6)? != 0,
+            hidden_profile: row.get::<_, Option<i64>>(7)?.map(|v| v != 0),
+            notes: row.get(8)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -2172,32 +2261,23 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
         ));
     }
 
-    let mut disk_folders: Vec<String> = Vec::new();
-    // If the directory exists but cannot be read (permissions, an unmounted
-    // filesystem, I/O error) fail loudly instead of treating it as empty and
-    // disabling every mod in every profile.
-    let entries = std::fs::read_dir(mods_dir).map_err(|e| {
+    // Fail loudly when the directory exists but cannot be read (permissions,
+    // an unmounted filesystem, I/O error) instead of treating it as empty and
+    // disabling every mod in every profile. `layout::scan` performs the same
+    // check for category directories.
+    std::fs::read_dir(mods_dir).map_err(|e| {
         anyhow::anyhow!(
             "No se pudo leer el directorio de mods '{}': {e}",
             mods_dir.display()
         )
     })?;
-    for entry in entries.flatten() {
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
-            if !crate::meta::overlay_safe_folder(&name) {
-                log::warn(format!(
-                    "    [!] Carpeta ignorada '{name}': contiene ',' o ':' y no se puede \
-                     usar como capa de overlay"
-                ));
-                continue;
-            }
-            disk_folders.push(name);
-        }
+
+    let layout = crate::layout::ModsLayout::load(mods_dir)?;
+    let scan = layout.scan(mods_dir)?;
+    for warning in &scan.warnings {
+        log::warn(format!("    [!] {warning}"));
     }
+    let disk = scan.mods;
 
     // All database changes (registration, metadata, dependency sync, orphan
     // disabling) run inside a single transaction, so a failure midway rolls
@@ -2209,24 +2289,29 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
         let mut orphan_count = 0usize;
 
         let all_mods = load_all_mods(conn)?;
-        let db_folders: Vec<String> = all_mods.iter().map(|m| m.folder_name.clone()).collect();
-        let db_folders_set: HashSet<&String> = db_folders.iter().collect();
-        let mods_by_folder: HashMap<&str, &ModIdentity> = all_mods
+        let mut by_rel: HashMap<String, ModIdentity> = all_mods
             .iter()
-            .map(|m| (m.folder_name.as_str(), m))
+            .map(|m| (m.rel_path.clone(), m.clone()))
             .collect();
-
-        let mut metas: Vec<Option<crate::meta::ModMeta>> = Vec::with_capacity(disk_folders.len());
+        let mut by_folder: HashMap<String, ModIdentity> = all_mods
+            .iter()
+            .map(|m| (m.folder_name.clone(), m.clone()))
+            .collect();
+        let mut seen_ids: HashSet<i64> = HashSet::new();
+        let mut metas: Vec<Option<crate::meta::ModMeta>> = Vec::with_capacity(disk.len());
 
         // Phase 1: register mods and store their metadata (id, tags, mount...).
-        for folder in &disk_folders {
+        for loc in &disk {
+            let folder = loc.folder_name.as_str();
+            let rel_path = loc.rel_path.as_str();
+
             // A malformed manifest must not wipe the cached metadata: keep
             // whatever was discovered before and skip this mod's dep sync.
-            let (meta, meta_error) = match crate::meta::read_mod_meta(mods_dir, folder) {
+            let (meta, meta_error) = match crate::meta::read_mod_meta(mods_dir, rel_path) {
                 Ok(meta) => (meta, false),
                 Err(e) => {
                     log::warn(format!(
-                        "    [!] {folder}: {e} (se conserva la metadata cacheada)"
+                        "    [!] {rel_path}: {e} (se conserva la metadata cacheada)"
                     ));
                     (None, true)
                 }
@@ -2236,11 +2321,11 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
                     for entry in mount {
                         if !crate::meta::valid_mount_entry(entry) {
                             log::warn(format!(
-                                "    [!] {folder}: 'mount' con entrada inválida '{entry}' (se ignora)"
+                                "    [!] {rel_path}: 'mount' con entrada inválida '{entry}' (se ignora)"
                             ));
-                        } else if !mods_dir.join(folder).join(entry).is_dir() {
+                        } else if !mods_dir.join(rel_path).join(entry).is_dir() {
                             log::warn(format!(
-                                "    [!] {folder}: 'mount' '{}' no existe en el disco",
+                                "    [!] {rel_path}: 'mount' '{}' no existe en el disco",
                                 entry
                             ));
                         }
@@ -2250,13 +2335,13 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
                     for c in components {
                         if c.name.as_deref().unwrap_or("").trim().is_empty() {
                             log::warn(format!(
-                                "    [!] {folder}: componente sin nombre; se ignora"
+                                "    [!] {rel_path}: componente sin nombre; se ignora"
                             ));
                         }
                         if let Some(p) = &c.path {
                             if !crate::meta::valid_mount_entry(p) {
                                 log::warn(format!(
-                                    "    [!] {folder}: componente '{}' con path inválido '{}'",
+                                    "    [!] {rel_path}: componente '{}' con path inválido '{}'",
                                     c.name.as_deref().unwrap_or("?"),
                                     p
                                 ));
@@ -2266,60 +2351,85 @@ pub fn discover_mods(conn: &Connection, mods_dir: &Path) -> anyhow::Result<(usiz
                 }
             }
 
-            if !db_folders_set.contains(folder) {
+            // Match by path first, then by logical folder name. The latter
+            // preserves profile state when an existing flat mod is moved into
+            // a category (foo -> external/foo).
+            let existing = by_rel
+                .get(rel_path)
+                .cloned()
+                .or_else(|| by_folder.get(folder).cloned());
+
+            let id = if let Some(existing) = existing {
+                if existing.rel_path != rel_path {
+                    set_mod_location(conn, existing.id, folder, rel_path)?;
+                    by_rel.remove(&existing.rel_path);
+                    log::info(format!(
+                        "    [~] Movido: {} -> {rel_path}",
+                        existing.rel_path
+                    ));
+                }
+                if let Some(name) = meta.as_ref().and_then(|m| m.name.clone()) {
+                    set_mod_name(conn, existing.id, &name)?;
+                }
+                existing.id
+            } else {
                 let display_name = meta
                     .as_ref()
                     .and_then(|m| m.name.clone())
                     .unwrap_or_else(|| folder.replace('_', " "));
+                let id = add_mod_to_all_profiles(conn, folder, rel_path, &display_name)?;
+                log::info(format!("    [+] Nuevo: {rel_path} -> '{display_name}'"));
+                new_count += 1;
+                id
+            };
 
-                match add_mod_to_all_profiles(conn, folder, &display_name) {
-                    Ok(_id) => {
-                        log::info(format!("    [+] Nuevo: {folder} -> '{display_name}'"));
-                        new_count += 1;
-                    }
-                    Err(e) => {
-                        log::warn(format!("    [!] Error al insertar: {folder}: {e}"));
-                    }
-                }
-            } else if let Some(m) = mods_by_folder.get(folder.as_str()) {
-                if let Some(name) = meta.as_ref().and_then(|m| m.name.clone()) {
-                    set_mod_name(conn, m.id, &name)?;
-                }
-            }
+            seen_ids.insert(id);
+            let identity = ModIdentity {
+                id,
+                folder_name: folder.to_string(),
+                rel_path: rel_path.to_string(),
+                name: meta
+                    .as_ref()
+                    .and_then(|m| m.name.clone())
+                    .or_else(|| by_rel.get(rel_path).map(|m| m.name.clone()))
+                    .or_else(|| by_folder.get(folder).map(|m| m.name.clone()))
+                    .unwrap_or_else(|| folder.replace('_', " ")),
+            };
+            by_rel.insert(rel_path.to_string(), identity.clone());
+            by_folder.insert(folder.to_string(), identity);
 
-            if let Some(m) = get_mod_by_folder(conn, folder)? {
-                if meta_error {
-                    // Keep the cache; pushing `None` also skips the dep sync.
-                    metas.push(None);
-                } else {
-                    let validated = validate_meta_id(conn, m.id, folder, &meta);
-                    update_mod_meta(conn, m.id, &validated)?;
-                    metas.push(Some(validated.unwrap_or_default()));
-                }
+            if meta_error {
+                // Keep the cache; pushing `None` also skips the dep sync.
+                metas.push(None);
             } else {
-                metas.push(meta);
+                let validated = validate_meta_id(conn, id, folder, &meta);
+                update_mod_meta(conn, id, &validated)?;
+                metas.push(Some(validated.unwrap_or_default()));
             }
         }
 
         // Phase 2: sync `[dependencies]` once every mod is registered, so a
         // reference to a mod discovered later in the same pass still resolves.
-        for (folder, meta) in disk_folders.iter().zip(metas.iter()) {
-            if let Some(m) = get_mod_by_folder(conn, folder)? {
+        for (loc, meta) in disk.iter().zip(metas.iter()) {
+            if let Some(m) = by_rel.get(&loc.rel_path) {
                 sync_mod_dependencies(conn, m.id, meta)?;
             }
         }
 
-        let disk_folders_set: HashSet<&String> = disk_folders.iter().collect();
-        for db_folder in &db_folders {
-            if !disk_folders_set.contains(db_folder) {
-                if let Some(m) = all_mods.iter().find(|m| &m.folder_name == db_folder) {
-                    let _ = disable_mod_all_profiles(conn, m.id);
-                    log::warn(format!(
-                        "    [!] Huérfano desactivado: '{}' (carpeta eliminada del disco)",
-                        db_folder
-                    ));
-                    orphan_count += 1;
-                }
+        // Orphans: only mods that were not matched on disk, so a moved mod
+        // (same id, new rel_path) is not disabled.
+        let disk_rel: HashSet<&str> = disk.iter().map(|m| m.rel_path.as_str()).collect();
+        for m in &all_mods {
+            if seen_ids.contains(&m.id) {
+                continue;
+            }
+            if !disk_rel.contains(m.rel_path.as_str()) {
+                let _ = disable_mod_all_profiles(conn, m.id);
+                log::warn(format!(
+                    "    [!] Huérfano desactivado: '{}' (carpeta eliminada del disco)",
+                    m.rel_path
+                ));
+                orphan_count += 1;
             }
         }
 
@@ -2361,7 +2471,7 @@ pub fn clean_orphans(conn: &Connection, mods_dir: &Path) -> anyhow::Result<usize
     let mut deleted = 0usize;
 
     for m in &all_mods {
-        let mod_path = mods_dir.join(&m.folder_name);
+        let mod_path = mods_dir.join(&m.rel_path);
         if !mod_path.exists() {
             conn.execute("DELETE FROM mods WHERE id = ?1", params![m.id])?;
             log::info(format!("    [-] Eliminado: '{}'", m.folder_name));
@@ -2476,8 +2586,8 @@ mod tests {
         let conn = mem_conn();
         run_migrations(&conn).unwrap();
 
-        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
-        add_mod_to_all_profiles(&conn, "m2", "M2").unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "m2", "m2", "M2").unwrap();
 
         let p1 = active_profile(&conn).unwrap();
         set_mod_enabled(&conn, p1.id, 1, true).unwrap();
@@ -2517,7 +2627,7 @@ mod tests {
         run_migrations(&conn).unwrap();
         create_profile(&conn, "Vanilla").unwrap();
 
-        add_mod_to_all_profiles(&conn, "newmod", "New Mod").unwrap();
+        add_mod_to_all_profiles(&conn, "newmod", "newmod", "New Mod").unwrap();
 
         for p in list_profiles(&conn).unwrap() {
             let state = profile_mod_state(&conn, p.id, 1).unwrap();
@@ -2664,6 +2774,170 @@ mod tests {
             get_mod_by_folder(&conn, "MyMod").unwrap().unwrap().name,
             "Renamed Mod"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_v15_backfills_rel_path_and_is_idempotent() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        // Simulate a v14 database: drop the new column/index and roll the
+        // version back, then insert a flat mod as the old code would.
+        conn.execute("DROP INDEX IF EXISTS idx_mods_rel_path", [])
+            .unwrap();
+        conn.execute("ALTER TABLE mods DROP COLUMN rel_path", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 14).unwrap();
+        conn.execute(
+            "INSERT INTO mods (folder_name, name) VALUES ('flat', 'Flat')",
+            [],
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+        let rel: String = conn
+            .query_row(
+                "SELECT rel_path FROM mods WHERE folder_name = 'flat'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rel, "flat");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // Idempotent: running again keeps the backfilled value.
+        run_migrations(&conn).unwrap();
+        let again: String = conn
+            .query_row(
+                "SELECT rel_path FROM mods WHERE folder_name = 'flat'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(again, "flat");
+    }
+
+    #[test]
+    fn discover_categories_and_ignore() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("gta-mo-disc-cat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("external/foo")).unwrap();
+        std::fs::create_dir_all(dir.join("own/bar")).unwrap();
+        std::fs::create_dir_all(dir.join("generated/cap")).unwrap();
+        std::fs::create_dir_all(dir.join("legacy")).unwrap();
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        std::fs::write(
+            dir.join(".samt.toml"),
+            r#"layout_version = 1
+categories = ["external", "own", "generated"]
+default_category = "external"
+generated_category = "generated"
+legacy_root = true
+ignore = ["tools"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("external/foo/mod.toml"), "name = \"Foo\"\n").unwrap();
+        std::fs::write(dir.join("own/bar/mod.toml"), "name = \"Bar\"\n").unwrap();
+        std::fs::write(dir.join("generated/cap/mod.toml"), "name = \"Cap\"\n").unwrap();
+        std::fs::write(dir.join("legacy/mod.toml"), "name = \"Legacy\"\n").unwrap();
+
+        let (new_count, orphan_count) = discover_mods(&conn, &dir).unwrap();
+        assert_eq!(new_count, 4);
+        assert_eq!(orphan_count, 0);
+
+        let foo = get_mod_by_folder(&conn, "foo").unwrap().unwrap();
+        assert_eq!(foo.rel_path, "external/foo");
+        assert_eq!(
+            get_mod_by_folder(&conn, "bar").unwrap().unwrap().rel_path,
+            "own/bar"
+        );
+        assert_eq!(
+            get_mod_by_folder(&conn, "cap").unwrap().unwrap().rel_path,
+            "generated/cap"
+        );
+        assert_eq!(
+            get_mod_by_folder(&conn, "legacy")
+                .unwrap()
+                .unwrap()
+                .rel_path,
+            "legacy"
+        );
+        assert!(get_mod_by_folder(&conn, "tools").unwrap().is_none());
+
+        // Duplicate basenames (foo in another category) fail closed before any
+        // DB change.
+        std::fs::create_dir_all(dir.join("own/foo")).unwrap();
+        let err = discover_mods(&conn, &dir).unwrap_err();
+        assert!(format!("{err:#}").contains("duplicados"), "{err:#}");
+        assert_eq!(
+            get_mod_by_folder(&conn, "foo").unwrap().unwrap().rel_path,
+            "external/foo"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_move_into_category_preserves_profile_state() {
+        let conn = mem_conn();
+        run_migrations(&conn).unwrap();
+
+        let dir = std::env::temp_dir().join(format!("gta-mo-disc-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("foo")).unwrap();
+        std::fs::write(dir.join("foo/mod.toml"), "name = \"Foo\"\n").unwrap();
+        discover_mods(&conn, &dir).unwrap();
+
+        let profile = active_profile(&conn).unwrap();
+        let m = get_mod_by_folder(&conn, "foo").unwrap().unwrap();
+        set_mod_enabled(&conn, profile.id, m.id, true).unwrap();
+        set_mod_order(&conn, profile.id, m.id, 42).unwrap();
+        set_profile_mod_option(&conn, profile.id, m.id, "variant", "4k").unwrap();
+        set_profile_mod_notes(&conn, profile.id, m.id, Some("nota")).unwrap();
+
+        std::fs::write(
+            dir.join(".samt.toml"),
+            "layout_version = 1\ncategories = [\"external\"]\ndefault_category = \"external\"\nlegacy_root = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("external")).unwrap();
+        std::fs::rename(dir.join("foo"), dir.join("external/foo")).unwrap();
+
+        let (new_count, orphan_count) = discover_mods(&conn, &dir).unwrap();
+        assert_eq!(new_count, 0, "mover no debe registrar otro mod");
+        assert_eq!(orphan_count, 0, "mover no debe desactivar el mod");
+
+        let moved = get_mod_by_folder(&conn, "foo").unwrap().unwrap();
+        assert_eq!(moved.id, m.id);
+        assert_eq!(moved.rel_path, "external/foo");
+        assert_eq!(
+            profile_mod_state(&conn, profile.id, m.id).unwrap(),
+            (true, 42)
+        );
+        assert_eq!(
+            profile_mod_options(&conn, profile.id, m.id)
+                .unwrap()
+                .get("variant")
+                .map(String::as_str),
+            Some("4k")
+        );
+        let notes: Option<String> = conn
+            .query_row(
+                "SELECT notes FROM profile_mods WHERE profile_id = ?1 AND mod_id = ?2",
+                params![profile.id, m.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(notes.as_deref(), Some("nota"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2867,9 +3141,9 @@ mod tests {
     fn set_profile_order_partial_pushes_unlisted_below() {
         let conn = mem_conn();
         run_migrations(&conn).unwrap();
-        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
-        add_mod_to_all_profiles(&conn, "m2", "M2").unwrap();
-        add_mod_to_all_profiles(&conn, "m3", "M3").unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "m2", "m2", "M2").unwrap();
+        add_mod_to_all_profiles(&conn, "m3", "m3", "M3").unwrap();
         let p = active_profile(&conn).unwrap();
         let id = |f: &str| get_mod_by_folder(&conn, f).unwrap().unwrap().id;
 
@@ -2890,8 +3164,8 @@ mod tests {
     fn dependency_issues_reports_disabled_required() {
         let conn = mem_conn();
         run_migrations(&conn).unwrap();
-        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
-        add_mod_to_all_profiles(&conn, "dep1", "Dep1").unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "dep1", "dep1", "Dep1").unwrap();
         let p = active_profile(&conn).unwrap();
         let m1 = get_mod_by_folder(&conn, "m1").unwrap().unwrap();
         let dep = get_mod_by_folder(&conn, "dep1").unwrap().unwrap();
@@ -2908,8 +3182,8 @@ mod tests {
     fn live_dependencies_reflect_mod_toml_without_discover() {
         let conn = mem_conn();
         run_migrations(&conn).unwrap();
-        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
-        add_mod_to_all_profiles(&conn, "dep1", "Dep1").unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "dep1", "dep1", "Dep1").unwrap();
         let m1 = get_mod_by_folder(&conn, "m1").unwrap().unwrap();
         let dep = get_mod_by_folder(&conn, "dep1").unwrap().unwrap();
 
@@ -2941,8 +3215,8 @@ mod tests {
         let conn = mem_conn();
         run_migrations(&conn).unwrap();
 
-        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
-        add_mod_to_all_profiles(&conn, "m2", "M2").unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "m2", "m2", "M2").unwrap();
         let gid = create_group(&conn, "Graphics").unwrap();
         let g = get_group_by_id(&conn, gid).unwrap().unwrap();
         assert_eq!(g.slug, "graphics");
@@ -2991,7 +3265,7 @@ mod tests {
     fn global_and_profile_membership_do_not_duplicate() {
         let conn = mem_conn();
         run_migrations(&conn).unwrap();
-        let m1 = add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
+        let m1 = add_mod_to_all_profiles(&conn, "m1", "m1", "M1").unwrap();
         let gid = create_group(&conn, "G").unwrap();
         let default = active_profile(&conn).unwrap();
 
@@ -3013,7 +3287,7 @@ mod tests {
     fn mod_enabled_in_profiles_lists_all_profiles() {
         let conn = mem_conn();
         run_migrations(&conn).unwrap();
-        add_mod_to_all_profiles(&conn, "m1", "M1").unwrap();
+        add_mod_to_all_profiles(&conn, "m1", "m1", "M1").unwrap();
         create_profile(&conn, "Second").unwrap();
 
         let default = active_profile(&conn).unwrap();
@@ -3095,7 +3369,7 @@ mod v6_tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         run_migrations(&conn).unwrap();
         let profile = active_profile(&conn).unwrap();
-        let mod_id = insert_mod(&conn, "m1", "M1").unwrap();
+        let mod_id = insert_mod(&conn, "m1", "m1", "M1").unwrap();
 
         assert!(profile_mod_options(&conn, profile.id, mod_id)
             .unwrap()

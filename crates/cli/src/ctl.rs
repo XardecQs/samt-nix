@@ -96,6 +96,8 @@ impl FamilyJson {
 struct ModJson {
     id: i64,
     folder: String,
+    rel_path: String,
+    origin: String,
     name: String,
     enabled: bool,
     order: i64,
@@ -194,8 +196,16 @@ pub fn run(
                 *json,
             )
         }
-        super::CtlCommand::Add { folder, name } => cmd_add(conn, folder, name.as_deref()),
-        super::CtlCommand::Init { folder, skeleton } => cmd_init(conn, folder, *skeleton),
+        super::CtlCommand::Add {
+            folder,
+            name,
+            category,
+        } => cmd_add(conn, folder, name.as_deref(), category.as_deref()),
+        super::CtlCommand::Init {
+            folder,
+            skeleton,
+            category,
+        } => cmd_init(conn, folder, *skeleton, category.as_deref()),
         super::CtlCommand::Remove { ident, yes } => cmd_remove(conn, ident, *yes),
         super::CtlCommand::Enable { ident } => {
             let profile = active()?;
@@ -268,6 +278,9 @@ pub fn run(
         },
         super::CtlCommand::Modloader { action } => match action {
             super::ModloaderAction::Show { json } => cmd_modloader_show(conn, profile_ident, *json),
+        },
+        super::CtlCommand::Mods { action } => match action {
+            super::ModsAction::Layout { json } => cmd_mods_layout(*json),
         },
         super::CtlCommand::Data { action } => cmd_data(conn, action, profile_ident),
         super::CtlCommand::Upper { action } => cmd_upper(conn, action, profile_ident),
@@ -501,11 +514,11 @@ fn display_meta(
     conn: &Connection,
     mods_dir: Option<&std::path::Path>,
     id: i64,
-    folder: &str,
+    rel_path: &str,
     db_name: &str,
 ) -> (String, db::ModMetaCache) {
     if let Some(mods_dir) = mods_dir {
-        match gta_mo_core::meta::read_mod_meta(mods_dir, folder) {
+        match gta_mo_core::meta::read_mod_meta(mods_dir, rel_path) {
             Ok(Some(meta)) => {
                 let name = meta.name.clone().unwrap_or_else(|| db_name.to_string());
                 return (name, db::meta_cache_from_meta(&meta));
@@ -513,7 +526,7 @@ fn display_meta(
             Ok(None) => {}
             Err(e) => log::warn(format!(
                 "{}: {e}",
-                mods_dir.join(folder).join("mod.toml").display()
+                mods_dir.join(rel_path).join("mod.toml").display()
             )),
         }
     }
@@ -528,6 +541,42 @@ fn mods_dir_from_config() -> Option<std::path::PathBuf> {
     gta_mo_core::config::load_config()
         .ok()
         .map(|cfg| gta_mo_core::config::RuntimePaths::from_config(&cfg).mods_dir)
+}
+
+/// Logical folder -> on-disk relative path for every registered mod.
+fn mod_paths(conn: &Connection) -> anyhow::Result<gta_mo_core::layout::ModPaths> {
+    let mut paths = gta_mo_core::layout::ModPaths::new();
+    for m in db::load_all_mods(conn)? {
+        paths.insert(&m.folder_name, &m.rel_path);
+    }
+    Ok(paths)
+}
+
+/// Resolves an explicit category (or the layout default) for a new mod.
+fn location_for(
+    layout: &gta_mo_core::layout::ModsLayout,
+    folder: &str,
+    category: Option<&str>,
+) -> anyhow::Result<gta_mo_core::layout::ModLocation> {
+    if !gta_mo_core::layout::valid_segment(folder) {
+        anyhow::bail!("Nombre de carpeta no válido: '{folder}'.");
+    }
+    if let Some(category) = category {
+        if layout.is_flat() {
+            anyhow::bail!(
+                "No hay .samt.toml en el directorio de mods; no se puede usar --category."
+            );
+        }
+        if !layout.categories.iter().any(|c| c == category) {
+            anyhow::bail!("Categoría desconocida: '{category}'.");
+        }
+        return Ok(gta_mo_core::layout::ModLocation {
+            rel_path: format!("{category}/{folder}"),
+            folder_name: folder.to_string(),
+            category: Some(category.to_string()),
+        });
+    }
+    layout.default_location(folder)
 }
 
 /// Scans `mods/` and refreshes metadata + manifest dependencies. Unlike
@@ -671,15 +720,42 @@ const MOD_TOML_TEMPLATE: &str = r#"# GTA Mod Organizer manifest
 /// recommended `content/` + `guides/` layout (see README).
 const MOD_DIR_SKELETON: [&str; 3] = ["content", "guides", "screenshots"];
 
-fn cmd_init(conn: &Connection, folder: &str, skeleton: bool) -> anyhow::Result<()> {
-    if !valid_folder_name(folder) {
-        anyhow::bail!("Nombre de carpeta no válido: '{folder}'.");
-    }
+fn cmd_init(
+    conn: &Connection,
+    folder: &str,
+    skeleton: bool,
+    category: Option<&str>,
+) -> anyhow::Result<()> {
     let cfg =
         gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
     let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+    let layout = gta_mo_core::layout::ModsLayout::load(&paths.mods_dir)?;
+    let requested = location_for(&layout, folder, category)?;
 
-    let mod_dir = paths.mods_dir.join(folder);
+    // An existing DB entry keeps its current location; `init` only fills in the
+    // manifest/skeleton. Moving is a separate explicit operation.
+    let existing = db::get_mod_by_folder(conn, folder)?;
+    let (loc, existing_id) = match existing {
+        Some(m) => {
+            if m.rel_path != requested.rel_path {
+                log::warn(format!(
+                    "'{folder}' ya está registrado en '{}'; se usa esa ubicación.",
+                    m.rel_path
+                ));
+            }
+            (
+                gta_mo_core::layout::ModLocation {
+                    rel_path: m.rel_path,
+                    folder_name: m.folder_name,
+                    category: None,
+                },
+                Some(m.id),
+            )
+        }
+        None => (requested, None),
+    };
+
+    let mod_dir = gta_mo_core::layout::mod_dir(&paths.mods_dir, &loc.rel_path);
     std::fs::create_dir_all(&mod_dir)?;
 
     let meta_path = mod_dir.join("mod.toml");
@@ -699,23 +775,23 @@ fn cmd_init(conn: &Connection, folder: &str, skeleton: bool) -> anyhow::Result<(
         ));
     }
 
-    let registered = match db::get_mod_by_folder(conn, folder)? {
-        Some(m) => Some(m.id),
+    let id = match existing_id {
+        Some(id) => id,
         None => {
             let display_name = folder.replace('_', " ");
-            let id = db::add_mod_to_all_profiles(conn, folder, &display_name)?;
+            let id =
+                db::add_mod_to_all_profiles(conn, &loc.folder_name, &loc.rel_path, &display_name)?;
             log::info(format!(
-                "Mod registrado: [{id}] '{folder}' -> '{display_name}' (desactivado)"
+                "Mod registrado: [{id}] '{}' -> '{display_name}' (desactivado)",
+                loc.rel_path
             ));
-            Some(id)
+            id
         }
     };
 
-    if let Some(id) = registered {
-        let meta = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, folder)?;
-        db::update_mod_meta(conn, id, &meta)?;
-        log::info(format!("Metadata actualizada para '{}'.", folder));
-    }
+    let meta = gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &loc.rel_path)?;
+    db::update_mod_meta(conn, id, &meta)?;
+    log::info(format!("Metadata actualizada para '{}'.", loc.rel_path));
     Ok(())
 }
 
@@ -1278,7 +1354,7 @@ fn mod_matches_filters(
         return true;
     }
 
-    let (name, meta) = display_meta(conn, mods_dir, m.id, &m.folder_name, &m.name);
+    let (name, meta) = display_meta(conn, mods_dir, m.id, &m.rel_path, &m.name);
 
     if let Some(tag) = &filters.tag {
         if !meta.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
@@ -1297,7 +1373,8 @@ fn mod_matches_filters(
             .as_deref()
             .map(|x| x.eq_ignore_ascii_case(id))
             .unwrap_or(false);
-        let matches_folder = m.folder_name.eq_ignore_ascii_case(id);
+        let matches_folder =
+            m.folder_name.eq_ignore_ascii_case(id) || m.rel_path.eq_ignore_ascii_case(id);
         if !matches_mod_id && !matches_folder {
             return false;
         }
@@ -1378,7 +1455,7 @@ fn cmd_list(
             .iter()
             .map(|m| {
                 let (name, meta) =
-                    display_meta(conn, mods_dir.as_deref(), m.id, &m.folder_name, &m.name);
+                    display_meta(conn, mods_dir.as_deref(), m.id, &m.rel_path, &m.name);
                 (m.clone(), name, meta)
             })
             .collect();
@@ -1410,8 +1487,7 @@ fn cmd_list(
     if json {
         let mut out = Vec::new();
         for m in &mods {
-            let (name, meta) =
-                display_meta(conn, mods_dir.as_deref(), m.id, &m.folder_name, &m.name);
+            let (name, meta) = display_meta(conn, mods_dir.as_deref(), m.id, &m.rel_path, &m.name);
             let deps = db::get_dependencies_of(conn, profile.id, m.id)?
                 .into_iter()
                 .map(|(d, req)| DepJson::from_entry(&d, req))
@@ -1424,6 +1500,8 @@ fn cmd_list(
             out.push(ModJson {
                 id: m.id,
                 folder: m.folder_name.clone(),
+                rel_path: m.rel_path.clone(),
+                origin: gta_mo_core::layout::origin_of(&m.rel_path).to_string(),
                 name,
                 enabled: m.enabled,
                 order: m.load_order,
@@ -1462,7 +1540,7 @@ fn cmd_list(
         return Ok(());
     }
 
-    let mut headers = vec!["ID", "ACTIVO", "ORDEN", "CARPETA", "NOMBRE"];
+    let mut headers = vec!["ID", "ACTIVO", "ORDEN", "CARPETA", "ORIGEN", "NOMBRE"];
     if verbose {
         headers.extend(["VERSIÓN", "AUTOR", "DEPS"]);
     }
@@ -1475,7 +1553,7 @@ fn cmd_list(
         } else {
             "NO".red().to_string()
         };
-        let (name, meta) = display_meta(conn, mods_dir.as_deref(), m.id, &m.folder_name, &m.name);
+        let (name, meta) = display_meta(conn, mods_dir.as_deref(), m.id, &m.rel_path, &m.name);
         let name = if m.hidden() {
             format!("{name} (oculto)")
         } else {
@@ -1486,6 +1564,7 @@ fn cmd_list(
             status,
             m.load_order.to_string(),
             m.folder_name.clone(),
+            gta_mo_core::layout::origin_of(&m.rel_path).to_string(),
             name,
         ];
         if verbose {
@@ -1512,21 +1591,61 @@ fn cmd_list(
     Ok(())
 }
 
-fn cmd_add(conn: &Connection, folder: &str, name: Option<&str>) -> anyhow::Result<()> {
-    if !valid_folder_name(folder) {
-        anyhow::bail!("El nombre de carpeta no puede contener ':', '|', '/' ni '\\', ni una coma, ni empezar por '.', ni ser '.', '..', ni llevar espacios alrededor.");
-    }
-    if db::mod_exists(conn, folder)? {
-        anyhow::bail!("El mod '{folder}' ya existe en la base de datos.");
+fn cmd_add(
+    conn: &Connection,
+    folder: &str,
+    name: Option<&str>,
+    category: Option<&str>,
+) -> anyhow::Result<()> {
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+    let layout = gta_mo_core::layout::ModsLayout::load(&paths.mods_dir)?;
+
+    let loc = if folder.contains('/') {
+        if !gta_mo_core::layout::valid_rel_path(folder) {
+            anyhow::bail!("Ruta de mod inválida: '{folder}'.");
+        }
+        if layout.is_flat() {
+            anyhow::bail!(
+                "No hay .samt.toml en el directorio de mods; no se puede registrar una ruta anidada."
+            );
+        }
+        if folder.split('/').count() != 2 {
+            anyhow::bail!("Usa una ruta <categoría>/<mod> (un solo nivel).");
+        }
+        let folder_name = folder
+            .rsplit('/')
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Ruta de mod inválida: '{folder}'."))?;
+        let category = folder.split('/').next().unwrap_or_default();
+        if !layout.categories.iter().any(|c| c == category) {
+            anyhow::bail!("Categoría desconocida en la ruta: '{category}'.");
+        }
+        gta_mo_core::layout::ModLocation {
+            rel_path: folder.to_string(),
+            folder_name: folder_name.to_string(),
+            category: Some(category.to_string()),
+        }
+    } else {
+        location_for(&layout, folder, category)?
+    };
+
+    if db::mod_exists(conn, &loc.folder_name)? {
+        anyhow::bail!(
+            "El mod '{}' ya existe en la base de datos.",
+            loc.folder_name
+        );
     }
 
     let display_name = name
         .map(|n| n.to_string())
-        .unwrap_or_else(|| folder.replace('_', " "));
+        .unwrap_or_else(|| loc.folder_name.replace('_', " "));
 
-    let id = db::add_mod_to_all_profiles(conn, folder, &display_name)?;
+    let id = db::add_mod_to_all_profiles(conn, &loc.folder_name, &loc.rel_path, &display_name)?;
     log::info(format!(
-        "Mod añadido: [{id}] '{folder}' -> '{display_name}' (desactivado en todos los perfiles)"
+        "Mod añadido: [{id}] '{}' -> '{display_name}' (desactivado en todos los perfiles)",
+        loc.rel_path
     ));
     Ok(())
 }
@@ -1594,14 +1713,14 @@ fn enforce_enable_constraints(
     mods_dir: &std::path::Path,
 ) -> anyhow::Result<Vec<String>> {
     let target_meta =
-        gta_mo_core::meta::read_mod_meta(mods_dir, &target.folder_name)?.unwrap_or_default();
+        gta_mo_core::meta::read_mod_meta(mods_dir, &target.rel_path)?.unwrap_or_default();
     let all = db::load_all_mods_for_profile(conn, profile.id)?;
 
     let mut by_id: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut folders: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in &all {
         folders.insert(m.folder_name.clone());
-        if let Some(id) = gta_mo_core::meta::read_mod_meta(mods_dir, &m.folder_name)
+        if let Some(id) = gta_mo_core::meta::read_mod_meta(mods_dir, &m.rel_path)
             .ok()
             .flatten()
             .and_then(|mm| mm.id)
@@ -1616,7 +1735,7 @@ fn enforce_enable_constraints(
     // Conflicts in both directions (target -> other, other -> target).
     for other in all.iter().filter(|m| m.enabled && m.id != target.id) {
         let other_meta =
-            gta_mo_core::meta::read_mod_meta(mods_dir, &other.folder_name)?.unwrap_or_default();
+            gta_mo_core::meta::read_mod_meta(mods_dir, &other.rel_path)?.unwrap_or_default();
         let hits = |meta: &gta_mo_core::meta::ModMeta, folder: &str| {
             meta.conflicts
                 .iter()
@@ -1657,7 +1776,7 @@ fn enforce_enable_constraints(
     if let Some(family) = &target_meta.family {
         for other in all.iter().filter(|m| m.enabled && m.id != target.id) {
             let om =
-                gta_mo_core::meta::read_mod_meta(mods_dir, &other.folder_name)?.unwrap_or_default();
+                gta_mo_core::meta::read_mod_meta(mods_dir, &other.rel_path)?.unwrap_or_default();
             if om
                 .family
                 .as_ref()
@@ -1834,9 +1953,9 @@ fn cmd_rename(conn: &Connection, ident: &str, new_name: &str, folder: bool) -> a
     let mut manifest_updated = false;
     if let Ok(cfg) = gta_mo_core::config::load_config() {
         let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
-        let manifest = paths.mods_dir.join(&m.folder_name).join("mod.toml");
+        let manifest = paths.mods_dir.join(&m.rel_path).join("mod.toml");
         if manifest.exists() {
-            gta_mo_core::meta::set_meta_name(&paths.mods_dir, &m.folder_name, new_name)?;
+            gta_mo_core::meta::set_meta_name(&paths.mods_dir, &m.rel_path, new_name)?;
             manifest_updated = true;
         }
     }
@@ -1846,8 +1965,7 @@ fn cmd_rename(conn: &Connection, ident: &str, new_name: &str, folder: bool) -> a
         if manifest_updated {
             if let Ok(cfg) = gta_mo_core::config::load_config() {
                 let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
-                let _ =
-                    gta_mo_core::meta::set_meta_name(&paths.mods_dir, &m.folder_name, &old_name);
+                let _ = gta_mo_core::meta::set_meta_name(&paths.mods_dir, &m.rel_path, &old_name);
             }
         }
         return Err(e);
@@ -1880,13 +1998,21 @@ fn cmd_rename_folder(
         gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
     let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
 
-    let old_dir = paths.mods_dir.join(&m.folder_name);
-    let new_dir = paths.mods_dir.join(new_folder);
+    let old_dir = paths.mods_dir.join(&m.rel_path);
+    let parent = m
+        .rel_path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.to_string());
+    let new_rel_path = match &parent {
+        Some(parent) => format!("{parent}/{new_folder}"),
+        None => new_folder.to_string(),
+    };
+    let new_dir = paths.mods_dir.join(&new_rel_path);
 
     if new_dir.exists() {
         anyhow::bail!(
             "Ya existe una carpeta '{}' en {}",
-            new_folder,
+            new_rel_path,
             paths.mods_dir.display()
         );
     }
@@ -1908,7 +2034,7 @@ fn cmd_rename_folder(
         false
     };
 
-    if let Err(e) = db::set_mod_folder(conn, m.id, new_folder) {
+    if let Err(e) = db::set_mod_location(conn, m.id, new_folder, &new_rel_path) {
         if renamed {
             let _ = std::fs::rename(&new_dir, &old_dir);
         }
@@ -1918,7 +2044,7 @@ fn cmd_rename_folder(
     if renamed {
         log::info(format!(
             "'{}': carpeta renombrada a '{}'.",
-            m.folder_name, new_folder
+            m.rel_path, new_rel_path
         ));
     } else {
         log::info(format!(
@@ -1943,13 +2069,13 @@ fn cmd_info(
     let deps = db::get_dependencies_of(conn, profile.id, id)?;
     let dependents = db::get_dependents_of(conn, profile.id, id)?;
     let mods_dir = mods_dir_from_config();
-    let (name, meta) = display_meta(conn, mods_dir.as_deref(), id, &m.folder_name, &m.name);
+    let (name, meta) = display_meta(conn, mods_dir.as_deref(), id, &m.rel_path, &m.name);
     let guides = match mods_dir.as_deref() {
-        Some(dir) => expand_guides(dir, &m.folder_name, meta.guides.clone()),
+        Some(dir) => expand_guides(dir, &m.rel_path, meta.guides.clone()),
         None => meta.guides.clone(),
     };
     let screenshots = match mods_dir.as_deref() {
-        Some(dir) => gta_mo_core::meta::mod_screenshots(dir, &m.folder_name),
+        Some(dir) => gta_mo_core::meta::mod_screenshots(dir, &m.rel_path),
         None => meta.screenshots.clone(),
     };
     let profiles = db::mod_enabled_in_profiles(conn, id)?;
@@ -1965,6 +2091,8 @@ fn cmd_info(
         struct InfoJson {
             id: i64,
             folder: String,
+            rel_path: String,
+            origin: String,
             name: String,
             enabled: bool,
             order: i64,
@@ -2075,7 +2203,7 @@ fn cmd_info(
         let family = FamilyJson::from_cache(&meta);
         let option_selected = db::profile_mod_options(conn, profile.id, id)?;
         let option_groups = match mods_dir.as_deref() {
-            Some(dir) => gta_mo_core::meta::mod_option_groups(dir, &m.folder_name),
+            Some(dir) => gta_mo_core::meta::mod_option_groups(dir, &m.rel_path),
             None => Vec::new(),
         };
         let options_json: Vec<InfoOptionJson> = option_groups
@@ -2097,7 +2225,9 @@ fn cmd_info(
             .collect();
         let out = InfoJson {
             id: m.id,
-            folder: m.folder_name,
+            folder: m.folder_name.clone(),
+            rel_path: m.rel_path.clone(),
+            origin: gta_mo_core::layout::origin_of(&m.rel_path).to_string(),
             name,
             enabled,
             order,
@@ -2471,7 +2601,7 @@ fn cmd_open(conn: &Connection, ident: &str, url: bool) -> anyhow::Result<()> {
 
     let target = if url {
         let meta =
-            gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder_name)?.unwrap_or_default();
+            gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.rel_path)?.unwrap_or_default();
         match meta.url {
             Some(u) => {
                 if !is_http_url(&u) {
@@ -2485,7 +2615,7 @@ fn cmd_open(conn: &Connection, ident: &str, url: bool) -> anyhow::Result<()> {
             None => anyhow::bail!("El mod '{}' no tiene URL en su mod.toml.", m.folder_name),
         }
     } else {
-        let dir = paths.mods_dir.join(&m.folder_name);
+        let dir = paths.mods_dir.join(&m.rel_path);
         if !dir.exists() {
             anyhow::bail!("La carpeta del mod no existe: {}", dir.display());
         }
@@ -2586,24 +2716,13 @@ fn dep_writeback(
         return Ok(());
     };
     let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
-    if !paths
-        .mods_dir
-        .join(&m.folder_name)
-        .join("mod.toml")
-        .exists()
-    {
+    if !paths.mods_dir.join(&m.rel_path).join("mod.toml").exists() {
         return Ok(());
     }
     let dep_ref = db::load_mod_meta(conn, d.id)?
         .mod_id
         .unwrap_or_else(|| d.folder_name.clone());
-    gta_mo_core::meta::set_mod_dependency(
-        &paths.mods_dir,
-        &m.folder_name,
-        &dep_ref,
-        optional,
-        add,
-    )?;
+    gta_mo_core::meta::set_mod_dependency(&paths.mods_dir, &m.rel_path, &dep_ref, optional, add)?;
     Ok(())
 }
 
@@ -2663,7 +2782,7 @@ fn cmd_tag_set(conn: &Connection, ident: &str, tags: &[String]) -> anyhow::Resul
     let m = resolve_mod(conn, ident)?;
     let mods_dir = mods_dir_or_bail()?;
     let tags = normalize_tags(tags)?;
-    gta_mo_core::meta::set_meta_tags(&mods_dir, &m.folder_name, &tags)?;
+    gta_mo_core::meta::set_meta_tags(&mods_dir, &m.rel_path, &tags)?;
     refresh_meta_cache(conn, &mods_dir, m.id, &m.folder_name)?;
     log::info(format!(
         "'{}': tags -> {}",
@@ -2677,7 +2796,7 @@ fn cmd_tag_add(conn: &Connection, ident: &str, tags: &[String]) -> anyhow::Resul
     let m = resolve_mod(conn, ident)?;
     let mods_dir = mods_dir_or_bail()?;
     let add = normalize_tags(tags)?;
-    let mut current = gta_mo_core::meta::read_mod_meta(&mods_dir, &m.folder_name)?
+    let mut current = gta_mo_core::meta::read_mod_meta(&mods_dir, &m.rel_path)?
         .and_then(|meta| meta.tags)
         .unwrap_or_default();
     for t in add {
@@ -2685,7 +2804,7 @@ fn cmd_tag_add(conn: &Connection, ident: &str, tags: &[String]) -> anyhow::Resul
             current.push(t);
         }
     }
-    gta_mo_core::meta::set_meta_tags(&mods_dir, &m.folder_name, &current)?;
+    gta_mo_core::meta::set_meta_tags(&mods_dir, &m.rel_path, &current)?;
     refresh_meta_cache(conn, &mods_dir, m.id, &m.folder_name)?;
     log::info(format!(
         "'{}': tags -> {}",
@@ -2699,14 +2818,14 @@ fn cmd_tag_remove(conn: &Connection, ident: &str, tags: &[String]) -> anyhow::Re
     let m = resolve_mod(conn, ident)?;
     let mods_dir = mods_dir_or_bail()?;
     let remove = normalize_tags(tags)?;
-    let current = gta_mo_core::meta::read_mod_meta(&mods_dir, &m.folder_name)?
+    let current = gta_mo_core::meta::read_mod_meta(&mods_dir, &m.rel_path)?
         .and_then(|meta| meta.tags)
         .unwrap_or_default();
     let kept: Vec<String> = current
         .into_iter()
         .filter(|t| !remove.contains(t))
         .collect();
-    gta_mo_core::meta::set_meta_tags(&mods_dir, &m.folder_name, &kept)?;
+    gta_mo_core::meta::set_meta_tags(&mods_dir, &m.rel_path, &kept)?;
     refresh_meta_cache(conn, &mods_dir, m.id, &m.folder_name)?;
     log::info(format!(
         "'{}': tags -> {}",
@@ -2798,6 +2917,88 @@ fn cmd_note(
 
 // ---------- Mod Loader priorities ----------
 
+fn cmd_mods_layout(json: bool) -> anyhow::Result<()> {
+    let cfg =
+        gta_mo_core::config::load_config().map_err(|e| anyhow::anyhow!("Error de config: {e}"))?;
+    let paths = gta_mo_core::config::RuntimePaths::from_config(&cfg);
+    let layout = gta_mo_core::layout::ModsLayout::load(&paths.mods_dir)?;
+    let scan = layout.scan(&paths.mods_dir)?;
+
+    if json {
+        #[derive(Serialize)]
+        struct ModsLayoutJson<'a> {
+            directory: String,
+            flat: bool,
+            categories: &'a [String],
+            default_category: &'a Option<String>,
+            generated_category: &'a Option<String>,
+            legacy_root: bool,
+            ignore: &'a [String],
+            mods: Vec<ModsLayoutModJson>,
+            warnings: &'a [String],
+        }
+        #[derive(Serialize)]
+        struct ModsLayoutModJson {
+            rel_path: String,
+            folder: String,
+            origin: String,
+        }
+        let mods = scan
+            .mods
+            .iter()
+            .map(|m| ModsLayoutModJson {
+                rel_path: m.rel_path.clone(),
+                folder: m.folder_name.clone(),
+                origin: m.origin().to_string(),
+            })
+            .collect();
+        let out = ModsLayoutJson {
+            directory: paths.mods_dir.display().to_string(),
+            flat: layout.is_flat(),
+            categories: &layout.categories,
+            default_category: &layout.default_category,
+            generated_category: &layout.generated_category,
+            legacy_root: layout.legacy_root,
+            ignore: &layout.ignore,
+            mods,
+            warnings: &scan.warnings,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!("Directorio: {}", paths.mods_dir.display());
+    println!(
+        "Layout: {}",
+        if layout.is_flat() {
+            "plano (sin .samt.toml)"
+        } else {
+            "categorías (.samt.toml)"
+        }
+    );
+    if !layout.categories.is_empty() {
+        println!("Categorías: {}", layout.categories.join(", "));
+    }
+    if let Some(default) = &layout.default_category {
+        println!("Categoría por defecto: {default}");
+    }
+    if let Some(generated) = &layout.generated_category {
+        println!("Categoría de generados: {generated}");
+    }
+    println!("legacy_root: {}", layout.legacy_root);
+    if !layout.ignore.is_empty() {
+        println!("Ignorados: {}", layout.ignore.join(", "));
+    }
+    println!("Mods ({}):", scan.mods.len());
+    for m in &scan.mods {
+        println!("  {} [{}]", m.rel_path, m.origin());
+    }
+    for warning in &scan.warnings {
+        log::warn(warning.clone());
+    }
+    Ok(())
+}
+
 fn cmd_modloader_show(
     conn: &Connection,
     profile_ident: Option<&str>,
@@ -2816,6 +3017,7 @@ fn cmd_modloader_show(
         &paths.mods_dir,
         &enabled,
         &options_by_folder(conn, profile.id)?,
+        &mod_paths(conn)?,
     );
     let ini = gta_mo_core::modloader::ini_path(&paths.profile_paths(&profile.slug).upper);
 
@@ -3054,6 +3256,7 @@ fn cmd_upper(
             let resolved = resolve_enabled_order(conn, &profile)?;
             let providers = gta_mo_core::conflicts::providers_map(
                 &paths.mods_dir,
+                &mod_paths(conn)?,
                 &resolved,
                 spec,
                 &options_by_folder(conn, profile.id)?,
@@ -3150,7 +3353,7 @@ fn cmd_upper(
             let mod_id = db::resolve_mod_ident(conn, mod_ident)?;
             let m = db::get_mod_by_id(conn, mod_id)?
                 .ok_or_else(|| anyhow::anyhow!("Mod no encontrado: {mod_ident}"))?;
-            let layer = gta_mo_core::upper::layer_root_for(&paths.mods_dir, &m.folder_name);
+            let layer = gta_mo_core::upper::layer_root_for(&paths.mods_dir, &m.rel_path);
             // Validate everything before moving anything.
             for rel in rels {
                 gta_mo_core::upper::resolve_entry(&upper(), rel)?;
@@ -3214,7 +3417,12 @@ fn cmd_upper(
                     "Nombre de mod inválido: '{name}' (sin separadores ni rutas absolutas)."
                 );
             }
-            let dest = paths.mods_dir.join(name);
+            let layout = gta_mo_core::layout::ModsLayout::load(&paths.mods_dir)?;
+            let loc = layout.generated_location(name)?;
+            let dest = gta_mo_core::layout::mod_dir(&paths.mods_dir, &loc.rel_path);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             let report =
                 gta_mo_core::upper::capture(&source, &dest, name, spec.user_data_dir, true)?;
             log::info(format!(
@@ -3227,9 +3435,9 @@ fn cmd_upper(
                     report.deleted_skipped
                 ));
             }
-            let (added, updated) = db::discover_mods(conn, &paths.mods_dir)?;
+            let (added, orphans) = db::discover_mods(conn, &paths.mods_dir)?;
             log::info(format!(
-                "Registrado en la base de datos (nuevos: {added}, actualizados: {updated})."
+                "Registrado en la base de datos (nuevos: {added}, huérfanos: {orphans})."
             ));
             Ok(())
         }
@@ -3248,6 +3456,8 @@ struct ExportProfile {
 #[derive(Serialize, Deserialize)]
 struct ExportMod {
     folder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rel_path: Option<String>,
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mod_id: Option<String>,
@@ -3287,6 +3497,7 @@ impl ExportMod {
     fn from_identity(m: &gta_mo_core::db::ModIdentity, cache: &db::ModMetaCache) -> Self {
         Self {
             folder: m.folder_name.clone(),
+            rel_path: Some(m.rel_path.clone()),
             name: m.name.clone(),
             mod_id: cache.mod_id.clone(),
             version: cache.version.clone(),
@@ -3540,7 +3751,8 @@ fn do_import(conn: &Connection, data: &ExportFile) -> anyhow::Result<()> {
 
     let mut mod_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for m in &data.mods {
-        let id = db::insert_mod(conn, &m.folder, &m.name)?;
+        let rel_path = m.rel_path.as_deref().unwrap_or(&m.folder);
+        let id = db::insert_mod(conn, &m.folder, rel_path, &m.name)?;
         let cache = m.to_cache();
         db::set_mod_meta_cache(conn, id, &cache)?;
         mod_ids.insert(m.folder.clone(), id);
@@ -3627,6 +3839,7 @@ fn cmd_conflicts(conn: &Connection, profile_ident: Option<&str>, json: bool) -> 
     let resolved = resolve_enabled_order(conn, &profile)?;
     let conflicts = gta_mo_core::conflicts::scan_conflicts(
         &paths.mods_dir,
+        &mod_paths(conn)?,
         &resolved,
         cfg.game_spec(),
         &options_by_folder(conn, profile.id)?,
@@ -3704,6 +3917,7 @@ fn cmd_which(conn: &Connection, profile_ident: Option<&str>, path: &str) -> anyh
 
     match gta_mo_core::conflicts::providers_for_path(
         &paths.mods_dir,
+        &mod_paths(conn)?,
         &resolved,
         path,
         cfg.game_spec(),
@@ -3752,7 +3966,7 @@ fn cmd_option(
             let m = db::get_mod_by_id(conn, id)?
                 .ok_or_else(|| anyhow::anyhow!("Mod no encontrado."))?;
             let groups = match &mods_dir {
-                Some(dir) => gta_mo_core::meta::mod_option_groups(dir, &m.folder_name),
+                Some(dir) => gta_mo_core::meta::mod_option_groups(dir, &m.rel_path),
                 None => Vec::new(),
             };
             let selected = db::profile_mod_options(conn, profile.id, id)?;
@@ -3842,7 +4056,7 @@ fn cmd_option(
             let m = db::get_mod_by_id(conn, id)?
                 .ok_or_else(|| anyhow::anyhow!("Mod no encontrado."))?;
             if let Some(dir) = &mods_dir {
-                let groups = gta_mo_core::meta::mod_option_groups(dir, &m.folder_name);
+                let groups = gta_mo_core::meta::mod_option_groups(dir, &m.rel_path);
                 if !groups.is_empty() {
                     match groups.iter().find(|g| &g.group == group) {
                         None => anyhow::bail!(
@@ -3892,13 +4106,13 @@ fn cmd_health(
     let mut folders: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
 
     for m in db::load_all_mods(conn)? {
-        let dir = paths.mods_dir.join(&m.folder_name);
+        let dir = paths.mods_dir.join(&m.rel_path);
         folders.insert(m.id, m.folder_name.clone());
         if !dir.is_dir() {
             errors.push(format!("{}: carpeta no existe en disco", m.folder_name));
             continue;
         }
-        match gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.folder_name) {
+        match gta_mo_core::meta::read_mod_meta(&paths.mods_dir, &m.rel_path) {
             Ok(Some(meta)) => {
                 if let Some(mount) = meta.mount {
                     for entry in mount {
@@ -3949,6 +4163,7 @@ fn cmd_health(
         .collect();
     for v in gta_mo_core::constraints::check(
         &paths.mods_dir,
+        &mod_paths(conn)?,
         &all_folders,
         &enabled_folders,
         &options_by_folder(conn, profile.id)?,
@@ -3959,6 +4174,7 @@ fn cmd_health(
         &paths.mods_dir,
         &enabled_folders,
         &options_by_folder(conn, profile.id)?,
+        &mod_paths(conn)?,
     );
 
     let mut lines: Vec<String> = Vec::new();
@@ -4039,6 +4255,14 @@ fn cmd_doctor(conn: &Connection, json: bool) -> anyhow::Result<()> {
         )
     })?;
 
+    let layout = gta_mo_core::layout::ModsLayout::load(&mods_dir)?;
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    match layout.scan(&mods_dir) {
+        Ok(scan) => warnings.extend(scan.warnings),
+        Err(e) => errors.push(format!("layout: {e}")),
+    }
+
     let mods = db::load_all_mods(conn)?;
     let by_folder: std::collections::HashSet<String> =
         mods.iter().map(|m| m.folder_name.clone()).collect();
@@ -4047,18 +4271,17 @@ fn cmd_doctor(conn: &Connection, json: bool) -> anyhow::Result<()> {
     // Cross-references to resolve after the id/folder sets are complete.
     let mut refs: Vec<(String, String, String)> = Vec::new();
 
-    let mut errors: Vec<String> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
     for m in &mods {
         let folder = m.folder_name.clone();
-        let dir = mods_dir.join(&folder);
+        let rel_path = m.rel_path.clone();
+        let dir = mods_dir.join(&rel_path);
         if !dir.is_dir() {
-            errors.push(format!("{folder}: carpeta no existe en disco"));
+            errors.push(format!("{rel_path}: carpeta no existe en disco"));
             continue;
         }
-        let meta = match gta_mo_core::meta::read_mod_meta(&mods_dir, &folder) {
+        let meta = match gta_mo_core::meta::read_mod_meta(&mods_dir, &rel_path) {
             Ok(Some(meta)) => meta,
             Ok(None) => continue,
             Err(e) => {

@@ -175,9 +175,9 @@ pub fn resolve_entry(upper: &Path, rel: &str) -> anyhow::Result<PathBuf> {
 
 /// The directory a mod contributes to the game: its first valid `mount` entry,
 /// or the mod folder itself when there is no manifest/mount.
-pub fn layer_root_for(mods_dir: &Path, folder: &str) -> PathBuf {
-    let base = mods_dir.join(folder);
-    if let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, folder) {
+pub fn layer_root_for(mods_dir: &Path, rel_path: &str) -> PathBuf {
+    let base = mods_dir.join(rel_path);
+    if let Ok(Some(meta)) = crate::meta::read_mod_meta(mods_dir, rel_path) {
         if let Some(mount) = meta.mount {
             if let Some(first) = mount.iter().find(|e| crate::meta::valid_mount_entry(e)) {
                 return base.join(first);

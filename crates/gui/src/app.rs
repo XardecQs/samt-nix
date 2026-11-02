@@ -691,7 +691,13 @@ impl GtaMoApp {
                 let tx = self.tx.clone();
                 let spec = self.backend.game_spec();
                 crate::backend::Backend::scan_conflicts_async(
-                    gen, mdir, resolved, spec, options, tx,
+                    gen,
+                    mdir,
+                    resolved,
+                    self.snapshot.mod_paths.clone(),
+                    spec,
+                    options,
+                    tx,
                 );
             }
             None => self.conflicts_pending = false,
@@ -741,6 +747,7 @@ impl GtaMoApp {
             spec.user_data_dir,
             mods_dir,
             resolved,
+            self.snapshot.mod_paths.clone(),
             spec,
             options,
             tx,
@@ -978,6 +985,7 @@ impl GtaMoApp {
         self.filters.search.is_empty()
             && self.filters.tag.is_none()
             && self.filters.group.is_none()
+            && self.filters.origin.is_none()
             && self.filters.status == StatusFilter::All
             && self.filters.sort == SortField::Order
             && self.filters.desc
@@ -1038,11 +1046,11 @@ impl GtaMoApp {
     fn load_cover(
         &mut self,
         ctx: &egui::Context,
-        folder: &str,
+        rel_path: &str,
         cover: &str,
     ) -> Option<egui::TextureHandle> {
-        let key = format!("{folder}/{cover}");
-        let path = self.backend.cover_path(folder, cover)?;
+        let key = format!("{rel_path}/{cover}");
+        let path = self.backend.cover_path(rel_path, cover)?;
         self.load_image(ctx, key, &path, ThumbSize::Small)
     }
 
@@ -1126,7 +1134,7 @@ impl GtaMoApp {
                 }
                 if show_cover {
                     if let Some(cover) = m.meta.cover.clone() {
-                        if let Some(tex) = self.load_cover(ui.ctx(), &m.folder, &cover) {
+                        if let Some(tex) = self.load_cover(ui.ctx(), &m.rel_path, &cover) {
                             ui.add(
                                 egui::Image::new(&tex)
                                     .fit_to_exact_size(egui::vec2(40.0, 40.0))
@@ -1156,6 +1164,7 @@ impl GtaMoApp {
                         .on_hover_text(&m.name);
 
                         let mut meta: Vec<String> = Vec::new();
+                        meta.push(crate::model::origin_label(&m.origin).to_string());
                         if let Some(v) = &m.meta.version {
                             meta.push(format!("v{v}"));
                         }
@@ -1940,6 +1949,7 @@ impl GtaMoApp {
     fn active_filter_count(&self) -> usize {
         self.filters.tag.is_some() as usize
             + self.filters.group.is_some() as usize
+            + self.filters.origin.is_some() as usize
             + (self.filters.status != StatusFilter::All) as usize
             + (self.filters.sort != SortField::Order) as usize
             + (!self.filters.search.trim().is_empty()) as usize
@@ -1990,6 +2000,35 @@ impl GtaMoApp {
                 }
             });
         self.filters.group = group;
+
+        let mut origin = self.filters.origin.clone();
+        egui::ComboBox::from_id_salt("origin_filter")
+            .selected_text(
+                origin
+                    .clone()
+                    .unwrap_or_else(|| "Todos los orígenes".into()),
+            )
+            .show_ui(ui, |ui| {
+                ui.set_min_width(180.0);
+                if ui
+                    .selectable_label(origin.is_none(), "Todos los orígenes")
+                    .clicked()
+                {
+                    origin = None;
+                }
+                for o in &self.snapshot.all_origins {
+                    if ui
+                        .selectable_label(
+                            origin.as_deref() == Some(o.as_str()),
+                            crate::model::origin_label(o),
+                        )
+                        .clicked()
+                    {
+                        origin = Some(o.clone());
+                    }
+                }
+            });
+        self.filters.origin = origin;
 
         let mut author = self.filters.author.clone();
         let mut authors: Vec<String> = Vec::new();
@@ -2873,7 +2912,7 @@ impl GtaMoApp {
     /// the lightbox.
     fn ui_detail_images(&mut self, ui: &mut egui::Ui, m: &crate::model::ModView) {
         if let Some(cover) = m.meta.cover.clone() {
-            if let Some(tex) = self.load_cover(ui.ctx(), &m.folder, &cover) {
+            if let Some(tex) = self.load_cover(ui.ctx(), &m.rel_path, &cover) {
                 let resp = ui
                     .add(
                         egui::Image::new(&tex)
@@ -2910,8 +2949,8 @@ impl GtaMoApp {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for (i, rel) in shots.iter().take(24).enumerate() {
-                            let key = format!("{}/{}", m.folder, rel);
-                            if let Some(path) = self.backend.cover_path(&m.folder, rel) {
+                            let key = format!("{}/{}", m.rel_path, rel);
+                            if let Some(path) = self.backend.cover_path(&m.rel_path, rel) {
                                 if let Some(tex) =
                                     self.load_image(ui.ctx(), key, &path, ThumbSize::Small)
                                 {
@@ -2947,17 +2986,17 @@ impl GtaMoApp {
     fn gallery_items(&self, m: &crate::model::ModView) -> Vec<crate::lightbox::GalleryItem> {
         let mut items = Vec::new();
         if let Some(cover) = &m.meta.cover {
-            if let Some(path) = self.backend.cover_path(&m.folder, cover) {
+            if let Some(path) = self.backend.cover_path(&m.rel_path, cover) {
                 items.push(crate::lightbox::GalleryItem {
-                    key: format!("{}/{}", m.folder, cover),
+                    key: format!("{}/{}", m.rel_path, cover),
                     path,
                     label: format!("Portada — {}", m.name),
                 });
             }
         }
         for rel in &m.screenshots {
-            if let Some(path) = self.backend.cover_path(&m.folder, rel) {
-                let key = format!("{}/{}", m.folder, rel);
+            if let Some(path) = self.backend.cover_path(&m.rel_path, rel) {
+                let key = format!("{}/{}", m.rel_path, rel);
                 items.push(crate::lightbox::GalleryItem {
                     key,
                     path,

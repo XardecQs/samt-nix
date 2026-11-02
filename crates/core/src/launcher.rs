@@ -510,6 +510,8 @@ struct Prepared {
     violations: Vec<crate::constraints::Violation>,
     /// Per-folder option selections for the enabled mods (folder -> {group: value}).
     options_by_folder: HashMap<String, HashMap<String, String>>,
+    /// Logical folder name -> path relative to the mods directory.
+    mod_paths: crate::layout::ModPaths,
     /// All known mods of the profile for the log: `(folder, enabled, hidden)`.
     mods_log: Vec<(String, bool, bool)>,
 }
@@ -730,13 +732,14 @@ impl LaunchEngine {
         mods_dir: &Path,
         resolved: &[String],
         options_by_folder: &HashMap<String, HashMap<String, String>>,
+        mod_paths: &crate::layout::ModPaths,
     ) -> Vec<PathBuf> {
         let empty = HashMap::new();
         resolved
             .iter()
             .flat_map(|f| {
                 let selected = options_by_folder.get(f).unwrap_or(&empty);
-                crate::meta::mod_layers_with_options(mods_dir, f, selected)
+                crate::meta::mod_layers_with_options(mods_dir, mod_paths.rel(f), selected)
             })
             .collect()
     }
@@ -746,8 +749,9 @@ impl LaunchEngine {
         resolved: &[String],
         base_game: &Path,
         options_by_folder: &HashMap<String, HashMap<String, String>>,
+        mod_paths: &crate::layout::ModPaths,
     ) -> String {
-        let mut layers = Self::mod_layer_dirs(mods_dir, resolved, options_by_folder);
+        let mut layers = Self::mod_layer_dirs(mods_dir, resolved, options_by_folder, mod_paths);
         layers.push(base_game.to_path_buf());
         layers
             .iter()
@@ -1653,12 +1657,14 @@ impl LaunchEngine {
             &boot.paths.mods_dir,
             &prepared.resolved,
             &prepared.options_by_folder,
+            &prepared.mod_paths,
         );
         let lowerdir = Self::build_lowerdir(
             &boot.paths.mods_dir,
             &prepared.resolved,
             &boot.paths.base_game,
             &prepared.options_by_folder,
+            &prepared.mod_paths,
         );
         timer.mark("lowerdir");
 
@@ -1776,6 +1782,7 @@ impl LaunchEngine {
             &boot.paths.mods_dir,
             &prepared.resolved,
             &prepared.options_by_folder,
+            &prepared.mod_paths,
         );
 
         // C: leave the tmpfs prefix ready for the next launch. Dropping the
@@ -1967,6 +1974,10 @@ impl LaunchEngine {
         let profile_id = profile.id;
 
         let all_mods = db::load_all_mods_for_profile(conn, profile_id)?;
+        let mut mod_paths = crate::layout::ModPaths::new();
+        for m in &all_mods {
+            mod_paths.insert(&m.folder_name, &m.rel_path);
+        }
         let mods_map = all_mods.into_iter().map(|m| (m.id, m)).collect();
         let deps = db::load_dependencies(conn)?;
         let enabled_ids = db::load_enabled_mod_ids_for_profile(conn, profile_id)?;
@@ -2027,6 +2038,7 @@ impl LaunchEngine {
         enabled_folders.sort();
         let violations = crate::constraints::check(
             &paths.mods_dir,
+            &mod_paths,
             &all_folders,
             &enabled_folders,
             &options_by_folder,
@@ -2040,8 +2052,12 @@ impl LaunchEngine {
         }
 
         // Mod Loader priorities for the enabled mods (applied before mounting).
-        let modloader_entries =
-            crate::modloader::entries_for(&paths.mods_dir, &enabled_folders, &options_by_folder);
+        let modloader_entries = crate::modloader::entries_for(
+            &paths.mods_dir,
+            &enabled_folders,
+            &options_by_folder,
+            &mod_paths,
+        );
         if !opts.dry_run && !modloader_entries.is_empty() {
             let ini = crate::modloader::ini_path(&ppaths.upper);
             if let Err(e) = crate::modloader::apply(&ini, &modloader_entries) {
@@ -2065,7 +2081,11 @@ impl LaunchEngine {
         let empty = HashMap::new();
         for folder in &resolved {
             let selected = options_by_folder.get(folder).unwrap_or(&empty);
-            let layers = crate::meta::mod_layers_with_options(&paths.mods_dir, folder, selected);
+            let layers = crate::meta::mod_layers_with_options(
+                &paths.mods_dir,
+                mod_paths.rel(folder),
+                selected,
+            );
             for layer in &layers {
                 if !layer.exists() {
                     anyhow::bail!(
@@ -2099,6 +2119,7 @@ impl LaunchEngine {
             modloader_entries,
             violations,
             options_by_folder,
+            mod_paths,
             mods_log,
         })
     }
@@ -2156,6 +2177,7 @@ impl LaunchEngine {
             &prepared.resolved,
             &boot.paths.base_game,
             &prepared.options_by_folder,
+            &prepared.mod_paths,
         );
         let mut ov = overlay::OverlayMount::mount(
             &lowerdir,
@@ -2242,7 +2264,12 @@ impl LaunchEngine {
         let mut capture_report = None;
         let mut registered = false;
         if let Some(name) = capture {
-            let dest = paths.mods_dir.join(name);
+            let layout = crate::layout::ModsLayout::load(&paths.mods_dir)?;
+            let loc = layout.generated_location(name)?;
+            let dest = crate::layout::mod_dir(&paths.mods_dir, &loc.rel_path);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             let report = upper::capture(
                 &info.upper,
                 &dest,
@@ -2370,9 +2397,10 @@ impl LaunchEngine {
             let empty = HashMap::new();
             for folder in resolved {
                 let selected = prepared.options_by_folder.get(folder).unwrap_or(&empty);
+                let rel_path = prepared.mod_paths.rel(folder);
                 let layers =
-                    crate::meta::mod_layers_with_options(&paths.mods_dir, folder, selected);
-                if layers.len() == 1 && layers[0] == paths.mods_dir.join(folder) {
+                    crate::meta::mod_layers_with_options(&paths.mods_dir, rel_path, selected);
+                if layers.len() == 1 && layers[0] == paths.mods_dir.join(rel_path) {
                     n += 1;
                     out.push_str(&format!("  {}. {}\n", n, layers[0].display()));
                 } else {
@@ -2731,12 +2759,40 @@ mod tests {
             &["M1".to_string(), "M2".to_string()],
             &dir.join("base"),
             &HashMap::new(),
+            &crate::layout::ModPaths::default(),
         );
         let layers: Vec<&str> = lower.split(':').collect();
         assert_eq!(layers[0], dir.join("M1/models").display().to_string());
         assert_eq!(layers[1], dir.join("M1/data").display().to_string());
         assert_eq!(layers[2], dir.join("M2").display().to_string());
         assert_eq!(layers[3], dir.join("base").display().to_string());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_lowerdir_uses_relative_paths() {
+        let dir = std::env::temp_dir().join(format!("gta-mo-lowerdir-rel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("external/M1/models")).unwrap();
+        std::fs::create_dir_all(dir.join("base")).unwrap();
+        std::fs::write(dir.join("external/M1/mod.toml"), "mount = [\"models\"]\n").unwrap();
+
+        let mut paths = crate::layout::ModPaths::new();
+        paths.insert("M1", "external/M1");
+        let lower = LaunchEngine::build_lowerdir(
+            &dir,
+            &["M1".to_string()],
+            &dir.join("base"),
+            &HashMap::new(),
+            &paths,
+        );
+        let layers: Vec<&str> = lower.split(':').collect();
+        assert_eq!(
+            layers[0],
+            dir.join("external/M1/models").display().to_string()
+        );
+        assert_eq!(layers[1], dir.join("base").display().to_string());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -3,6 +3,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS mods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     folder_name TEXT NOT NULL UNIQUE,
+    rel_path TEXT,
     name TEXT NOT NULL CHECK(length(name) > 0),
     mod_id TEXT,
     version TEXT,
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS mod_groups (
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mods_rel_path ON mods(rel_path);
 CREATE INDEX IF NOT EXISTS idx_mod_groups_mod_id ON mod_groups(mod_id);
 CREATE INDEX IF NOT EXISTS idx_mod_groups_profile_id ON mod_groups(profile_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mod_groups_global ON mod_groups(group_id, mod_id) WHERE profile_id IS NULL;
