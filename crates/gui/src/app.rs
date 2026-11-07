@@ -12,6 +12,7 @@ use crate::model::{filter_and_sort, Filters, Snapshot, SortField, StatusFilter};
 use crate::settings::{Density, GuiSettings};
 use crate::theme::{self, ThemePref};
 use crate::thumbs::{ThumbSize, ThumbState};
+use gta_mo_core::preload::PreloadMode;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -525,7 +526,7 @@ impl GtaMoApp {
     /// launch, so the next launch does not pay the cold read (C).
     fn prewarm(&mut self) {
         let slug = self.snapshot.active_slug.clone();
-        if slug.is_empty() {
+        if slug.is_empty() || !self.prewarm_needed() {
             return;
         }
         // Serialized with the other CLI jobs, but flagged so it does not disable
@@ -541,9 +542,38 @@ impl GtaMoApp {
         self.pump();
     }
 
+    /// Resolved preload mode: the GUI preference when set, otherwise
+    /// `config.toml`.
+    fn effective_preload_mode(&self) -> PreloadMode {
+        self.settings.preload.mode().unwrap_or_else(|| {
+            gta_mo_core::config::load_config()
+                .map(|cfg| cfg.preload_mode())
+                .unwrap_or(PreloadMode::Prefix)
+        })
+    }
+
+    /// Resolved `prefix_ram` flag (GUI preference wins over `config.toml`).
+    fn effective_prefix_ram(&self) -> bool {
+        self.settings.prefix_ram.unwrap_or_else(|| {
+            gta_mo_core::config::load_config()
+                .map(|cfg| cfg.prefix_ram())
+                .unwrap_or(true)
+        })
+    }
+
+    /// Whether the background prewarm has any work to do: page-cache warming
+    /// or preparing the tmpfs prefix.
+    fn prewarm_needed(&self) -> bool {
+        !self.effective_preload_mode().is_off() || self.effective_prefix_ram()
+    }
+
     /// Appends the RAM/optimization flags from preferences. `None` (inherit)
     /// passes nothing, so `config.toml` wins.
     fn push_optimize_args(&self, args: &mut Vec<String>) {
+        if let Some(mode) = self.settings.preload.mode() {
+            args.push("--preload".into());
+            args.push(mode.as_str().into());
+        }
         for (value, flag) in [
             (self.settings.prefix_ram, "--prefix-ram"),
             (self.settings.preload_proton, "--preload-proton"),

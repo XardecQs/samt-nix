@@ -3851,7 +3851,7 @@ fn options_by_folder(
         let empty = HashMap::new();
         let selected = by_id.get(&m.id).unwrap_or(&empty);
         let effective = match &mods_dir {
-            Some(dir) => gta_mo_core::meta::fill_option_defaults(dir, &m.folder_name, selected),
+            Some(dir) => gta_mo_core::meta::fill_option_defaults(dir, &m.rel_path, selected),
             None => selected.clone(),
         };
         if !effective.is_empty() {

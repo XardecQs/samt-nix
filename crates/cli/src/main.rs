@@ -170,6 +170,14 @@ struct LaunchArgs {
 struct PreloadArgs {
     #[arg(
         long,
+        value_name = "MODE",
+        value_parser = ["off", "prefix", "full"],
+        help = "Page-cache preloading mode: off, prefix or full (overrides the config)"
+    )]
+    preload: Option<String>,
+
+    #[arg(
+        long,
         help = "Preload everything (whole base game + every enabled mod), not just the startup files"
     )]
     full: bool,
@@ -905,7 +913,11 @@ fn cmd_preload(args: PreloadArgs, profile: Option<&str>) -> anyhow::Result<()> {
         profile: profile.map(String::from),
         deps_enable: false,
         deps_ignore: false,
-        preload: args.full.then_some(gta_mo_core::preload::PreloadMode::Full),
+        preload: args
+            .preload
+            .as_deref()
+            .map(|v| gta_mo_core::preload::PreloadMode::parse(Some(v)))
+            .or_else(|| args.full.then_some(gta_mo_core::preload::PreloadMode::Full)),
         preload_yes: args.yes,
         prefix_ram: args.optimize.prefix_ram(),
         prefix_ram_proton: args.optimize.prefix_ram_proton(),

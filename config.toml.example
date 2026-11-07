@@ -26,10 +26,13 @@ proton_path = "/home/user/.steam/root/compatibilitytools.d/GE-Proton11-1"
 # mods_dir = "/path/to/mods"    # defaults to game_root/mods (flat or .samt.toml categories)
 #
 # Page-cache preloading before launch (speeds up startup on slow disks):
-#   "off"    = do not preload
+#   "off"    = do not preload (no page-cache reads before the launch)
 #   "prefix" = warm the Wine prefix, the game exe and the mods' startup files (default)
 #   "full"   = also warm the whole base game and every enabled mod file (slow;
 #              warns and asks for confirmation on an interactive terminal)
+# The GUI has an equivalent selector in Preferencias; "Heredar" uses this value.
+# prefix_ram (below) is independent: it copies the prefix to tmpfs even with
+# preload = "off".
 # preload = "prefix"
 #
 # Print per-phase launch timings (config/db, plan, mount, preload, time to window).

@@ -22,6 +22,43 @@ impl Density {
     }
 }
 
+/// Page-cache preloading mode selected in the GUI. `Inherit` leaves
+/// `config.toml` in control; the rest force the same modes as the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PreloadPref {
+    #[default]
+    Inherit,
+    Off,
+    Prefix,
+    Full,
+}
+
+impl PreloadPref {
+    pub fn label(self) -> &'static str {
+        match self {
+            PreloadPref::Inherit => "Heredar de config.toml",
+            PreloadPref::Off => "Desactivada",
+            PreloadPref::Prefix => "Prefijo",
+            PreloadPref::Full => "Completa",
+        }
+    }
+
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, PreloadPref::Inherit)
+    }
+
+    /// The CLI/config mode this preference selects (`None` = inherit).
+    pub fn mode(self) -> Option<gta_mo_core::preload::PreloadMode> {
+        match self {
+            PreloadPref::Inherit => None,
+            PreloadPref::Off => Some(gta_mo_core::preload::PreloadMode::Off),
+            PreloadPref::Prefix => Some(gta_mo_core::preload::PreloadMode::Prefix),
+            PreloadPref::Full => Some(gta_mo_core::preload::PreloadMode::Full),
+        }
+    }
+}
+
 /// Force-directed layout parameters (advanced).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForcePrefs {
@@ -255,6 +292,10 @@ pub struct GuiSettings {
     pub show_covers: bool,
     #[serde(default = "default_true")]
     pub confirm_deletes: bool,
+    /// Page-cache preload mode for launch and the GUI prewarm. `Inherit` uses
+    /// `config.toml`.
+    #[serde(default, skip_serializing_if = "PreloadPref::is_inherit")]
+    pub preload: PreloadPref,
     /// Run the game against a tmpfs copy of the Wine prefix (faster startup on
     /// slow disks). `None` inherits from `config.toml` (no flag is passed);
     /// `Some(true/false)` forces `--prefix-ram`/`--no-prefix-ram`.
@@ -297,6 +338,7 @@ impl Default for GuiSettings {
             density: Density::default(),
             show_covers: true,
             confirm_deletes: true,
+            preload: PreloadPref::default(),
             prefix_ram: None,
             preload_proton: None,
             preload_steamrt: None,
@@ -434,6 +476,29 @@ mod tests {
         let text = toml::to_string(&GuiSettings::default()).unwrap();
         assert!(!text.contains("prefix_ram"));
         assert!(!text.contains("preload_proton"));
+        assert!(!text.contains("preload ="));
+    }
+
+    #[test]
+    fn preload_preference_roundtrips_and_defaults_to_inherit() {
+        let s: GuiSettings = toml::from_str("ui_scale = 1.0\n").unwrap();
+        assert_eq!(s.preload, PreloadPref::Inherit);
+        for (text, want) in [
+            ("preload = \"off\"\n", PreloadPref::Off),
+            ("preload = \"prefix\"\n", PreloadPref::Prefix),
+            ("preload = \"full\"\n", PreloadPref::Full),
+        ] {
+            let parsed: GuiSettings = toml::from_str(text).unwrap();
+            assert_eq!(parsed.preload, want);
+        }
+        let s = GuiSettings {
+            preload: PreloadPref::Off,
+            ..Default::default()
+        };
+        let text = toml::to_string(&s).unwrap();
+        assert!(text.contains("preload = \"off\""));
+        let back: GuiSettings = toml::from_str(&text).unwrap();
+        assert_eq!(back.preload, PreloadPref::Off);
     }
 
     #[test]

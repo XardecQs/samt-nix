@@ -516,6 +516,16 @@ struct Prepared {
     mods_log: Vec<(String, bool, bool)>,
 }
 
+/// Fills the manifest `default`s for a mod's option groups. Disk lookups use
+/// `rel_path` (the layout may be `external/<mod>`, not just `<mod>`).
+fn effective_options_for(
+    mods_dir: &Path,
+    m: &db::ModEntry,
+    selected: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    crate::meta::fill_option_defaults(mods_dir, &m.rel_path, selected)
+}
+
 /// Result of [`LaunchEngine::mount`].
 pub struct MountOutcome {
     /// Set instead of `info` for `--dry-run` and for discover/clean shortcuts.
@@ -1340,28 +1350,31 @@ impl LaunchEngine {
 
         // A: warm the critical path synchronously, at normal I/O priority, so
         // Wine never hits the loader stall. The disk prefix is skipped when the
-        // game will read it from the tmpfs copy.
-        let critical_prefix = if prepared_prefix.using_tmpfs() {
-            None
-        } else {
-            Some(boot.paths.wine_prefix.as_path())
-        };
-        let crit = preload::warm_critical(
-            critical_prefix,
-            &boot.paths.base_game,
-            boot.cfg.game_exe(),
-            layer_dirs,
-        );
-        if crit.files > 0 {
-            Self::emit(
-                launch_log,
-                log,
-                &format!(
-                    "Precarga crítica: {} archivo(s), {:.0} MiB.",
-                    crit.files,
-                    crit.bytes as f64 / 1_048_576.0
-                ),
+        // game will read it from the tmpfs copy. `preload = "off"` disables all
+        // page-cache warming, including this critical pass.
+        if !mode.is_off() {
+            let critical_prefix = if prepared_prefix.using_tmpfs() {
+                None
+            } else {
+                Some(boot.paths.wine_prefix.as_path())
+            };
+            let crit = preload::warm_critical(
+                critical_prefix,
+                &boot.paths.base_game,
+                boot.cfg.game_exe(),
+                layer_dirs,
             );
+            if crit.files > 0 {
+                Self::emit(
+                    launch_log,
+                    log,
+                    &format!(
+                        "Precarga crítica: {} archivo(s), {:.0} MiB.",
+                        crit.files,
+                        crit.bytes as f64 / 1_048_576.0
+                    ),
+                );
+            }
         }
         timer.mark("preload");
 
@@ -1382,9 +1395,10 @@ impl LaunchEngine {
             );
         }
         let mut prefetchers: Vec<preload::Preload> = Vec::new();
-        if opts
-            .preload_proton
-            .unwrap_or_else(|| boot.cfg.preload_proton())
+        if !mode.is_off()
+            && opts
+                .preload_proton
+                .unwrap_or_else(|| boot.cfg.preload_proton())
         {
             let files = proton_path.join("files");
             let root = if files.is_dir() {
@@ -1397,9 +1411,10 @@ impl LaunchEngine {
                 prefetchers.push(p);
             }
         }
-        if opts
-            .preload_steamrt
-            .unwrap_or_else(|| boot.cfg.preload_steamrt())
+        if !mode.is_off()
+            && opts
+                .preload_steamrt
+                .unwrap_or_else(|| boot.cfg.preload_steamrt())
         {
             if let Some(root) = steamrt_dir() {
                 if let Some(p) = preload::Preload::spawn_tree(&root, preload_stop.clone()) {
@@ -1761,16 +1776,18 @@ impl LaunchEngine {
         let materialize = opts
             .prefix_ram_proton
             .unwrap_or_else(|| boot.cfg.prefix_ram_proton());
-        let do_proton = opts
-            .preload_proton
-            .unwrap_or_else(|| boot.cfg.preload_proton());
-        let do_steamrt = opts
-            .preload_steamrt
-            .unwrap_or_else(|| boot.cfg.preload_steamrt());
+        let do_proton = !mode.is_off()
+            && opts
+                .preload_proton
+                .unwrap_or_else(|| boot.cfg.preload_proton());
+        let do_steamrt = !mode.is_off()
+            && opts
+                .preload_steamrt
+                .unwrap_or_else(|| boot.cfg.preload_steamrt());
         // Warm umu's Python environment (only meaningful while preloading is on).
         let do_umu = !mode.is_off() && opts.preload_umu.unwrap_or_else(|| boot.cfg.preload_umu());
         if mode.is_off() && !prefix_ram && !do_proton && !do_steamrt && !do_umu {
-            emit("Precarga desactivada (preload = \"off\" y prefix_ram = false).");
+            emit("Precarga desactivada (modo off y prefix_ram = false).");
             if let Some(l) = &plog {
                 l.write("resultado: ok");
             }
@@ -2017,8 +2034,7 @@ impl LaunchEngine {
         let mut options_by_folder: HashMap<String, HashMap<String, String>> = HashMap::new();
         for m in graph.mods.values() {
             let selected = mod_options.get(&m.id).unwrap_or(&empty_selection);
-            let effective =
-                crate::meta::fill_option_defaults(&paths.mods_dir, &m.folder_name, selected);
+            let effective = effective_options_for(&paths.mods_dir, m, selected);
             if !effective.is_empty() {
                 options_by_folder.insert(m.folder_name.clone(), effective);
             }
@@ -2574,6 +2590,40 @@ mod tests {
             preload_steamrt: None,
             preload_umu: None,
         }
+    }
+
+    #[test]
+    fn categorized_mod_resolves_option_defaults_from_rel_path() {
+        let dir = std::env::temp_dir().join(format!("gta-mo-opts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("external/M/options/variant/hd")).unwrap();
+        std::fs::write(
+            dir.join("external/M/mod.toml"),
+            "mount = [\"content\"]\n[[options]]\ngroup = \"variant\"\ndefault = \"hd\"\nchoices = [\"hd\"]\n",
+        )
+        .unwrap();
+        let m = crate::db::ModEntry {
+            id: 1,
+            folder_name: "M".into(),
+            rel_path: "external/M".into(),
+            name: "M".into(),
+            enabled: true,
+            load_order: 10,
+            hidden_global: false,
+            hidden_profile: None,
+            notes: None,
+        };
+        let effective = effective_options_for(&dir, &m, &HashMap::new());
+        assert_eq!(effective.get("variant").map(String::as_str), Some("hd"));
+        let layers = crate::meta::mod_layers_with_options(&dir, &m.rel_path, &effective);
+        assert_eq!(
+            layers,
+            vec![
+                dir.join("external/M/options/variant/hd"),
+                dir.join("external/M/content")
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

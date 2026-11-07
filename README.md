@@ -223,7 +223,11 @@ auto_discover = true
 > process appears. `preload = "full"` also reads the whole base game and every enabled
 > mod file (can be tens of GB); it prints a detailed warning and asks for
 > confirmation on an interactive terminal, and is better used ahead of time with
-> `gta-mo preload`. `preload = "off"` disables it.
+> `gta-mo preload`. `preload = "off"` disables all page-cache warming (including
+> the critical pass at launch and the Proton/steamrt/umu prefetches). The GUI has
+> an equivalent **Precarga antes de lanzar** selector in **Preferencias**
+> (`Heredar`, `Desactivada`, `Prefijo`, `Completa`). `prefix_ram` is independent:
+> it still prepares the tmpfs prefix even with `preload = "off"`.
 >
 > **Prefix in RAM (`prefix_ram`, default on)**: a long game session evicts the
 > Wine prefix from the page cache, which makes the *next* launch slow. To avoid
@@ -540,7 +544,7 @@ gta-mo ctl which models/player.dff         # who wins that file
 
 ```
 gta-mo launch [--dry-run] [--debug] [--discover] [--clean] [--profile <name>] [--no-auto-discover] [--preload <off|prefix|full>] [--preload-yes] [--prefix-ram|--no-prefix-ram]
-gta-mo preload [--full] [--yes]       # warm the page cache without launching
+gta-mo preload [--preload <off|prefix|full>] [--full] [--yes]  # warm the page cache without launching
 gta-mo steam [launch flags...]        # same flags, but re-execs inside a user/mount namespace (for Steam)
 gta-mo mount [--temp] [--dry-run] [--profile <name>]   # mount the overlay without launching the game
 gta-mo unmount [--capture <mod>] [--discard]           # stop the mount daemon (capture/discard a temp upper)
@@ -848,6 +852,10 @@ The GUI follows the system **light/dark** theme by default and can be forced in
 - **Accent color** (8 presets — blue, purple, magenta, red, amber, yellow,
   green, gray — plus a custom color picker), high-contrast mode,
   UI density, interface scale, "reduce motion" and whether to show covers.
+- A **Comportamiento** section holds **Precarga antes de lanzar**
+  (`Heredar`/`Desactivada`/`Prefijo`/`Completa`) and the independent
+  **Prefijo Wine en RAM (tmpfs)** tri-state, plus the advanced Proton/steamrt/umu
+  prefetch toggles.
 - A **Grafo** section configures the dependency graph: which edge kinds to show
   and "only enabled", edge width/arrow
   size and arrows on/off (kept at a constant screen size across zoom), node

@@ -1,6 +1,6 @@
 //! Preferences dialog (appearance, behavior and advanced info).
 
-use crate::settings::{Density, GraphSettings, GuiSettings};
+use crate::settings::{Density, GraphSettings, GuiSettings, PreloadPref};
 use crate::theme::{Accent, ThemePref};
 use eframe::egui;
 
@@ -198,6 +198,28 @@ fn behavior(ui: &mut egui::Ui, s: &mut GuiSettings) -> bool {
         "Copia el prefijo a /dev/shm durante la partida para acelerar el \
          arranque en discos lentos; el disco se sincroniza al salir.",
     );
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Precarga antes de lanzar").on_hover_text(
+            "Calienta la caché de página (prefijo, ejecutable y archivos de arranque) \
+                 antes de lanzar. «Desactivada» evita esa lectura; «Heredar» usa config.toml.",
+        );
+        egui::ComboBox::from_id_salt("prefs_preload")
+            .selected_text(s.preload.label())
+            .show_ui(ui, |ui| {
+                for mode in [
+                    PreloadPref::Inherit,
+                    PreloadPref::Off,
+                    PreloadPref::Prefix,
+                    PreloadPref::Full,
+                ] {
+                    changed |= ui
+                        .selectable_value(&mut s.preload, mode, mode.label())
+                        .changed();
+                }
+            });
+    });
 
     ui.add_space(4.0);
     egui::CollapsingHeader::new("Avanzado (solo discos lentos)")
