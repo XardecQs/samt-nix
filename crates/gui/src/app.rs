@@ -2128,6 +2128,59 @@ impl GtaMoApp {
         ui.checkbox(&mut self.filters.show_hidden, "Mostrar ocultos");
     }
 
+    fn ui_organize_button(&mut self, ui: &mut egui::Ui) {
+        let can = !(self.busy || self.playing || self.snapshot.mods.is_empty());
+        if ui
+            .add_enabled(
+                can,
+                egui::Button::new(format!("{} Organizar", crate::icons::SWAP_H)),
+            )
+            .on_hover_text(
+                "Reordena la prioridad: desactivados arriba A-Z y activados abajo A-Z, \
+                 dejando las dependencias y los mods con tag 'essential' al fondo",
+            )
+            .clicked()
+        {
+            self.auto_organize(ui.ctx());
+        }
+    }
+
+    /// Rewrites the whole profile priority: disabled mods on top (alphabetical),
+    /// then enabled ones (alphabetical, dependencies and `essential` mods at the
+    /// bottom). Persisted through `ctl reorder`, like the drag&drop reordering.
+    fn auto_organize(&mut self, ctx: &egui::Context) {
+        let seq = crate::model::auto_organize_order(&self.snapshot.mods, &self.snapshot.edges);
+        if seq.is_empty() {
+            return;
+        }
+
+        // Optimistic local update so the list does not snap back while the
+        // command runs (the next refresh confirms the persisted order).
+        let n = seq.len() as i64;
+        let mut order_of: HashMap<&str, i64> = HashMap::with_capacity(seq.len());
+        for (i, folder) in seq.iter().enumerate() {
+            order_of.insert(folder.as_str(), n - i as i64);
+        }
+        for m in &mut self.snapshot.mods {
+            if let Some(o) = order_of.get(m.folder.as_str()) {
+                m.order = *o;
+            }
+        }
+        self.filters.sort = SortField::Order;
+        self.filters.desc = true;
+
+        let mut args: Vec<String> = vec!["ctl".into(), "reorder".into()];
+        args.extend(seq);
+        args.push("--profile".into());
+        args.push(self.snapshot.active_slug.clone());
+        self.exec(args, false);
+        self.toasts.push(
+            ctx,
+            crate::toasts::ToastKind::Success,
+            "Orden de prioridad reorganizado",
+        );
+    }
+
     fn ui_new_mod_button(&mut self, ui: &mut egui::Ui) {
         if ui
             .add_enabled(
@@ -2172,6 +2225,7 @@ impl GtaMoApp {
                     ui.set_min_width(220.0);
                     self.ui_filter_controls(ui);
                 });
+                self.ui_organize_button(ui);
                 self.ui_new_mod_button(ui);
             });
         } else {
@@ -2186,6 +2240,7 @@ impl GtaMoApp {
                     self.focus_search = false;
                 }
                 self.ui_filter_controls(ui);
+                self.ui_organize_button(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.ui_new_mod_button(ui);
                 });

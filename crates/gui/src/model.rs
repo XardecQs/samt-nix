@@ -1,5 +1,6 @@
 use gta_mo_core::db::{ModDepStatus, ModMetaCache};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct ProfileView {
@@ -260,6 +261,102 @@ pub fn filter_and_sort(mods: &mut Vec<ModView>, filters: &Filters) {
     });
 }
 
+/// Whether a mod declares the `essential` tag (e.g. DXVK, Essential Pack).
+fn is_essential(m: &ModView) -> bool {
+    m.meta
+        .tags
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case("essential"))
+}
+
+/// Alphabetical key of a mod: visible name, then folder as a tie-breaker.
+fn alpha_key(m: &ModView) -> (String, String) {
+    (m.name.to_lowercase(), m.folder.to_lowercase())
+}
+
+/// Computes the automatic priority order of a profile (top first).
+///
+/// Disabled mods go on top, alphabetically. Enabled mods go below, also
+/// alphabetically, but a dependency is never placed above a mod that requires
+/// it, and mods tagged `essential` sink to the bottom (they are the ones other
+/// mods depend on most often).
+pub fn auto_organize_order(mods: &[ModView], edges: &[GEdge]) -> Vec<String> {
+    let mut disabled: Vec<&ModView> = mods.iter().filter(|m| !m.enabled).collect();
+    disabled.sort_by_key(|m| alpha_key(m));
+    let mut order: Vec<String> = disabled.iter().map(|m| m.folder.clone()).collect();
+
+    let enabled: HashMap<i64, &ModView> = mods
+        .iter()
+        .filter(|m| m.enabled)
+        .map(|m| (m.id, m))
+        .collect();
+
+    // A dependency can only be emitted once every enabled mod that depends on
+    // it has already been emitted, so it always ends up below its dependents.
+    let mut dependents_of: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut pending: HashMap<i64, usize> = HashMap::new();
+    for e in edges {
+        if !matches!(e.kind, GEdgeKind::Required | GEdgeKind::Optional) || e.from == e.to {
+            continue;
+        }
+        if !enabled.contains_key(&e.from) || !enabled.contains_key(&e.to) {
+            continue;
+        }
+        dependents_of.entry(e.to).or_default().push(e.from);
+        *pending.entry(e.to).or_default() += 1;
+    }
+
+    // Min-heap: non-essential before essential, then alphabetical.
+    let key_of = |m: &ModView| {
+        (
+            is_essential(m),
+            m.name.to_lowercase(),
+            m.folder.to_lowercase(),
+            m.id,
+        )
+    };
+    let mut ready: BinaryHeap<Reverse<(bool, String, String, i64)>> = BinaryHeap::new();
+    for m in enabled.values() {
+        if pending.get(&m.id).copied().unwrap_or(0) == 0 {
+            ready.push(Reverse(key_of(m)));
+        }
+    }
+
+    let mut visited: HashSet<i64> = HashSet::new();
+    while let Some(Reverse((_, _, _, id))) = ready.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        if let Some(m) = enabled.get(&id) {
+            order.push(m.folder.clone());
+        }
+        if let Some(parents) = dependents_of.get(&id) {
+            for parent in parents {
+                let Some(count) = pending.get_mut(parent) else {
+                    continue;
+                };
+                *count = count.saturating_sub(1);
+                if *count == 0 && !visited.contains(parent) {
+                    if let Some(m) = enabled.get(parent) {
+                        ready.push(Reverse(key_of(m)));
+                    }
+                }
+            }
+        }
+    }
+
+    // A dependency cycle leaves nodes unreachable: append them alphabetically
+    // (essential last) so nothing is dropped.
+    let mut leftover: Vec<&ModView> = enabled
+        .values()
+        .copied()
+        .filter(|m| !visited.contains(&m.id))
+        .collect();
+    leftover.sort_by_key(|m| key_of(m));
+    order.extend(leftover.into_iter().map(|m| m.folder.clone()));
+    order
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +452,70 @@ mod tests {
         filter_and_sort(&mut mods, &f);
         assert_eq!(mods[0].name, "Alpha");
         assert_eq!(mods[1].name, "Beta");
+    }
+
+    fn plain_mod(id: i64, name: &str, folder: &str, enabled: bool) -> ModView {
+        let mut m = mod_view(id, name, folder, enabled, 0);
+        m.meta.tags.clear();
+        m
+    }
+
+    fn dep_edge(from: i64, to: i64) -> GEdge {
+        GEdge {
+            from,
+            to,
+            kind: GEdgeKind::Required,
+        }
+    }
+
+    #[test]
+    fn auto_organize_puts_disabled_first_then_enabled_alphabetically() {
+        let mods = vec![
+            plain_mod(1, "Zeta", "zeta", true),
+            plain_mod(2, "Beta", "beta", false),
+            plain_mod(3, "Alpha", "alpha", true),
+            plain_mod(4, "Gamma", "gamma", false),
+        ];
+        let order = auto_organize_order(&mods, &[]);
+        assert_eq!(order, vec!["beta", "gamma", "alpha", "zeta"]);
+    }
+
+    #[test]
+    fn auto_organize_places_dependencies_below_their_dependents() {
+        let mods = vec![
+            plain_mod(1, "Base", "base", true),
+            plain_mod(2, "Zeta", "zeta", true),
+            plain_mod(3, "Alpha", "alpha", true),
+        ];
+        // Alpha requires Base.
+        let edges = vec![dep_edge(3, 1)];
+        let order = auto_organize_order(&mods, &edges);
+        assert_eq!(order, vec!["alpha", "zeta", "base"]);
+    }
+
+    #[test]
+    fn auto_organize_sinks_essential_mods_to_the_bottom() {
+        let mut essential = plain_mod(2, "B Essential", "b", true);
+        essential.meta.tags = vec!["Essential".into()];
+        let mods = vec![
+            plain_mod(1, "A Mod", "a", true),
+            essential,
+            plain_mod(3, "C Mod", "c", true),
+        ];
+        let order = auto_organize_order(&mods, &[]);
+        assert_eq!(order, vec!["a", "c", "b"]);
+    }
+
+    #[test]
+    fn auto_organize_falls_back_on_dependency_cycles() {
+        let mods = vec![
+            plain_mod(1, "A", "a", true),
+            plain_mod(2, "B", "b", true),
+            plain_mod(3, "C", "c", true),
+        ];
+        // A <-> B cycle; C is unrelated.
+        let edges = vec![dep_edge(1, 2), dep_edge(2, 1)];
+        let order = auto_organize_order(&mods, &edges);
+        assert_eq!(order, vec!["c", "a", "b"]);
     }
 }

@@ -776,7 +776,10 @@ The binary finds `gta-mo` via `GTA_MO_BIN`, `PATH`, or the dev
 installed `gta-mo`.
 
 Features: mods list with search/tag/group/enabled-status filters and sorting,
-enable/disable and drag&drop load-order controls (with an insertion bar), a rich
+enable/disable and drag&drop load-order controls (with an insertion bar) plus an
+**Organizar** button that rewrites the priority automatically (disabled mods on
+top alphabetically, enabled ones below alphabetically while keeping dependencies
+and `essential`-tagged mods at the bottom), a rich
 detail panel (author, Mod ID, URL, tags, groups, mount, description, cover,
 screenshot gallery, components, a one-click **Crear mod.toml** for mods
 without a manifest, a **tag editor** and a **mod.toml editor** (a structured
